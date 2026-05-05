@@ -292,6 +292,7 @@ class MeshPrimitiveData:
     skin_root_node_index: int = -1
     material_name: str = ""
     base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+    transparent_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     emissive_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
     specular_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     sheen_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -300,6 +301,8 @@ class MeshPrimitiveData:
     metallic: float = 1.0
     roughness: float = 1.0
     alpha_cutoff: float = 0.5
+    transparent_amount: float = 1.0
+    opacity: float = 1.0
     normal_scale: float = 1.0
     occlusion_strength: float = 1.0
     specular_strength: float = 1.0
@@ -327,6 +330,7 @@ class MeshPrimitiveData:
     occlusion_texture: str = ""
     normal_texture: str = ""
     emissive_texture: str = ""
+    transparent_texture: str = ""
     specular_texture: str = ""
     specular_color_texture: str = ""
     clearcoat_texture: str = ""
@@ -741,6 +745,7 @@ def native_load_meshes(
                 skin_root_node_index=int(item.get("skin_root_node_index") if item.get("skin_root_node_index") is not None else -1),
                 material_name=item.get("material_name") or "",
                 base_color=tuple(item.get("base_color") or (1.0, 1.0, 1.0, 1.0)),
+                transparent_color=tuple(item.get("transparent_color") or (1.0, 1.0, 1.0, 1.0)),
                 emissive_color=tuple(item.get("emissive_color") or (0.0, 0.0, 0.0)),
                 specular_color=tuple(item.get("specular_color") or (1.0, 1.0, 1.0)),
                 sheen_color=tuple(item.get("sheen_color") or (0.0, 0.0, 0.0)),
@@ -749,6 +754,8 @@ def native_load_meshes(
                 metallic=float(item.get("metallic") if item.get("metallic") is not None else 1.0),
                 roughness=float(item.get("roughness") if item.get("roughness") is not None else 1.0),
                 alpha_cutoff=float(item.get("alpha_cutoff") if item.get("alpha_cutoff") is not None else 0.5),
+                transparent_amount=float(item.get("transparent_amount") if item.get("transparent_amount") is not None else 1.0),
+                opacity=float(item.get("opacity") if item.get("opacity") is not None else 1.0),
                 normal_scale=float(item.get("normal_scale") if item.get("normal_scale") is not None else 1.0),
                 occlusion_strength=float(item.get("occlusion_strength") if item.get("occlusion_strength") is not None else 1.0),
                 specular_strength=float(item.get("specular_strength") if item.get("specular_strength") is not None else 1.0),
@@ -792,6 +799,7 @@ def native_load_meshes(
                 occlusion_texture=item.get("occlusion_texture") or "",
                 normal_texture=item.get("normal_texture") or "",
                 emissive_texture=item.get("emissive_texture") or "",
+                transparent_texture=item.get("transparent_texture") or "",
                 specular_texture=item.get("specular_texture") or "",
                 specular_color_texture=item.get("specular_color_texture") or "",
                 clearcoat_texture=item.get("clearcoat_texture") or "",

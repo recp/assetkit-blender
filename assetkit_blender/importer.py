@@ -775,7 +775,7 @@ def _create_material(
     _set_input(bsdf, "Base Color", data.base_color)
     _set_input(bsdf, "Metallic", data.metallic)
     _set_input(bsdf, "Roughness", data.roughness)
-    _set_input(bsdf, "Alpha", data.base_color[3])
+    _set_input(bsdf, "Alpha", data.opacity)
     _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
     _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
     _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
@@ -823,6 +823,8 @@ def _create_material(
             colorspace="sRGB",
             tex_info=_texture_info(data, "emissive"),
         )
+    if data.transparent_texture:
+        _link_alpha_texture(mat, bsdf, data.transparent_texture, _texture_info(data, "transparent"))
     if data.specular_texture:
         _link_image_first(
             mat,
@@ -933,11 +935,15 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_diffuse_transmission": data.diffuse_transmission,
         "assetkit_diffuse_transmission_color": data.diffuse_transmission_color,
         "assetkit_dispersion": data.dispersion,
+        "assetkit_transparent_color": data.transparent_color,
+        "assetkit_transparent_amount": data.transparent_amount,
+        "assetkit_opacity": data.opacity,
         "assetkit_iridescence_texture": data.iridescence_texture,
         "assetkit_iridescence_thickness_texture": data.iridescence_thickness_texture,
         "assetkit_volume_thickness_texture": data.volume_thickness_texture,
         "assetkit_anisotropy_texture": data.anisotropy_texture,
         "assetkit_diffuse_transmission_texture": data.diffuse_transmission_texture,
+        "assetkit_transparent_texture": data.transparent_texture,
     }
     for key, value in props.items():
         if value == "" or value == 0.0:
@@ -1033,6 +1039,25 @@ def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveD
         links.new(tex.outputs["Color"], base_color)
     if data.alpha_mode and alpha and "Alpha" in tex.outputs:
         links.new(tex.outputs["Alpha"], alpha)
+
+
+def _link_alpha_texture(
+    mat: bpy.types.Material,
+    bsdf,
+    path: str,
+    tex_info: TextureRefData | None = None,
+) -> None:
+    tex = _image_texture_node(mat, path, "Non-Color", tex_info)
+    if not tex:
+        return
+
+    alpha = bsdf.inputs.get("Alpha")
+    if not alpha:
+        return
+
+    output = tex.outputs.get("Alpha") or tex.outputs.get("Color")
+    if output:
+        mat.node_tree.links.new(output, alpha)
 
 
 def _link_metallic_roughness_texture(

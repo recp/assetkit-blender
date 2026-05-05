@@ -84,6 +84,7 @@ typedef struct AkbPrimitive {
   char     occlusion_texture[1024];
   char     normal_texture[1024];
   char     emissive_texture[1024];
+  char     transparent_texture[1024];
   char     specular_texture[1024];
   char     specular_color_texture[1024];
   char     clearcoat_texture[1024];
@@ -111,6 +112,7 @@ typedef struct AkbPrimitive {
   float   *skin_weights;
   float   *skin_inverse_bind_matrices;
   float    base_color[4];
+  float    transparent_color[4];
   float    emissive_color[3];
   float    specular_color[3];
   float    sheen_color[3];
@@ -119,6 +121,8 @@ typedef struct AkbPrimitive {
   float    metallic;
   float    roughness;
   float    alpha_cutoff;
+  float    transparent_amount;
+  float    opacity;
   float    normal_scale;
   float    occlusion_strength;
   float    specular_strength;
@@ -755,6 +759,20 @@ akb_copy_texture_info(AkDoc *doc,
   }
 }
 
+static float
+akb_clampf(float value, float min_value, float max_value) {
+  if (value < min_value)
+    return min_value;
+  if (value > max_value)
+    return max_value;
+  return value;
+}
+
+static float
+akb_luminance3(const float color[3]) {
+  return color[0] * 0.2126f + color[1] * 0.7152f + color[2] * 0.0722f;
+}
+
 static void
 akb_extract_material(AkDoc *doc,
                      AkMeshPrimitive *prim,
@@ -769,6 +787,10 @@ akb_extract_material(AkDoc *doc,
   out->base_color[1] = 1.0f;
   out->base_color[2] = 1.0f;
   out->base_color[3] = 1.0f;
+  out->transparent_color[0] = 1.0f;
+  out->transparent_color[1] = 1.0f;
+  out->transparent_color[2] = 1.0f;
+  out->transparent_color[3] = 1.0f;
   out->emissive_color[0] = 0.0f;
   out->emissive_color[1] = 0.0f;
   out->emissive_color[2] = 0.0f;
@@ -787,6 +809,8 @@ akb_extract_material(AkDoc *doc,
   out->metallic = 1.0f;
   out->roughness = 1.0f;
   out->alpha_cutoff = 0.5f;
+  out->transparent_amount = 1.0f;
+  out->opacity = 1.0f;
   out->normal_scale = 1.0f;
   out->occlusion_strength = 1.0f;
   out->specular_strength = 1.0f;
@@ -966,20 +990,61 @@ akb_extract_material(AkDoc *doc,
   }
 
   if (cmn->transparent) {
+    float opacity;
+    float alpha;
+    float luminance;
+
     out->alpha_cutoff = cmn->transparent->cutoff;
+    out->transparent_amount = cmn->transparent->amount;
+
+    if (cmn->transparent->color) {
+      if (cmn->transparent->color->color) {
+        out->transparent_color[0] = cmn->transparent->color->color->vec[0];
+        out->transparent_color[1] = cmn->transparent->color->color->vec[1];
+        out->transparent_color[2] = cmn->transparent->color->color->vec[2];
+        out->transparent_color[3] = cmn->transparent->color->color->vec[3];
+      }
+      AKB_COPY_TEX("transparent", cmn->transparent->color->texture, out->transparent_texture);
+    }
+
+    alpha = out->transparent_color[3];
+    luminance = akb_luminance3(out->transparent_color);
+    opacity = out->base_color[3];
+
     switch (cmn->transparent->opaque) {
       case AK_OPAQUE_BLEND:
+        opacity = out->base_color[3] * out->transparent_amount;
         out->alpha_mode = 1;
         break;
       case AK_OPAQUE_MASK:
+        opacity = out->base_color[3] * out->transparent_amount;
         out->alpha_mode = 2;
+        break;
+      case AK_OPAQUE_A_ONE:
+        opacity = alpha * out->transparent_amount;
+        out->alpha_mode = opacity < 0.999f || out->transparent_texture[0] ? 1 : 0;
+        break;
+      case AK_OPAQUE_A_ZERO:
+        opacity = 1.0f - alpha * out->transparent_amount;
+        out->alpha_mode = opacity < 0.999f || out->transparent_texture[0] ? 1 : 0;
+        break;
+      case AK_OPAQUE_RGB_ONE:
+        opacity = luminance * out->transparent_amount;
+        out->alpha_mode = opacity < 0.999f || out->transparent_texture[0] ? 1 : 0;
+        break;
+      case AK_OPAQUE_RGB_ZERO:
+        opacity = 1.0f - luminance * out->transparent_amount;
+        out->alpha_mode = opacity < 0.999f || out->transparent_texture[0] ? 1 : 0;
         break;
       default:
         out->alpha_mode = out->base_color[3] < 1.0f ? 1 : 0;
         break;
     }
+    out->opacity = akb_clampf(opacity, 0.0f, 1.0f);
+    out->base_color[3] = out->opacity;
   } else {
     out->alpha_mode = out->base_color[3] < 1.0f ? 1 : 0;
+    out->opacity = out->base_color[3];
   }
 
 #undef AKB_COPY_TEX
@@ -2953,6 +3018,11 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                           prim->base_color[1],
                                           prim->base_color[2],
                                           prim->base_color[3]));
+  AKB_SET_OBJ("transparent_color", Py_BuildValue("(ffff)",
+                                                 prim->transparent_color[0],
+                                                 prim->transparent_color[1],
+                                                 prim->transparent_color[2],
+                                                 prim->transparent_color[3]));
   AKB_SET_OBJ("emissive_color", Py_BuildValue("(fff)",
                                              prim->emissive_color[0],
                                              prim->emissive_color[1],
@@ -2976,6 +3046,8 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("metallic", PyFloat_FromDouble(prim->metallic));
   AKB_SET_OBJ("roughness", PyFloat_FromDouble(prim->roughness));
   AKB_SET_OBJ("alpha_cutoff", PyFloat_FromDouble(prim->alpha_cutoff));
+  AKB_SET_OBJ("transparent_amount", PyFloat_FromDouble(prim->transparent_amount));
+  AKB_SET_OBJ("opacity", PyFloat_FromDouble(prim->opacity));
   AKB_SET_OBJ("normal_scale", PyFloat_FromDouble(prim->normal_scale));
   AKB_SET_OBJ("occlusion_strength", PyFloat_FromDouble(prim->occlusion_strength));
   AKB_SET_OBJ("specular_strength", PyFloat_FromDouble(prim->specular_strength));
@@ -3042,6 +3114,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("occlusion_texture", akb_unicode_from_cstr(prim->occlusion_texture));
   AKB_SET_OBJ("normal_texture", akb_unicode_from_cstr(prim->normal_texture));
   AKB_SET_OBJ("emissive_texture", akb_unicode_from_cstr(prim->emissive_texture));
+  AKB_SET_OBJ("transparent_texture", akb_unicode_from_cstr(prim->transparent_texture));
   AKB_SET_OBJ("specular_texture", akb_unicode_from_cstr(prim->specular_texture));
   AKB_SET_OBJ("specular_color_texture", akb_unicode_from_cstr(prim->specular_color_texture));
   AKB_SET_OBJ("clearcoat_texture", akb_unicode_from_cstr(prim->clearcoat_texture));
