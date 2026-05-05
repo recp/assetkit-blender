@@ -3239,6 +3239,21 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
   return dict;
 }
 
+static PyThread_type_lock akb_load_lock;
+
+static int
+akb_load_lock_ensure(void) {
+  if (akb_load_lock)
+    return 1;
+
+  akb_load_lock = PyThread_allocate_lock();
+  if (akb_load_lock)
+    return 1;
+
+  PyErr_SetString(PyExc_RuntimeError, "AssetKit bridge could not create load lock");
+  return 0;
+}
+
 static PyObject *
 akb_load_meshes(PyObject *self, PyObject *args) {
   const char *filepath;
@@ -3265,6 +3280,8 @@ akb_load_meshes(PyObject *self, PyObject *args) {
 
   if (!akb_load_options_from_dict(&options, options_obj))
     return NULL;
+  if (!akb_load_lock_ensure())
+    return NULL;
 
   doc_owner = (AkbSharedDoc *)calloc(1, sizeof(*doc_owner));
   if (!doc_owner)
@@ -3272,6 +3289,7 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   doc_owner->refcount = 1;
 
   Py_BEGIN_ALLOW_THREADS
+  PyThread_acquire_lock(akb_load_lock, WAIT_LOCK);
   akb_options_apply(&options, &saved_options);
   result = ak_load(&doc, filepath, AK_FILE_TYPE_AUTO);
   doc_owner->doc = doc;
@@ -3280,6 +3298,7 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   else
     ok = 0;
   akb_options_restore(&saved_options);
+  PyThread_release_lock(akb_load_lock);
   Py_END_ALLOW_THREADS
 
   if (result != AK_OK || !doc) {

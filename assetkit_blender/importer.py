@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from array import array
+import threading
+import time
+import traceback
 
 import bpy
 from mathutils import Matrix, Vector
@@ -13,52 +16,232 @@ _ANIM_SCALE = 3
 _ANIM_MORPH_WEIGHTS = 4
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
+_PROGRESSIVE_BATCH_SIZE = 32
+_PROGRESSIVE_TIME_BUDGET = 0.025
+_ACTIVE_IMPORT_JOBS: list["_ProgressiveImportJob"] = []
 
 
 def import_assetkit_file(
     filepath: str,
     library_path: str = "",
     load_options: dict | None = None,
+    collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
-    objects: list[bpy.types.Object] = []
+    primitives, scene_nodes = _load_assetkit_scene(filepath, library_path, load_options)
+    state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection)
+    objects = [
+        _create_import_object(primitive, state, collection or bpy.context.collection)
+        for primitive in primitives
+    ]
 
+    _select_imported_objects(objects)
+    return objects
+
+
+def import_assetkit_file_progressive(
+    filepath: str,
+    library_path: str = "",
+    load_options: dict | None = None,
+    collection: bpy.types.Collection | None = None,
+    batch_size: int = _PROGRESSIVE_BATCH_SIZE,
+) -> "_ProgressiveImportJob":
+    job = _ProgressiveImportJob(
+        filepath,
+        library_path,
+        load_options,
+        collection or bpy.context.collection,
+        max(1, batch_size),
+    )
+    job.start()
+    return job
+
+
+def _load_assetkit_scene(
+    filepath: str,
+    library_path: str = "",
+    load_options: dict | None = None,
+) -> tuple[list[MeshPrimitiveData], list[SceneNodeData]]:
     loaded = native_load_meshes(filepath, load_options) if not library_path else None
     if loaded is None:
         kit = AssetKit(library_path or None)
         loaded = kit.load_meshes(filepath)
 
     if isinstance(loaded, AssetKitSceneData):
-        primitives = loaded.meshes
-        scene_nodes = loaded.nodes
-    else:
-        primitives = loaded
-        scene_nodes = []
+        return loaded.meshes, loaded.nodes
+    return loaded, []
 
-    coord_root = _create_coord_root(primitives)
-    node_objects = _create_scene_nodes(scene_nodes, coord_root)
-    node_data = {index: node for index, node in enumerate(scene_nodes)}
-    material_cache: dict[str, bpy.types.Material] = {}
-    for primitive in primitives:
-        node_parent = node_objects.get(primitive.node_index)
-        parent = node_parent or coord_root
-        use_node_parent = node_parent is not None
-        obj = _create_mesh_object(
-            primitive,
-            parent,
-            node_objects=node_objects,
-            node_data=node_data,
-            material_cache=material_cache,
-            apply_transform=not use_node_parent,
-            apply_animation=not use_node_parent,
-        )
-        objects.append(obj)
 
-    if objects:
-        for obj in objects:
-            obj.select_set(True)
-        bpy.context.view_layer.objects.active = objects[-1]
+def _begin_scene_build(
+    primitives: list[MeshPrimitiveData],
+    scene_nodes: list[SceneNodeData],
+    collection: bpy.types.Collection,
+) -> dict:
+    coord_root = _create_coord_root(primitives, collection)
+    node_objects = _create_scene_nodes(scene_nodes, coord_root, collection)
+    return {
+        "coord_root": coord_root,
+        "node_objects": node_objects,
+        "node_data": {index: node for index, node in enumerate(scene_nodes)},
+        "material_cache": {},
+    }
 
-    return objects
+
+def _create_import_object(
+    primitive: MeshPrimitiveData,
+    state: dict,
+    collection: bpy.types.Collection,
+) -> bpy.types.Object:
+    node_objects = state["node_objects"]
+    node_parent = node_objects.get(primitive.node_index)
+    parent = node_parent or state["coord_root"]
+    use_node_parent = node_parent is not None
+    return _create_mesh_object(
+        primitive,
+        parent,
+        node_objects=node_objects,
+        node_data=state["node_data"],
+        material_cache=state["material_cache"],
+        apply_transform=not use_node_parent,
+        apply_animation=not use_node_parent,
+        collection=collection,
+    )
+
+
+def _select_imported_objects(objects: list[bpy.types.Object]) -> None:
+    if not objects:
+        return
+
+    for obj in objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objects[-1]
+
+
+class _ProgressiveImportJob:
+    def __init__(
+        self,
+        filepath: str,
+        library_path: str,
+        load_options: dict | None,
+        collection: bpy.types.Collection,
+        batch_size: int,
+    ) -> None:
+        self.filepath = filepath
+        self.library_path = library_path
+        self.load_options = load_options
+        self.collection = collection
+        self.batch_size = batch_size
+        self.primitives: list[MeshPrimitiveData] = []
+        self.scene_nodes: list[SceneNodeData] = []
+        self.objects: list[bpy.types.Object] = []
+        self.state: dict | None = None
+        self.error: BaseException | None = None
+        self.error_traceback = ""
+        self.load_started_at = 0.0
+        self.build_started_at = 0.0
+        self.first_object_at = 0.0
+        self.index = 0
+        self.progress_active = False
+        self._thread = threading.Thread(target=self._load, name="AssetKit progressive import", daemon=True)
+
+    def start(self) -> None:
+        self.load_started_at = time.perf_counter()
+        _ACTIVE_IMPORT_JOBS.append(self)
+        self._thread.start()
+        bpy.app.timers.register(self._timer, first_interval=0.05)
+
+    def _load(self) -> None:
+        try:
+            self.primitives, self.scene_nodes = _load_assetkit_scene(
+                self.filepath,
+                self.library_path,
+                self.load_options,
+            )
+        except BaseException as exc:
+            self.error = exc
+            self.error_traceback = traceback.format_exc()
+
+    def _timer(self) -> float | None:
+        try:
+            return self._step()
+        except BaseException:
+            print(traceback.format_exc())
+            self._finish()
+            return None
+
+    def _step(self) -> float | None:
+        if self._thread.is_alive():
+            return 0.05
+
+        if self.error:
+            print(self.error_traceback or str(self.error))
+            self._finish()
+            return None
+
+        if self.state is None:
+            self.build_started_at = time.perf_counter()
+            self.state = _begin_scene_build(self.primitives, self.scene_nodes, self.collection)
+            self._progress_begin()
+            if not self.primitives:
+                self._finish()
+                return None
+
+        stop_at = min(len(self.primitives), self.index + self.batch_size)
+        slice_started_at = time.perf_counter()
+        while self.index < stop_at:
+            obj = _create_import_object(self.primitives[self.index], self.state, self.collection)
+            self.objects.append(obj)
+            self.index += 1
+            if self.first_object_at == 0.0:
+                self.first_object_at = time.perf_counter()
+            if time.perf_counter() - slice_started_at >= _PROGRESSIVE_TIME_BUDGET:
+                break
+
+        if self.index >= len(self.primitives):
+            _select_imported_objects(self.objects)
+            finished_at = time.perf_counter()
+            load_seconds = self.build_started_at - self.load_started_at
+            build_seconds = finished_at - self.build_started_at
+            first_object_seconds = self.first_object_at - self.load_started_at if self.first_object_at else 0.0
+            print(
+                "AssetKit progressive import finished: "
+                f"{len(self.objects)} mesh object(s), "
+                f"first_object={first_object_seconds:.3f}s, "
+                f"load={load_seconds:.3f}s, build={build_seconds:.3f}s, total={finished_at - self.load_started_at:.3f}s"
+            )
+            self._finish()
+            return None
+
+        self._progress_update()
+        return 0.001
+
+    def _finish(self) -> None:
+        self._progress_end()
+        if self in _ACTIVE_IMPORT_JOBS:
+            _ACTIVE_IMPORT_JOBS.remove(self)
+
+    def _progress_begin(self) -> None:
+        try:
+            bpy.context.window_manager.progress_begin(0, max(1, len(self.primitives)))
+            self.progress_active = True
+        except Exception:
+            self.progress_active = False
+
+    def _progress_update(self) -> None:
+        if not self.progress_active:
+            return
+        try:
+            bpy.context.window_manager.progress_update(self.index)
+        except Exception:
+            self.progress_active = False
+
+    def _progress_end(self) -> None:
+        if not self.progress_active:
+            return
+        try:
+            bpy.context.window_manager.progress_end()
+        except Exception:
+            pass
+        self.progress_active = False
 
 
 def _create_mesh_object(
@@ -70,6 +253,7 @@ def _create_mesh_object(
     material_cache: dict[str, bpy.types.Material] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    collection: bpy.types.Collection | None = None,
 ) -> bpy.types.Object:
     if data.vertices_f32 and data.indices_u32:
         return _create_mesh_object_bulk(
@@ -80,6 +264,7 @@ def _create_mesh_object(
             material_cache=material_cache,
             apply_transform=apply_transform,
             apply_animation=apply_animation,
+            collection=collection,
         )
 
     mesh = bpy.data.meshes.new(data.name)
@@ -109,7 +294,7 @@ def _create_mesh_object(
     if apply_animation:
         _apply_animation(obj, data)
 
-    bpy.context.collection.objects.link(obj)
+    (collection or bpy.context.collection).objects.link(obj)
     return obj
 
 
@@ -122,6 +307,7 @@ def _create_mesh_object_bulk(
     material_cache: dict[str, bpy.types.Material] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    collection: bpy.types.Collection | None = None,
 ) -> bpy.types.Object:
     mesh = bpy.data.meshes.new(data.name)
 
@@ -204,19 +390,20 @@ def _create_mesh_object_bulk(
     if apply_animation:
         _apply_animation(obj, data)
 
-    bpy.context.collection.objects.link(obj)
+    (collection or bpy.context.collection).objects.link(obj)
     return obj
 
 
 def _create_scene_nodes(
     nodes: list[SceneNodeData],
     coord_root: bpy.types.Object | None,
+    collection: bpy.types.Collection,
 ) -> dict[int, bpy.types.Object]:
     objects: dict[int, bpy.types.Object] = {}
 
     for index, node in enumerate(nodes):
         obj = _new_scene_node_object(node, index)
-        bpy.context.collection.objects.link(obj)
+        collection.objects.link(obj)
         objects[index] = obj
 
     for index, node in enumerate(nodes):
@@ -286,7 +473,10 @@ def _configure_light(light: bpy.types.Light, node: SceneNodeData) -> None:
             light.spot_blend = max(0.0, min(1.0, 1.0 - values[2] / values[3]))
 
 
-def _create_coord_root(primitives: list[MeshPrimitiveData]) -> bpy.types.Object | None:
+def _create_coord_root(
+    primitives: list[MeshPrimitiveData],
+    collection: bpy.types.Collection,
+) -> bpy.types.Object | None:
     for primitive in primitives:
         matrix = _matrix_from_buffer(primitive.coord_matrix_f32)
         if matrix is None:
@@ -296,7 +486,7 @@ def _create_coord_root(primitives: list[MeshPrimitiveData]) -> bpy.types.Object 
         root.empty_display_type = "ARROWS"
         root.empty_display_size = 0.5
         root.matrix_local = matrix
-        bpy.context.collection.objects.link(root)
+        collection.objects.link(root)
         return root
 
     return None

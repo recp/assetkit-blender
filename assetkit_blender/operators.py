@@ -4,7 +4,7 @@ import bpy
 from bpy_extras.io_utils import ImportHelper
 
 from .assetkit import AssetKitError
-from .importer import import_assetkit_file
+from .importer import import_assetkit_file, import_assetkit_file_progressive
 
 
 class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
@@ -60,14 +60,44 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         description="Convert triangle fan primitives to triangles",
         default=True,
     )
+    build_mode: bpy.props.EnumProperty(
+        name="Build Mode",
+        description="How Blender objects are created after AssetKit reads the file",
+        items=(
+            ("BLOCKING", "Blocking", "Build all Blender objects before the import operator returns"),
+            ("PROGRESSIVE", "Progressive", "Load AssetKit in the background and build Blender objects in batches"),
+        ),
+        default="BLOCKING",
+    )
+    progressive_batch_size: bpy.props.IntProperty(
+        name="Batch Size",
+        description="Maximum mesh objects to create per progressive import step",
+        default=32,
+        min=1,
+        max=512,
+    )
 
     def execute(self, context):
         prefs = context.preferences.addons[__package__].preferences
+        load_options = self._load_options()
+
+        if self.build_mode == "PROGRESSIVE":
+            import_assetkit_file_progressive(
+                self.filepath,
+                prefs.assetkit_library,
+                load_options,
+                collection=context.collection,
+                batch_size=self.progressive_batch_size,
+            )
+            self.report({"INFO"}, "AssetKit progressive import started")
+            return {"FINISHED"}
+
         try:
             objects = import_assetkit_file(
                 self.filepath,
                 prefs.assetkit_library,
-                self._load_options(),
+                load_options,
+                collection=context.collection,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
@@ -99,6 +129,12 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         mesh_box.prop(self, "generate_normals")
         mesh_box.prop(self, "convert_triangle_strip")
         mesh_box.prop(self, "convert_triangle_fan")
+
+        load_box = layout.box()
+        load_box.label(text="Loading")
+        load_box.prop(self, "build_mode")
+        if self.build_mode == "PROGRESSIVE":
+            load_box.prop(self, "progressive_batch_size")
 
     def _load_options(self) -> dict:
         return {
