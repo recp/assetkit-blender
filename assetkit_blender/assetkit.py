@@ -484,14 +484,17 @@ def _decode(value: bytes | None) -> str:
     return value.decode("utf-8", "replace")
 
 
-def native_load_meshes(filepath: str | os.PathLike[str]) -> list[MeshPrimitiveData] | None:
+def native_load_meshes(
+    filepath: str | os.PathLike[str],
+    options: dict | None = None,
+) -> list[MeshPrimitiveData] | None:
     try:
         from . import _assetkit_blender
     except ImportError:
         return None
 
     meshes = []
-    for item in _assetkit_blender.load_meshes(os.fspath(filepath)):
+    for item in _assetkit_blender.load_meshes(os.fspath(filepath), options or None):
         meshes.append(
             MeshPrimitiveData(
                 name=item.get("name") or "AssetKitMesh",

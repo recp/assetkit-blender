@@ -17,11 +17,58 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         default="*.gltf;*.glb;*.dae;*.obj;*.stl;*.ply",
         options={"HIDDEN"},
     )
+    coordinate_conversion: bpy.props.EnumProperty(
+        name="Coordinate Mode",
+        description="How AssetKit should adapt source coordinates for Blender",
+        items=(
+            ("TRANSFORM", "Root Transform", "Keep mesh data as authored and add a coordinate root"),
+            ("ALL", "Convert Data", "Convert mesh data and node transforms in AssetKit"),
+            ("RAW", "Raw", "Do not convert source coordinates"),
+        ),
+        default="TRANSFORM",
+    )
+    coordinate_system: bpy.props.EnumProperty(
+        name="Target Coordinates",
+        description="Target coordinate system for converted imports",
+        items=(
+            ("Z_UP", "Z Up", "Blender default right-handed Z-up coordinates"),
+            ("Y_UP", "Y Up", "Right-handed Y-up coordinates"),
+            ("X_UP", "X Up", "Right-handed X-up coordinates"),
+            ("Z_UP_LH", "Z Up LH", "Left-handed Z-up coordinates"),
+            ("Y_UP_LH", "Y Up LH", "Left-handed Y-up coordinates"),
+            ("X_UP_LH", "X Up LH", "Left-handed X-up coordinates"),
+        ),
+        default="Z_UP",
+    )
+    triangulate: bpy.props.BoolProperty(
+        name="Triangulate",
+        description="Convert polygonal mesh primitives to triangles",
+        default=True,
+    )
+    generate_normals: bpy.props.BoolProperty(
+        name="Generate Normals",
+        description="Generate normals when the source mesh does not provide them",
+        default=True,
+    )
+    convert_triangle_strip: bpy.props.BoolProperty(
+        name="Convert Triangle Strips",
+        description="Convert triangle strip primitives to triangles",
+        default=True,
+    )
+    convert_triangle_fan: bpy.props.BoolProperty(
+        name="Convert Triangle Fans",
+        description="Convert triangle fan primitives to triangles",
+        default=True,
+    )
 
     def execute(self, context):
         prefs = context.preferences.addons[__package__].preferences
         try:
-            objects = import_assetkit_file(self.filepath, prefs.assetkit_library)
+            objects = import_assetkit_file(
+                self.filepath,
+                prefs.assetkit_library,
+                self._load_options(),
+            )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -35,3 +82,30 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 
         self.report({"INFO"}, f"Imported {len(objects)} mesh object(s) through AssetKit")
         return {"FINISHED"}
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        coord_box = layout.box()
+        coord_box.label(text="Coordinates")
+        coord_box.prop(self, "coordinate_conversion")
+        coord_box.prop(self, "coordinate_system")
+
+        mesh_box = layout.box()
+        mesh_box.label(text="Mesh")
+        mesh_box.prop(self, "triangulate")
+        mesh_box.prop(self, "generate_normals")
+        mesh_box.prop(self, "convert_triangle_strip")
+        mesh_box.prop(self, "convert_triangle_fan")
+
+    def _load_options(self) -> dict:
+        return {
+            "coordinate_conversion": self.coordinate_conversion,
+            "coordinate_system": self.coordinate_system,
+            "triangulate": self.triangulate,
+            "generate_normals": self.generate_normals,
+            "convert_triangle_strip": self.convert_triangle_strip,
+            "convert_triangle_fan": self.convert_triangle_fan,
+        }

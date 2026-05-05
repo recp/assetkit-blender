@@ -14,10 +14,14 @@ _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 
 
-def import_assetkit_file(filepath: str, library_path: str = "") -> list[bpy.types.Object]:
+def import_assetkit_file(
+    filepath: str,
+    library_path: str = "",
+    load_options: dict | None = None,
+) -> list[bpy.types.Object]:
     objects: list[bpy.types.Object] = []
 
-    primitives = native_load_meshes(filepath) if not library_path else None
+    primitives = native_load_meshes(filepath, load_options) if not library_path else None
     if primitives is None:
         kit = AssetKit(library_path or None)
         primitives = kit.load_meshes(filepath)
