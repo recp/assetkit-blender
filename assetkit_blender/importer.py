@@ -7,6 +7,12 @@ from mathutils import Matrix
 
 from .assetkit import AssetKit, MeshPrimitiveData, native_load_meshes
 
+_ANIM_TRANSLATION = 1
+_ANIM_ROTATION_QUAT = 2
+_ANIM_SCALE = 3
+_INTERPOLATION_LINEAR = 1
+_INTERPOLATION_STEP = 6
+
 
 def import_assetkit_file(filepath: str, library_path: str = "") -> list[bpy.types.Object]:
     objects: list[bpy.types.Object] = []
@@ -46,6 +52,7 @@ def _create_mesh_object(data: MeshPrimitiveData) -> bpy.types.Object:
     material = _create_material(data)
     if material:
         mesh.materials.append(material)
+    _apply_animation(obj, data)
 
     bpy.context.collection.objects.link(obj)
     obj.select_set(True)
@@ -99,6 +106,7 @@ def _create_mesh_object_bulk(data: MeshPrimitiveData) -> bpy.types.Object:
     material = _create_material(data)
     if material:
         mesh.materials.append(material)
+    _apply_animation(obj, data)
 
     bpy.context.collection.objects.link(obj)
     obj.select_set(True)
@@ -134,6 +142,86 @@ def _buffer_view(buffer: object, fmt: str) -> memoryview | None:
     if view.format == fmt and view.ndim == 1:
         return view
     return view.cast(fmt)
+
+
+def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    channels = data.anim_channels or []
+    if not channels:
+        return
+
+    scene = bpy.context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    start_frame = float(scene.frame_start)
+
+    if any(int(channel.get("target") or 0) == _ANIM_ROTATION_QUAT for channel in channels):
+        obj.rotation_mode = "QUATERNION"
+
+    obj.animation_data_create()
+    action = bpy.data.actions.new(f"{obj.name}_AssetKit")
+    obj.animation_data.action = action
+    end_frame = scene.frame_end
+
+    for channel in channels:
+        target = int(channel.get("target") or 0)
+        path, width = _anim_target_path(target)
+        if not path:
+            continue
+
+        count = int(channel.get("count") or 0)
+        value_width = int(channel.get("value_width") or 0)
+        target_offset = int(channel.get("target_offset") or 0)
+        is_partial = bool(channel.get("is_partial"))
+        times = _buffer_view(channel.get("times_f32") or b"", "f")
+        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        if count <= 0 or value_width <= 0 or times is None or values is None:
+            continue
+
+        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        component_count = 1 if is_partial else min(width - target_offset, value_width)
+        for component in range(component_count):
+            target_index = target_offset + component
+            value_index = 0 if is_partial else component
+            fcurve = _ensure_fcurve(action, obj, path, target_index)
+            coords = array("f", [0.0]) * (count * 2)
+            for key_index in range(count):
+                coords[key_index * 2] = start_frame + times[key_index] * fps
+                coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
+
+            fcurve.keyframe_points.add(count)
+            fcurve.keyframe_points.foreach_set("co", coords)
+            for point in fcurve.keyframe_points:
+                point.interpolation = interpolation
+            fcurve.update()
+
+        end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
+
+    if end_frame > scene.frame_end:
+        scene.frame_end = end_frame
+
+
+def _ensure_fcurve(action: bpy.types.Action, obj: bpy.types.Object, data_path: str, index: int):
+    ensure = getattr(action, "fcurve_ensure_for_datablock", None)
+    if ensure:
+        return ensure(obj, data_path, index=index, group_name="Transform")
+    return action.fcurves.new(data_path=data_path, index=index, action_group="Transform")
+
+
+def _anim_target_path(target: int) -> tuple[str, int]:
+    if target == _ANIM_TRANSLATION:
+        return "location", 3
+    if target == _ANIM_ROTATION_QUAT:
+        return "rotation_quaternion", 4
+    if target == _ANIM_SCALE:
+        return "scale", 3
+    return "", 0
+
+
+def _blender_interpolation(interpolation: int) -> str:
+    if interpolation == _INTERPOLATION_STEP:
+        return "CONSTANT"
+    if interpolation == _INTERPOLATION_LINEAR:
+        return "LINEAR"
+    return "LINEAR"
 
 
 def _create_material(data: MeshPrimitiveData) -> bpy.types.Material | None:

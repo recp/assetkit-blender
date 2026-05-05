@@ -13,9 +13,13 @@
 #define AKB_INPUT_POSITION 16
 #define AKB_INPUT_TEXCOORD 19
 #define AKB_INPUT_UV 21
+#define AKB_ANIM_TRANSLATION 1
+#define AKB_ANIM_ROTATION_QUAT 2
+#define AKB_ANIM_SCALE 3
 
 typedef struct AkbPrimitive {
   struct AkbSharedDoc *doc_owner;
+  struct AkbAnimation *animation;
   char     name[512];
   char     object_name[512];
   char     material_name[512];
@@ -61,6 +65,27 @@ typedef struct AkbSharedDoc {
   size_t refcount;
 } AkbSharedDoc;
 
+typedef struct AkbAnimChannel {
+  float    *times;
+  float    *values;
+  uint32_t  count;
+  uint32_t  value_width;
+  uint32_t  target;
+  uint32_t  target_offset;
+  uint8_t   interpolation;
+  uint8_t   is_partial;
+  uint8_t   borrowed_times;
+  uint8_t   borrowed_values;
+} AkbAnimChannel;
+
+typedef struct AkbAnimation {
+  AkbSharedDoc  *doc_owner;
+  AkbAnimChannel *channels;
+  size_t         count;
+  size_t         capacity;
+  size_t         refcount;
+} AkbAnimation;
+
 static void
 akb_shared_doc_retain(AkbSharedDoc *owner) {
   if (owner)
@@ -84,6 +109,33 @@ akb_primitive_retain_doc(AkbPrimitive *prim, AkbSharedDoc *owner) {
     return;
   akb_shared_doc_retain(owner);
   prim->doc_owner = owner;
+}
+
+static AkbAnimation *
+akb_animation_retain(AkbAnimation *animation) {
+  if (animation)
+    animation->refcount++;
+  return animation;
+}
+
+static void
+akb_animation_release(AkbAnimation *animation) {
+  size_t i;
+
+  if (!animation)
+    return;
+
+  if (--animation->refcount == 0) {
+    for (i = 0; i < animation->count; i++) {
+      if (!animation->channels[i].borrowed_times)
+        free(animation->channels[i].times);
+      if (!animation->channels[i].borrowed_values)
+        free(animation->channels[i].values);
+    }
+    free(animation->channels);
+    akb_shared_doc_release(animation->doc_owner);
+    free(animation);
+  }
 }
 
 static const char *
@@ -126,6 +178,7 @@ akb_primitive_free(AkbPrimitive *prim) {
   free(prim->loop_meta);
   free(prim->normals);
   free(prim->uvs);
+  akb_animation_release(prim->animation);
   akb_shared_doc_release(prim->doc_owner);
   memset(prim, 0, sizeof(*prim));
 }
@@ -421,10 +474,267 @@ akb_loop_attribute_copy(AkMeshPrimitive *prim,
   return out;
 }
 
+static AkInput *
+akb_anim_sampler_input(AkAnimSampler *sampler, AkInputSemantic semantic) {
+  AkInput *input;
+
+  if (!sampler)
+    return NULL;
+
+  if (semantic == AK_INPUT_INPUT && sampler->inputInput)
+    return sampler->inputInput;
+  if (semantic == AK_INPUT_OUTPUT && sampler->outputInput)
+    return sampler->outputInput;
+
+  for (input = sampler->input; input; input = input->next) {
+    if (input->semantic == semantic)
+      return input;
+  }
+
+  return NULL;
+}
+
+static int
+akb_anim_target_kind(AkObject *target, uint32_t *width) {
+  if (!target)
+    return 0;
+
+  switch ((AkTypeId)target->type) {
+    case AKT_TRANSLATE:
+      *width = 3;
+      return AKB_ANIM_TRANSLATION;
+    case AKT_QUATERNION:
+      *width = 4;
+      return AKB_ANIM_ROTATION_QUAT;
+    case AKT_SCALE:
+      *width = 3;
+      return AKB_ANIM_SCALE;
+    default:
+      break;
+  }
+
+  return 0;
+}
+
+static int
+akb_animation_push(AkbAnimation *animation, AkbAnimChannel *channel) {
+  AkbAnimChannel *channels;
+  size_t capacity;
+
+  if (animation->count == animation->capacity) {
+    capacity = animation->capacity ? animation->capacity * 2 : 8;
+    channels = (AkbAnimChannel *)realloc(animation->channels,
+                                         capacity * sizeof(*channels));
+    if (!channels)
+      return 0;
+    animation->channels = channels;
+    animation->capacity = capacity;
+  }
+
+  animation->channels[animation->count++] = *channel;
+  memset(channel, 0, sizeof(*channel));
+  return 1;
+}
+
+static int
+akb_animation_add_channel(AkbAnimation *animation,
+                          AkChannel *channel,
+                          AkResolvedTarget *target) {
+  AkbAnimChannel out = {0};
+  AkAnimSampler *sampler;
+  AkInput *time_input;
+  AkInput *value_input;
+  uint32_t target_width;
+  uint32_t time_count;
+  uint32_t value_count;
+
+  sampler = ak_getObjectByUrl(&channel->source);
+  if (!sampler)
+    return 1;
+
+  time_input = akb_anim_sampler_input(sampler, AK_INPUT_INPUT);
+  value_input = akb_anim_sampler_input(sampler, AK_INPUT_OUTPUT);
+  if (!time_input || !time_input->accessor || !value_input || !value_input->accessor)
+    return 1;
+
+  out.target = (uint32_t)akb_anim_target_kind((AkObject *)target->target,
+                                             &target_width);
+  if (!out.target)
+    return 1;
+
+  out.value_width = value_input->accessor->componentCount
+                    ? value_input->accessor->componentCount
+                    : target_width;
+  if (target->isPartial && out.value_width > 1)
+    out.value_width = 1;
+
+  out.times = akb_accessor_float_borrow(time_input->accessor, 1, &time_count);
+  if (out.times) {
+    out.borrowed_times = 1;
+  } else {
+    out.times = akb_accessor_float_copy(time_input->accessor, 1, &time_count);
+    if (!out.times)
+      return 0;
+  }
+
+  out.values = akb_accessor_float_borrow(value_input->accessor,
+                                         out.value_width,
+                                         &value_count);
+  if (out.values) {
+    out.borrowed_values = 1;
+  } else {
+    out.values = akb_accessor_float_copy(value_input->accessor,
+                                         out.value_width,
+                                         &value_count);
+    if (!out.values) {
+      if (!out.borrowed_times)
+        free(out.times);
+      return 0;
+    }
+  }
+
+  if (value_count < time_count)
+    time_count = value_count;
+
+  out.count = time_count;
+  out.target_offset = target->isPartial ? target->off : 0;
+  out.is_partial = target->isPartial ? 1 : 0;
+  out.interpolation = (uint8_t)sampler->uniInterpolation;
+
+  if (!out.count) {
+    if (!out.borrowed_times)
+      free(out.times);
+    if (!out.borrowed_values)
+      free(out.values);
+    return 1;
+  }
+
+  if (!akb_animation_push(animation, &out)) {
+    if (!out.borrowed_times)
+      free(out.times);
+    if (!out.borrowed_values)
+      free(out.values);
+    return 0;
+  }
+
+  return 1;
+}
+
+static int
+akb_animation_collect_walk(AkbAnimation *animation,
+                           AkAnimation *source,
+                           AkContext *context,
+                           AkObject **targets,
+                           int target_count) {
+  AkAnimation *stack[256];
+  AkAnimation *next;
+  AkChannel *channel;
+  AkResolvedTarget resolved;
+  int top;
+  int i;
+
+  top = 0;
+  while (source) {
+    for (channel = source->channel; channel; channel = channel->next) {
+      resolved = ak_channelTarget(context, channel);
+      if (!resolved.target)
+        continue;
+
+      for (i = 0; i < target_count; i++) {
+        if (resolved.target == targets[i]) {
+          if (!akb_animation_add_channel(animation, channel, &resolved))
+            return 0;
+          break;
+        }
+      }
+    }
+
+    if (source->animation) {
+      next = (AkAnimation *)source->base.next;
+      if (next && top < 256)
+        stack[top++] = next;
+      source = source->animation;
+    } else if (source->base.next) {
+      source = (AkAnimation *)source->base.next;
+    } else if (top > 0) {
+      source = stack[--top];
+    } else {
+      source = NULL;
+    }
+  }
+
+  return 1;
+}
+
+static int
+akb_node_transform_targets(AkNode *node, AkObject **targets, int capacity) {
+  AkObject *object;
+  int count;
+
+  if (!node || !node->transform)
+    return 0;
+
+  count = 0;
+  for (object = node->transform->base; object && count < capacity; object = object->next)
+    targets[count++] = object;
+
+  for (object = node->transform->item; object && count < capacity; object = object->next)
+    targets[count++] = object;
+
+  return count;
+}
+
+static AkbAnimation *
+akb_animation_new(AkDoc *doc, AkbSharedDoc *doc_owner, AkNode *node, int *ok) {
+  AkbAnimation *animation;
+  AkLibrary *library;
+  AkObject *targets[64];
+  AkContext context;
+  int target_count;
+
+  *ok = 1;
+  target_count = akb_node_transform_targets(node, targets, 64);
+  if (!target_count)
+    return NULL;
+
+  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+  if (!animation) {
+    *ok = 0;
+    return NULL;
+  }
+
+  animation->refcount = 1;
+  animation->doc_owner = doc_owner;
+  akb_shared_doc_retain(doc_owner);
+
+  memset(&context, 0, sizeof(context));
+  context.doc = doc;
+
+  for (library = doc->lib.animations; library; library = library->next) {
+    if (!akb_animation_collect_walk(animation,
+                                    (AkAnimation *)library->chld,
+                                    &context,
+                                    targets,
+                                    target_count)) {
+      akb_animation_release(animation);
+      *ok = 0;
+      return NULL;
+    }
+  }
+
+  if (!animation->count) {
+    akb_animation_release(animation);
+    return NULL;
+  }
+
+  return animation;
+}
+
 static int
 akb_extract_primitive(AkbPrimitiveList *list,
                       AkDoc *doc,
                       AkbSharedDoc *doc_owner,
+                      AkbAnimation *animation,
                       AkNode *node,
                       AkGeometry *geom,
                       AkMesh *mesh,
@@ -445,6 +755,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
     return 1;
 
   akb_extract_material(doc, prim, &out);
+  out.animation = akb_animation_retain(animation);
 
   if (node) {
     snprintf(out.object_name, sizeof(out.object_name), "%s", akb_name(node->name, "AssetKitObject"));
@@ -551,7 +862,12 @@ akb_extract_primitive(AkbPrimitiveList *list,
 }
 
 static int
-akb_extract_mesh(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, AkNode *node, AkGeometry *geom) {
+akb_extract_mesh(AkbPrimitiveList *list,
+                 AkDoc *doc,
+                 AkbSharedDoc *doc_owner,
+                 AkbAnimation *animation,
+                 AkNode *node,
+                 AkGeometry *geom) {
   AkObject *gdata;
   AkMesh *mesh;
   AkMeshPrimitive *prim;
@@ -564,7 +880,7 @@ akb_extract_mesh(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, Ak
   for (prim = mesh->primitive; prim; prim = prim->next, prim_index++) {
     if (prim->type != AKB_PRIMITIVE_TRIANGLES)
       continue;
-    if (!akb_extract_primitive(list, doc, doc_owner, node, geom, mesh, prim, prim_index))
+    if (!akb_extract_primitive(list, doc, doc_owner, animation, node, geom, mesh, prim, prim_index))
       return 0;
   }
 
@@ -575,14 +891,23 @@ static int
 akb_extract_node(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, AkNode *node) {
   AkNode *child;
   AkGeometry *geom;
+  AkbAnimation *animation;
+  int ok;
 
   if (!node)
     return 1;
 
   if (node->geometry) {
-    geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
-    if (!akb_extract_mesh(list, doc, doc_owner, node, geom))
+    animation = akb_animation_new(doc, doc_owner, node, &ok);
+    if (!ok)
       return 0;
+
+    geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
+    if (!akb_extract_mesh(list, doc, doc_owner, animation, node, geom)) {
+      akb_animation_release(animation);
+      return 0;
+    }
+    akb_animation_release(animation);
   }
 
   for (child = node->chld; child; child = child->next) {
@@ -628,7 +953,7 @@ akb_extract_doc(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
 
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
-      if (!akb_extract_mesh(list, doc, doc_owner, NULL, geom))
+      if (!akb_extract_mesh(list, doc, doc_owner, NULL, NULL, geom))
         return 0;
     }
   }
@@ -653,6 +978,64 @@ akb_memoryview_or_empty(const void *data, size_t size) {
   if (!data || size == 0)
     return PyBytes_FromStringAndSize(NULL, 0);
   return PyMemoryView_FromMemory((char *)data, (Py_ssize_t)size, PyBUF_READ);
+}
+
+static PyObject *
+akb_anim_channels_to_py(AkbAnimation *animation) {
+  PyObject *list;
+  PyObject *dict;
+  PyObject *value;
+  AkbAnimChannel *channel;
+  size_t i;
+
+  if (!animation || !animation->count)
+    return PyList_New(0);
+
+  list = PyList_New((Py_ssize_t)animation->count);
+  if (!list)
+    return NULL;
+
+#define AKB_CH_SET_OBJ(KEY, OBJ) do {              \
+    value = (OBJ);                                 \
+    if (!value) { Py_DECREF(dict); Py_DECREF(list); return NULL; } \
+    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
+      Py_DECREF(value);                            \
+      Py_DECREF(dict);                             \
+      Py_DECREF(list);                             \
+      return NULL;                                 \
+    }                                              \
+    Py_DECREF(value);                              \
+  } while (0)
+
+  for (i = 0; i < animation->count; i++) {
+    channel = &animation->channels[i];
+    dict = PyDict_New();
+    if (!dict) {
+      Py_DECREF(list);
+      return NULL;
+    }
+
+    AKB_CH_SET_OBJ("target", PyLong_FromUnsignedLong(channel->target));
+    AKB_CH_SET_OBJ("target_offset", PyLong_FromUnsignedLong(channel->target_offset));
+    AKB_CH_SET_OBJ("value_width", PyLong_FromUnsignedLong(channel->value_width));
+    AKB_CH_SET_OBJ("count", PyLong_FromUnsignedLong(channel->count));
+    AKB_CH_SET_OBJ("interpolation", PyLong_FromUnsignedLong(channel->interpolation));
+    AKB_CH_SET_OBJ("is_partial", PyBool_FromLong(channel->is_partial));
+    AKB_CH_SET_OBJ("times_f32",
+                   akb_memoryview_or_empty(channel->times,
+                                           (size_t)channel->count * sizeof(float)));
+    AKB_CH_SET_OBJ("values_f32",
+                   akb_memoryview_or_empty(channel->values,
+                                           (size_t)channel->count
+                                           * channel->value_width
+                                           * sizeof(float)));
+
+    PyList_SET_ITEM(list, (Py_ssize_t)i, dict);
+  }
+
+#undef AKB_CH_SET_OBJ
+
+  return list;
 }
 
 static PyObject *
@@ -703,6 +1086,11 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
   AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
+  AKB_SET_OBJ("anim_count",
+              PyLong_FromUnsignedLong(prim->animation
+                                      ? (unsigned long)prim->animation->count
+                                      : 0));
+  AKB_SET_OBJ("anim_channels", akb_anim_channels_to_py(prim->animation));
   AKB_SET_OBJ("matrix_f32", akb_memoryview_or_empty(prim->matrix, prim->has_node ? 16 * sizeof(float) : 0));
   AKB_SET_OBJ("base_color_texture", PyUnicode_FromString(prim->base_color_texture));
   AKB_SET_OBJ("metallic_roughness_texture", PyUnicode_FromString(prim->metallic_roughness_texture));

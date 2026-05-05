@@ -226,9 +226,11 @@ class MeshPrimitiveData:
     loop_totals_i32: object = b""
     normals_f32: object = b""
     uvs_f32: object = b""
+    anim_channels: list[dict] | None = None
     object_name: str = ""
     matrix_f32: object = b""
     has_node: bool = False
+    anim_count: int = 0
     material_name: str = ""
     base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     emissive_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -506,9 +508,11 @@ def native_load_meshes(filepath: str | os.PathLike[str]) -> list[MeshPrimitiveDa
                 loop_totals_i32=item.get("loop_totals_i32") or b"",
                 normals_f32=item.get("normals_f32") or b"",
                 uvs_f32=item.get("uvs_f32") or b"",
+                anim_channels=item.get("anim_channels") or [],
                 object_name=item.get("object_name") or "",
                 matrix_f32=item.get("matrix_f32") or b"",
                 has_node=bool(item.get("has_node")),
+                anim_count=int(item.get("anim_count") or 0),
                 material_name=item.get("material_name") or "",
                 base_color=tuple(item.get("base_color") or (1.0, 1.0, 1.0, 1.0)),
                 emissive_color=tuple(item.get("emissive_color") or (0.0, 0.0, 0.0)),
