@@ -17,13 +17,23 @@
 #define AKB_ANIM_TRANSLATION 1
 #define AKB_ANIM_ROTATION_QUAT 2
 #define AKB_ANIM_SCALE 3
+#define AKB_ANIM_MORPH_WEIGHTS 4
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
 
+typedef struct AkbMorphTarget {
+  char     name[512];
+  float   *positions;
+  float    weight;
+  uint32_t vertex_count;
+} AkbMorphTarget;
+
 typedef struct AkbPrimitive {
   struct AkbSharedDoc *doc_owner;
   struct AkbAnimation *animation;
+  struct AkbAnimation *morph_animation;
+  AkbMorphTarget *morph_targets;
   char     name[512];
   char     object_name[512];
   char     material_name[512];
@@ -50,6 +60,7 @@ typedef struct AkbPrimitive {
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
+  uint32_t morph_target_count;
   uint8_t  has_normals;
   uint8_t  has_uvs;
   uint8_t  double_sided;
@@ -144,6 +155,12 @@ typedef struct AkbAnimation {
   size_t         capacity;
   size_t         refcount;
 } AkbAnimation;
+
+typedef struct AkbAnimBinding {
+  void    *target;
+  uint32_t kind;
+  uint32_t width;
+} AkbAnimBinding;
 
 static void
 akb_shared_doc_retain(AkbSharedDoc *owner) {
@@ -381,6 +398,8 @@ akb_find_input(AkMeshPrimitive *prim,
 
 static void
 akb_primitive_free(AkbPrimitive *prim) {
+  uint32_t i;
+
   if (!prim)
     return;
   if (!prim->borrowed_vertices)
@@ -390,7 +409,11 @@ akb_primitive_free(AkbPrimitive *prim) {
   free(prim->loop_meta);
   free(prim->normals);
   free(prim->uvs);
+  for (i = 0; i < prim->morph_target_count; i++)
+    free(prim->morph_targets[i].positions);
+  free(prim->morph_targets);
   akb_animation_release(prim->animation);
+  akb_animation_release(prim->morph_animation);
   akb_shared_doc_release(prim->doc_owner);
   memset(prim, 0, sizeof(*prim));
 }
@@ -741,6 +764,176 @@ akb_loop_attribute_copy(AkMeshPrimitive *prim,
   return out;
 }
 
+static AkMorphInspectMorphable *
+akb_morphable_at(AkMorphInspectTargetView *view, uint32_t index) {
+  AkMorphInspectMorphable *morphable;
+  uint32_t i;
+
+  morphable = view ? view->morphable : NULL;
+  for (i = 0; morphable && i < index; i++)
+    morphable = morphable->next;
+  return morphable;
+}
+
+static AkInput *
+akb_morph_position_input(AkMorphInspectMorphable *morphable) {
+  AkMorphInspectInput *input;
+
+  for (input = morphable ? morphable->input : NULL; input; input = input->next) {
+    if (input->input && input->input->semantic == AK_INPUT_POSITION)
+      return input->input;
+  }
+
+  return NULL;
+}
+
+static float
+akb_morph_initial_weight(AkInstanceMorph *morpher, AkMesh *mesh, uint32_t index) {
+  AkMorph *morph;
+
+  if (!morpher || !(morph = morpher->morph))
+    return 0.0f;
+  if (morpher->overrideWeights && index < morpher->overrideWeights->count)
+    return morpher->overrideWeights->items[index];
+  if (morph->defaultWeights && index < morph->defaultWeights->count)
+    return morph->defaultWeights->items[index];
+  if (mesh && mesh->weights && index < mesh->weights->count)
+    return mesh->weights->items[index];
+  return 0.0f;
+}
+
+static int
+akb_morph_is_relative(AkMorph *morph) {
+  return morph && morph->method == AK_MORPH_METHOD_RELATIVE;
+}
+
+static int
+akb_morph_copy_positions(AkbMorphTarget *target,
+                         const float *base_positions,
+                         uint32_t base_count,
+                         AkInput *position,
+                         int relative) {
+  float *source;
+  float *dest;
+  uint32_t source_count = 0;
+  uint32_t i;
+  uint8_t source_borrowed;
+
+  if (!target || !base_positions || !position || !position->accessor)
+    return 0;
+
+  source = akb_accessor_float_borrow(position->accessor, 3, &source_count);
+  if (source) {
+    source_borrowed = 1;
+  } else {
+    source = akb_accessor_float_copy(position->accessor, 3, &source_count);
+    source_borrowed = 0;
+  }
+
+  if (!source || source_count != base_count) {
+    if (!source_borrowed)
+      free(source);
+    return 0;
+  }
+
+  dest = (float *)malloc((size_t)base_count * 3 * sizeof(float));
+  if (!dest) {
+    if (!source_borrowed)
+      free(source);
+    return 0;
+  }
+
+  if (relative) {
+    for (i = 0; i < base_count * 3; i++)
+      dest[i] = base_positions[i] + source[i];
+  } else {
+    memcpy(dest, source, (size_t)base_count * 3 * sizeof(float));
+  }
+
+  if (!source_borrowed)
+    free(source);
+
+  target->positions = dest;
+  target->vertex_count = base_count;
+  return 1;
+}
+
+static int
+akb_extract_morph_targets(AkbPrimitive *out,
+                          AkGeometry *geom,
+                          AkMesh *mesh,
+                          AkMeshPrimitive *prim,
+                          uint32_t prim_index,
+                          AkInstanceMorph *morpher) {
+  AkInputSemantic desired[1] = {AK_INPUT_POSITION};
+  AkMorph *morph;
+  AkMorphInspectView *view;
+  AkMorphInspectTargetView *target_view;
+  AkMorphInspectMorphable *morphable;
+  AkInput *position;
+  AkbMorphTarget *targets;
+  uint32_t target_index;
+  uint32_t write_index;
+  const char *target_name;
+
+  (void)prim;
+
+  if (!out || !geom || !mesh || !morpher || !(morph = morpher->morph)
+      || !morph->targetCount || !out->vertices || !out->vertex_count)
+    return 1;
+
+  view = morph->inspectResult;
+  if (!view) {
+    if (ak_morphInspect(geom, morph, desired, 1, false, true) != AK_OK)
+      return 1;
+    view = morph->inspectResult;
+  }
+  if (!view || !view->targets)
+    return 1;
+
+  targets = (AkbMorphTarget *)calloc(morph->targetCount, sizeof(*targets));
+  if (!targets)
+    return 0;
+
+  write_index = 0;
+  target_index = 0;
+  for (target_view = view->targets;
+       target_view && target_index < morph->targetCount;
+       target_view = target_view->next, target_index++) {
+    morphable = akb_morphable_at(target_view, prim_index);
+    position = akb_morph_position_input(morphable);
+    if (!position)
+      continue;
+
+    if (!akb_morph_copy_positions(&targets[write_index],
+                                  out->vertices,
+                                  out->vertex_count,
+                                  position,
+                                  akb_morph_is_relative(morph)))
+      continue;
+
+    target_name = morph->targetNames && target_index < morph->targetCount
+                  ? morph->targetNames[target_index]
+                  : NULL;
+    if (target_name && target_name[0])
+      snprintf(targets[write_index].name, sizeof(targets[write_index].name), "%s", target_name);
+    else
+      snprintf(targets[write_index].name, sizeof(targets[write_index].name), "AssetKitMorph_%u", target_index);
+
+    targets[write_index].weight = akb_morph_initial_weight(morpher, mesh, target_index);
+    write_index++;
+  }
+
+  if (!write_index) {
+    free(targets);
+    return 1;
+  }
+
+  out->morph_targets = targets;
+  out->morph_target_count = write_index;
+  return 1;
+}
+
 static AkInput *
 akb_anim_sampler_input(AkAnimSampler *sampler, AkInputSemantic semantic) {
   AkInput *input;
@@ -781,6 +974,21 @@ akb_anim_target_kind(AkObject *target, uint32_t *width) {
   }
 
   return 0;
+}
+
+static int
+akb_anim_binding_push(AkbAnimBinding *bindings,
+                      int capacity,
+                      int count,
+                      void *target,
+                      uint32_t kind,
+                      uint32_t width) {
+  if (!target || !kind || !width || count >= capacity)
+    return count;
+  bindings[count].target = target;
+  bindings[count].kind = kind;
+  bindings[count].width = width;
+  return count + 1;
 }
 
 static int
@@ -869,15 +1077,17 @@ static int
 akb_animation_add_channel(AkbAnimation *animation,
                           AkChannel *channel,
                           AkResolvedTarget *target,
+                          const AkbAnimBinding *binding,
                           const AkbCoordContext *coord) {
   AkbAnimChannel out = {0};
   AkAnimSampler *sampler;
   AkInput *time_input;
   AkInput *value_input;
   float *raw_values;
-  uint32_t target_width;
   uint32_t time_count;
   uint32_t value_count;
+  uint32_t read_width;
+  uint32_t logical_value_count;
   uint8_t raw_borrowed;
 
   sampler = ak_getObjectByUrl(&channel->source);
@@ -889,16 +1099,25 @@ akb_animation_add_channel(AkbAnimation *animation,
   if (!time_input || !time_input->accessor || !value_input || !value_input->accessor)
     return 1;
 
-  out.target = (uint32_t)akb_anim_target_kind((AkObject *)target->target,
-                                             &target_width);
+  out.target = binding->kind;
   if (!out.target)
     return 1;
 
   out.value_width = value_input->accessor->componentCount
                     ? value_input->accessor->componentCount
-                    : target_width;
+                    : binding->width;
   if (target->isPartial && out.value_width > 1)
     out.value_width = 1;
+  read_width = out.value_width;
+
+  if (binding->kind == AKB_ANIM_MORPH_WEIGHTS && !target->isPartial) {
+    out.value_width = binding->width;
+    read_width = value_input->accessor->componentCount
+                 ? value_input->accessor->componentCount
+                 : 1;
+    if (read_width != out.value_width)
+      read_width = 1;
+  }
 
   out.times = akb_accessor_float_borrow(time_input->accessor, 1, &time_count);
   if (out.times) {
@@ -910,13 +1129,13 @@ akb_animation_add_channel(AkbAnimation *animation,
   }
 
   raw_values = akb_accessor_float_borrow(value_input->accessor,
-                                         out.value_width,
+                                         read_width,
                                          &value_count);
   if (raw_values) {
     raw_borrowed = 1;
   } else {
     raw_values = akb_accessor_float_copy(value_input->accessor,
-                                         out.value_width,
+                                         read_width,
                                          &value_count);
     raw_borrowed = 0;
     if (!raw_values) {
@@ -926,8 +1145,15 @@ akb_animation_add_channel(AkbAnimation *animation,
     }
   }
 
-  if (value_count < time_count)
-    time_count = value_count;
+  logical_value_count = value_count;
+  if (binding->kind == AKB_ANIM_MORPH_WEIGHTS
+      && !target->isPartial
+      && read_width == 1
+      && out.value_width > 1)
+    logical_value_count = value_count / out.value_width;
+
+  if (logical_value_count < time_count)
+    time_count = logical_value_count;
 
   out.count = time_count;
   out.target_offset = target->isPartial ? target->off : 0;
@@ -967,8 +1193,8 @@ static int
 akb_animation_collect_walk(AkbAnimation *animation,
                            AkAnimation *source,
                            AkContext *context,
-                           AkObject **targets,
-                           int target_count,
+                           const AkbAnimBinding *bindings,
+                           int binding_count,
                            const AkbCoordContext *coord) {
   AkAnimation *stack[256];
   AkAnimation *next;
@@ -984,9 +1210,13 @@ akb_animation_collect_walk(AkbAnimation *animation,
       if (!resolved.target)
         continue;
 
-      for (i = 0; i < target_count; i++) {
-        if (resolved.target == targets[i]) {
-          if (!akb_animation_add_channel(animation, channel, &resolved, coord))
+      for (i = 0; i < binding_count; i++) {
+        if (resolved.target == bindings[i].target) {
+          if (!akb_animation_add_channel(animation,
+                                         channel,
+                                         &resolved,
+                                         &bindings[i],
+                                         coord))
             return 0;
           break;
         }
@@ -1011,19 +1241,25 @@ akb_animation_collect_walk(AkbAnimation *animation,
 }
 
 static int
-akb_node_transform_targets(AkNode *node, AkObject **targets, int capacity) {
+akb_node_transform_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity) {
   AkObject *object;
+  uint32_t kind;
+  uint32_t width;
   int count;
 
   if (!node || !node->transform)
     return 0;
 
   count = 0;
-  for (object = node->transform->base; object && count < capacity; object = object->next)
-    targets[count++] = object;
+  for (object = node->transform->base; object; object = object->next) {
+    kind = (uint32_t)akb_anim_target_kind(object, &width);
+    count = akb_anim_binding_push(bindings, capacity, count, object, kind, width);
+  }
 
-  for (object = node->transform->item; object && count < capacity; object = object->next)
-    targets[count++] = object;
+  for (object = node->transform->item; object; object = object->next) {
+    kind = (uint32_t)akb_anim_target_kind(object, &width);
+    count = akb_anim_binding_push(bindings, capacity, count, object, kind, width);
+  }
 
   return count;
 }
@@ -1036,13 +1272,13 @@ akb_animation_new(AkDoc *doc,
                   int *ok) {
   AkbAnimation *animation;
   AkLibrary *library;
-  AkObject *targets[64];
+  AkbAnimBinding bindings[64];
   AkContext context;
-  int target_count;
+  int binding_count;
 
   *ok = 1;
-  target_count = akb_node_transform_targets(node, targets, 64);
-  if (!target_count)
+  binding_count = akb_node_transform_bindings(node, bindings, 64);
+  if (!binding_count)
     return NULL;
 
   animation = (AkbAnimation *)calloc(1, sizeof(*animation));
@@ -1062,8 +1298,61 @@ akb_animation_new(AkDoc *doc,
     if (!akb_animation_collect_walk(animation,
                                     (AkAnimation *)library->chld,
                                     &context,
-                                    targets,
-                                    target_count,
+                                    bindings,
+                                    binding_count,
+                                    coord)) {
+      akb_animation_release(animation);
+      *ok = 0;
+      return NULL;
+    }
+  }
+
+  if (!animation->count) {
+    akb_animation_release(animation);
+    return NULL;
+  }
+
+  return animation;
+}
+
+static AkbAnimation *
+akb_morph_animation_new(AkDoc *doc,
+                        AkbSharedDoc *doc_owner,
+                        AkInstanceMorph *morpher,
+                        const AkbCoordContext *coord,
+                        int *ok) {
+  AkbAnimation *animation;
+  AkbAnimBinding binding = {0};
+  AkLibrary *library;
+  AkContext context;
+
+  *ok = 1;
+  if (!morpher || !morpher->morph || !morpher->morph->targetCount)
+    return NULL;
+
+  binding.target = morpher;
+  binding.kind = AKB_ANIM_MORPH_WEIGHTS;
+  binding.width = morpher->morph->targetCount;
+
+  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+  if (!animation) {
+    *ok = 0;
+    return NULL;
+  }
+
+  animation->refcount = 1;
+  animation->doc_owner = doc_owner;
+  akb_shared_doc_retain(doc_owner);
+
+  memset(&context, 0, sizeof(context));
+  context.doc = doc;
+
+  for (library = doc->lib.animations; library; library = library->next) {
+    if (!akb_animation_collect_walk(animation,
+                                    (AkAnimation *)library->chld,
+                                    &context,
+                                    &binding,
+                                    1,
                                     coord)) {
       akb_animation_release(animation);
       *ok = 0;
@@ -1193,6 +1482,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
                       AkDoc *doc,
                       AkbSharedDoc *doc_owner,
                       AkbAnimation *animation,
+                      AkbAnimation *morph_animation,
                       AkNode *node,
                       int32_t node_index,
                       AkGeometry *geom,
@@ -1216,6 +1506,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
   out.node_index = node_index;
   akb_extract_material(doc, prim, &out);
   out.animation = akb_animation_retain(animation);
+  out.morph_animation = akb_animation_retain(morph_animation);
 
   if (node) {
     snprintf(out.object_name, sizeof(out.object_name), "%s", akb_name(node->name, "AssetKitObject"));
@@ -1307,6 +1598,18 @@ akb_extract_primitive(AkbPrimitiveList *list,
                                     1,
                                     &out.has_uvs);
 
+  if (node && node->geometry && node->geometry->morpher) {
+    if (!akb_extract_morph_targets(&out,
+                                   geom,
+                                   mesh,
+                                   prim,
+                                   prim_index,
+                                   node->geometry->morpher)) {
+      akb_primitive_free(&out);
+      return 0;
+    }
+  }
+
   base_name = akb_name(mesh->name, akb_name(geom->name, "AssetKitMesh"));
   if (mesh->primitiveCount > 1)
     snprintf(out.name, sizeof(out.name), "%s_%u", base_name, prim_index);
@@ -1326,6 +1629,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
                  AkbAnimation *animation,
+                 AkbAnimation *morph_animation,
                  AkNode *node,
                  int32_t node_index,
                  AkGeometry *geom) {
@@ -1345,6 +1649,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
                                doc,
                                doc_owner,
                                animation,
+                               morph_animation,
                                node,
                                node_index,
                                geom,
@@ -1370,6 +1675,7 @@ akb_extract_node(AkbPrimitiveList *list,
   AkGeometry *geom;
   AkInstanceBase *inst;
   AkbAnimation *animation;
+  AkbAnimation *morph_animation;
   int32_t node_index;
   int ok;
 
@@ -1387,16 +1693,36 @@ akb_extract_node(AkbPrimitiveList *list,
 
   if (node->geometry) {
     animation = akb_animation_retain(nodes->items[node_index].animation);
+    morph_animation = NULL;
     ok = 1;
-    if (!ok)
+    if (node->geometry->morpher) {
+      morph_animation = akb_morph_animation_new(doc,
+                                                doc_owner,
+                                                node->geometry->morpher,
+                                                coord,
+                                                &ok);
+    }
+    if (!ok) {
+      akb_animation_release(animation);
+      akb_animation_release(morph_animation);
       return 0;
+    }
 
     geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
-    if (!akb_extract_mesh(list, doc, doc_owner, animation, node, node_index, geom)) {
+    if (!akb_extract_mesh(list,
+                          doc,
+                          doc_owner,
+                          animation,
+                          morph_animation,
+                          node,
+                          node_index,
+                          geom)) {
       akb_animation_release(animation);
+      akb_animation_release(morph_animation);
       return 0;
     }
     akb_animation_release(animation);
+    akb_animation_release(morph_animation);
   }
 
   for (child = node->chld; child; child = child->next) {
@@ -1473,7 +1799,7 @@ akb_extract_doc(AkDoc *doc,
 
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
-      if (!akb_extract_mesh(&import->primitives, doc, doc_owner, NULL, NULL, -1, geom))
+      if (!akb_extract_mesh(&import->primitives, doc, doc_owner, NULL, NULL, NULL, -1, geom))
         return 0;
     }
   }
@@ -1568,6 +1894,58 @@ akb_anim_channels_to_py(AkbAnimation *animation) {
 }
 
 static PyObject *
+akb_morph_targets_to_py(AkbPrimitive *prim) {
+  PyObject *list;
+  PyObject *dict;
+  PyObject *value;
+  AkbMorphTarget *target;
+  uint32_t i;
+
+  if (!prim || !prim->morph_target_count)
+    return PyList_New(0);
+
+  list = PyList_New((Py_ssize_t)prim->morph_target_count);
+  if (!list)
+    return NULL;
+
+#define AKB_MT_SET_OBJ(KEY, OBJ) do {              \
+    value = (OBJ);                                 \
+    if (!value) { Py_DECREF(dict); Py_DECREF(list); return NULL; } \
+    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
+      Py_DECREF(value);                            \
+      Py_DECREF(dict);                             \
+      Py_DECREF(list);                             \
+      return NULL;                                 \
+    }                                              \
+    Py_DECREF(value);                              \
+  } while (0)
+
+  for (i = 0; i < prim->morph_target_count; i++) {
+    target = &prim->morph_targets[i];
+    dict = PyDict_New();
+    if (!dict) {
+      Py_DECREF(list);
+      return NULL;
+    }
+
+    AKB_MT_SET_OBJ("name", PyUnicode_FromString(target->name));
+    AKB_MT_SET_OBJ("weight", PyFloat_FromDouble(target->weight));
+    AKB_MT_SET_OBJ("vertex_count", PyLong_FromUnsignedLong(target->vertex_count));
+    AKB_MT_SET_OBJ("positions_f32",
+                   akb_memoryview_or_empty(target->positions,
+                                           (size_t)target->vertex_count
+                                           * 3
+                                           * sizeof(float)));
+
+    PyList_SET_ITEM(list, (Py_ssize_t)i, dict);
+  }
+
+#undef AKB_MT_SET_OBJ
+
+  return list;
+}
+
+static PyObject *
 akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   PyObject *dict;
   PyObject *value;
@@ -1621,6 +1999,13 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                       ? (unsigned long)prim->animation->count
                                       : 0));
   AKB_SET_OBJ("anim_channels", akb_anim_channels_to_py(prim->animation));
+  AKB_SET_OBJ("morph_target_count", PyLong_FromUnsignedLong(prim->morph_target_count));
+  AKB_SET_OBJ("morph_targets", akb_morph_targets_to_py(prim));
+  AKB_SET_OBJ("morph_anim_count",
+              PyLong_FromUnsignedLong(prim->morph_animation
+                                      ? (unsigned long)prim->morph_animation->count
+                                      : 0));
+  AKB_SET_OBJ("morph_anim_channels", akb_anim_channels_to_py(prim->morph_animation));
   AKB_SET_OBJ("matrix_f32", akb_memoryview_or_empty(prim->matrix, prim->has_node ? 16 * sizeof(float) : 0));
   AKB_SET_OBJ("coord_matrix_f32",
               akb_memoryview_or_empty(prim->coord_matrix,

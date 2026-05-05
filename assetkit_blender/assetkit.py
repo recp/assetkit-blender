@@ -210,6 +210,14 @@ class AkDoc(ctypes.Structure):
 
 
 @dataclass
+class MorphTargetData:
+    name: str
+    weight: float = 0.0
+    vertex_count: int = 0
+    positions_f32: object = b""
+
+
+@dataclass
 class MeshPrimitiveData:
     name: str
     vertices: list[tuple[float, float, float]]
@@ -227,12 +235,16 @@ class MeshPrimitiveData:
     normals_f32: object = b""
     uvs_f32: object = b""
     anim_channels: list[dict] | None = None
+    morph_targets: list[MorphTargetData] | None = None
+    morph_anim_channels: list[dict] | None = None
     object_name: str = ""
     matrix_f32: object = b""
     coord_matrix_f32: object = b""
     node_index: int = -1
     has_node: bool = False
     anim_count: int = 0
+    morph_target_count: int = 0
+    morph_anim_count: int = 0
     material_name: str = ""
     base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     emissive_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -543,6 +555,17 @@ def native_load_meshes(
 
     meshes = []
     for item in raw_meshes:
+        morph_targets = []
+        for target in item.get("morph_targets") or []:
+            morph_targets.append(
+                MorphTargetData(
+                    name=target.get("name") or "AssetKitMorph",
+                    weight=float(target.get("weight") if target.get("weight") is not None else 0.0),
+                    vertex_count=int(target.get("vertex_count") or 0),
+                    positions_f32=target.get("positions_f32") or b"",
+                )
+            )
+
         meshes.append(
             MeshPrimitiveData(
                 name=item.get("name") or "AssetKitMesh",
@@ -561,12 +584,16 @@ def native_load_meshes(
                 normals_f32=item.get("normals_f32") or b"",
                 uvs_f32=item.get("uvs_f32") or b"",
                 anim_channels=item.get("anim_channels") or [],
+                morph_targets=morph_targets,
+                morph_anim_channels=item.get("morph_anim_channels") or [],
                 object_name=item.get("object_name") or "",
                 matrix_f32=item.get("matrix_f32") or b"",
                 coord_matrix_f32=item.get("coord_matrix_f32") or b"",
                 node_index=int(item.get("node_index") if item.get("node_index") is not None else -1),
                 has_node=bool(item.get("has_node")),
                 anim_count=int(item.get("anim_count") or 0),
+                morph_target_count=int(item.get("morph_target_count") or 0),
+                morph_anim_count=int(item.get("morph_anim_count") or 0),
                 material_name=item.get("material_name") or "",
                 base_color=tuple(item.get("base_color") or (1.0, 1.0, 1.0, 1.0)),
                 emissive_color=tuple(item.get("emissive_color") or (0.0, 0.0, 0.0)),

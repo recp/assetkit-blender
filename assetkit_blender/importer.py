@@ -10,6 +10,7 @@ from .assetkit import AssetKit, AssetKitSceneData, MeshPrimitiveData, SceneNodeD
 _ANIM_TRANSLATION = 1
 _ANIM_ROTATION_QUAT = 2
 _ANIM_SCALE = 3
+_ANIM_MORPH_WEIGHTS = 4
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 
@@ -81,6 +82,7 @@ def _create_mesh_object(
     material = _create_material(data)
     if material:
         mesh.materials.append(material)
+    _apply_shape_keys(obj, data)
     if apply_animation:
         _apply_animation(obj, data)
 
@@ -144,6 +146,7 @@ def _create_mesh_object_bulk(
     material = _create_material(data)
     if material:
         mesh.materials.append(material)
+    _apply_shape_keys(obj, data)
     if apply_animation:
         _apply_animation(obj, data)
 
@@ -352,11 +355,94 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
         scene.frame_end = end_frame
 
 
-def _ensure_fcurve(action: bpy.types.Action, obj: bpy.types.Object, data_path: str, index: int):
+def _apply_shape_keys(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    targets = data.morph_targets or []
+    if not targets:
+        return
+
+    vertex_count = len(obj.data.vertices)
+    obj.shape_key_add(name="Basis", from_mix=False)
+    for index, target in enumerate(targets):
+        if target.vertex_count != vertex_count:
+            continue
+        coords = _buffer_view(target.positions_f32, "f")
+        if coords is None or len(coords) != vertex_count * 3:
+            continue
+
+        key = obj.shape_key_add(name=target.name or f"AssetKitMorph_{index}", from_mix=False)
+        key.data.foreach_set("co", coords)
+        key.value = target.weight
+
+    obj.data.update()
+    _apply_shape_key_animation(obj, data)
+
+
+def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    channels = data.morph_anim_channels or []
+    shape_keys = obj.data.shape_keys
+    if not channels or not shape_keys:
+        return
+
+    scene = bpy.context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    start_frame = 0.0
+    end_frame = scene.frame_end
+
+    shape_keys.animation_data_create()
+    action = bpy.data.actions.new(f"{obj.name}_AssetKit_Morph")
+    shape_keys.animation_data.action = action
+
+    for channel in channels:
+        if int(channel.get("target") or 0) != _ANIM_MORPH_WEIGHTS:
+            continue
+
+        count = int(channel.get("count") or 0)
+        value_width = int(channel.get("value_width") or 0)
+        target_offset = int(channel.get("target_offset") or 0)
+        is_partial = bool(channel.get("is_partial"))
+        times = _buffer_view(channel.get("times_f32") or b"", "f")
+        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        if count <= 0 or value_width <= 0 or times is None or values is None:
+            continue
+
+        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        component_count = 1 if is_partial else value_width
+        for component in range(component_count):
+            key_index = target_offset + component + 1
+            if key_index >= len(shape_keys.key_blocks):
+                continue
+
+            key = shape_keys.key_blocks[key_index]
+            value_index = 0 if is_partial else component
+            fcurve = _ensure_fcurve(action, shape_keys, key.path_from_id("value"), 0, group_name="Shape Keys")
+            coords = array("f", [0.0]) * (count * 2)
+            for frame_index in range(count):
+                coords[frame_index * 2] = start_frame + times[frame_index] * fps
+                coords[frame_index * 2 + 1] = values[frame_index * value_width + value_index]
+
+            fcurve.keyframe_points.add(count)
+            fcurve.keyframe_points.foreach_set("co", coords)
+            for point in fcurve.keyframe_points:
+                point.interpolation = interpolation
+            fcurve.update()
+
+        end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
+
+    if end_frame > scene.frame_end:
+        scene.frame_end = end_frame
+
+
+def _ensure_fcurve(
+    action: bpy.types.Action,
+    obj: bpy.types.ID,
+    data_path: str,
+    index: int,
+    group_name: str = "Transform",
+):
     ensure = getattr(action, "fcurve_ensure_for_datablock", None)
     if ensure:
-        return ensure(obj, data_path, index=index, group_name="Transform")
-    return action.fcurves.new(data_path=data_path, index=index, action_group="Transform")
+        return ensure(obj, data_path, index=index, group_name=group_name)
+    return action.fcurves.new(data_path=data_path, index=index, action_group=group_name)
 
 
 def _anim_target_path(target: int) -> tuple[str, int]:
