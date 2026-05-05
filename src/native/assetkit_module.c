@@ -46,6 +46,7 @@ typedef struct AkbPrimitive {
   float    normal_scale;
   float    matrix[16];
   float    coord_matrix[16];
+  int32_t  node_index;
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
@@ -65,6 +66,25 @@ typedef struct AkbPrimitiveList {
   size_t        count;
   size_t        capacity;
 } AkbPrimitiveList;
+
+typedef struct AkbSceneNode {
+  struct AkbAnimation *animation;
+  char     name[512];
+  float    matrix[16];
+  int32_t  parent_index;
+  uint8_t  has_transform;
+} AkbSceneNode;
+
+typedef struct AkbSceneNodeList {
+  AkbSceneNode *items;
+  size_t        count;
+  size_t        capacity;
+} AkbSceneNodeList;
+
+typedef struct AkbImport {
+  AkbPrimitiveList primitives;
+  AkbSceneNodeList nodes;
+} AkbImport;
 
 typedef struct AkbCoordContext {
   AkCoordSys *source;
@@ -369,6 +389,14 @@ akb_primitive_free(AkbPrimitive *prim) {
 }
 
 static void
+akb_scene_node_free(AkbSceneNode *node) {
+  if (!node)
+    return;
+  akb_animation_release(node->animation);
+  memset(node, 0, sizeof(*node));
+}
+
+static void
 akb_list_free(AkbPrimitiveList *list) {
   size_t i;
 
@@ -377,6 +405,19 @@ akb_list_free(AkbPrimitiveList *list) {
 
   for (i = 0; i < list->count; i++)
     akb_primitive_free(&list->items[i]);
+  free(list->items);
+  memset(list, 0, sizeof(*list));
+}
+
+static void
+akb_node_list_free(AkbSceneNodeList *list) {
+  size_t i;
+
+  if (!list || !list->items)
+    return;
+
+  for (i = 0; i < list->count; i++)
+    akb_scene_node_free(&list->items[i]);
   free(list->items);
   memset(list, 0, sizeof(*list));
 }
@@ -397,6 +438,25 @@ akb_list_push(AkbPrimitiveList *list, AkbPrimitive *prim) {
 
   list->items[list->count++] = *prim;
   memset(prim, 0, sizeof(*prim));
+  return 1;
+}
+
+static int
+akb_node_list_push(AkbSceneNodeList *list, AkbSceneNode *node) {
+  AkbSceneNode *new_items;
+  size_t new_capacity;
+
+  if (list->count == list->capacity) {
+    new_capacity = list->capacity ? list->capacity * 2 : 32;
+    new_items = (AkbSceneNode *)realloc(list->items, new_capacity * sizeof(*new_items));
+    if (!new_items)
+      return 0;
+    list->items = new_items;
+    list->capacity = new_capacity;
+  }
+
+  list->items[list->count++] = *node;
+  memset(node, 0, sizeof(*node));
   return 1;
 }
 
@@ -1013,11 +1073,45 @@ akb_animation_new(AkDoc *doc,
 }
 
 static int
+akb_extract_scene_node(AkbSceneNodeList *nodes,
+                       AkDoc *doc,
+                       AkbSharedDoc *doc_owner,
+                       AkNode *node,
+                       const AkbCoordContext *coord,
+                       int32_t parent_index,
+                       int32_t *node_index) {
+  AkbSceneNode out = {0};
+  int ok;
+
+  if (!nodes || !node || !node_index)
+    return 0;
+
+  *node_index = (int32_t)nodes->count;
+  snprintf(out.name, sizeof(out.name), "%s", akb_name(node->name, "AssetKitNode"));
+  out.parent_index = parent_index;
+  ak_transformCombine(node->transform, out.matrix);
+  out.has_transform = 1;
+  out.animation = akb_animation_new(doc, doc_owner, node, coord, &ok);
+  if (!ok) {
+    akb_scene_node_free(&out);
+    return 0;
+  }
+
+  if (!akb_node_list_push(nodes, &out)) {
+    akb_scene_node_free(&out);
+    return 0;
+  }
+
+  return 1;
+}
+
+static int
 akb_extract_primitive(AkbPrimitiveList *list,
                       AkDoc *doc,
                       AkbSharedDoc *doc_owner,
                       AkbAnimation *animation,
                       AkNode *node,
+                      int32_t node_index,
                       AkGeometry *geom,
                       AkMesh *mesh,
                       AkMeshPrimitive *prim,
@@ -1036,6 +1130,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
   if (!pos_input || !pos_input->accessor)
     return 1;
 
+  out.node_index = node_index;
   akb_extract_material(doc, prim, &out);
   out.animation = akb_animation_retain(animation);
 
@@ -1149,6 +1244,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
                  AkbSharedDoc *doc_owner,
                  AkbAnimation *animation,
                  AkNode *node,
+                 int32_t node_index,
                  AkGeometry *geom) {
   AkObject *gdata;
   AkMesh *mesh;
@@ -1162,7 +1258,16 @@ akb_extract_mesh(AkbPrimitiveList *list,
   for (prim = mesh->primitive; prim; prim = prim->next, prim_index++) {
     if (prim->type != AKB_PRIMITIVE_TRIANGLES)
       continue;
-    if (!akb_extract_primitive(list, doc, doc_owner, animation, node, geom, mesh, prim, prim_index))
+    if (!akb_extract_primitive(list,
+                               doc,
+                               doc_owner,
+                               animation,
+                               node,
+                               node_index,
+                               geom,
+                               mesh,
+                               prim,
+                               prim_index))
       return 0;
   }
 
@@ -1171,25 +1276,40 @@ akb_extract_mesh(AkbPrimitiveList *list,
 
 static int
 akb_extract_node(AkbPrimitiveList *list,
+                 AkbSceneNodeList *nodes,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
                  AkNode *node,
-                 const AkbCoordContext *coord) {
+                 const AkbCoordContext *coord,
+                 int32_t parent_index) {
   AkNode *child;
+  AkNode *inst_node;
   AkGeometry *geom;
+  AkInstanceBase *inst;
   AkbAnimation *animation;
+  int32_t node_index;
   int ok;
 
   if (!node)
     return 1;
 
+  if (!akb_extract_scene_node(nodes,
+                              doc,
+                              doc_owner,
+                              node,
+                              coord,
+                              parent_index,
+                              &node_index))
+    return 0;
+
   if (node->geometry) {
-    animation = akb_animation_new(doc, doc_owner, node, coord, &ok);
+    animation = akb_animation_retain(nodes->items[node_index].animation);
+    ok = 1;
     if (!ok)
       return 0;
 
     geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
-    if (!akb_extract_mesh(list, doc, doc_owner, animation, node, geom)) {
+    if (!akb_extract_mesh(list, doc, doc_owner, animation, node, node_index, geom)) {
       akb_animation_release(animation);
       return 0;
     }
@@ -1197,7 +1317,15 @@ akb_extract_node(AkbPrimitiveList *list,
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(list, doc, doc_owner, child, coord))
+    if (!akb_extract_node(list, nodes, doc, doc_owner, child, coord, node_index))
+      return 0;
+  }
+
+  for (inst = node->node ? &node->node->base : NULL; inst; inst = inst->next) {
+    inst_node = (AkNode *)ak_instanceObject(inst);
+    if (!inst_node || inst_node == node)
+      continue;
+    if (!akb_extract_node(list, nodes, doc, doc_owner, inst_node, coord, node_index))
       return 0;
   }
 
@@ -1208,6 +1336,7 @@ static int
 akb_extract_scene(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
                   AkbPrimitiveList *list,
+                  AkbSceneNodeList *nodes,
                   const AkbCoordContext *coord) {
   AkVisualScene *scene;
   AkInstanceBase *inst;
@@ -1223,12 +1352,12 @@ akb_extract_scene(AkDoc *doc,
   if (scene->node->node) {
     for (inst = &scene->node->node->base; inst; inst = inst->next) {
       node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-      if (!akb_extract_node(list, doc, doc_owner, node, coord))
+      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, -1))
         return 0;
     }
   } else {
     for (node = scene->node; node; node = node->next) {
-      if (!akb_extract_node(list, doc, doc_owner, node, coord))
+      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, -1))
         return 0;
     }
   }
@@ -1239,7 +1368,7 @@ akb_extract_scene(AkDoc *doc,
 static int
 akb_extract_doc(AkDoc *doc,
                 AkbSharedDoc *doc_owner,
-                AkbPrimitiveList *list,
+                AkbImport *import,
                 const AkbLoadOptions *options) {
   AkbCoordContext coord;
   AkLibrary *lib;
@@ -1247,35 +1376,47 @@ akb_extract_doc(AkDoc *doc,
 
   akb_prepare_blender_coords(doc, &coord, options);
 
-  if (!akb_extract_scene(doc, doc_owner, list, &coord))
+  if (!akb_extract_scene(doc,
+                         doc_owner,
+                         &import->primitives,
+                         &import->nodes,
+                         &coord))
     return 0;
 
-  if (list->count > 0) {
-    akb_list_set_coord_matrix(list, &coord);
+  if (import->primitives.count > 0) {
+    akb_list_set_coord_matrix(&import->primitives, &coord);
     return 1;
   }
 
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
-      if (!akb_extract_mesh(list, doc, doc_owner, NULL, NULL, geom))
+      if (!akb_extract_mesh(&import->primitives, doc, doc_owner, NULL, NULL, -1, geom))
         return 0;
     }
   }
 
-  akb_list_set_coord_matrix(list, &coord);
+  akb_list_set_coord_matrix(&import->primitives, &coord);
   return 1;
 }
 
 static void
-akb_list_capsule_destructor(PyObject *capsule) {
-  AkbPrimitiveList *list;
+akb_import_free(AkbImport *import) {
+  if (!import)
+    return;
+  akb_list_free(&import->primitives);
+  akb_node_list_free(&import->nodes);
+}
 
-  list = (AkbPrimitiveList *)PyCapsule_GetPointer(capsule, "assetkit_blender.AkbPrimitiveList");
-  if (!list)
+static void
+akb_import_capsule_destructor(PyObject *capsule) {
+  AkbImport *import;
+
+  import = (AkbImport *)PyCapsule_GetPointer(capsule, "assetkit_blender.AkbImport");
+  if (!import)
     return;
 
-  akb_list_free(list);
-  free(list);
+  akb_import_free(import);
+  free(import);
 }
 
 static PyObject *
@@ -1390,6 +1531,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("alpha_mode", PyLong_FromUnsignedLong(prim->alpha_mode));
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
+  AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
   AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
   AKB_SET_OBJ("anim_count",
               PyLong_FromUnsignedLong(prim->animation
@@ -1417,6 +1559,47 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
 }
 
 static PyObject *
+akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
+  PyObject *dict;
+  PyObject *value;
+
+  dict = PyDict_New();
+  if (!dict)
+    return NULL;
+
+#define AKB_NODE_SET_OBJ(KEY, OBJ) do {            \
+    value = (OBJ);                                 \
+    if (!value) { Py_DECREF(dict); return NULL; }  \
+    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
+      Py_DECREF(value);                            \
+      Py_DECREF(dict);                             \
+      return NULL;                                 \
+    }                                              \
+    Py_DECREF(value);                              \
+  } while (0)
+
+  if (PyDict_SetItemString(dict, "_owner", owner) < 0) {
+    Py_DECREF(dict);
+    return NULL;
+  }
+
+  AKB_NODE_SET_OBJ("name", PyUnicode_FromString(node->name));
+  AKB_NODE_SET_OBJ("parent_index", PyLong_FromLong(node->parent_index));
+  AKB_NODE_SET_OBJ("matrix_f32",
+                   akb_memoryview_or_empty(node->matrix,
+                                           node->has_transform ? 16 * sizeof(float) : 0));
+  AKB_NODE_SET_OBJ("anim_count",
+                   PyLong_FromUnsignedLong(node->animation
+                                           ? (unsigned long)node->animation->count
+                                           : 0));
+  AKB_NODE_SET_OBJ("anim_channels", akb_anim_channels_to_py(node->animation));
+
+#undef AKB_NODE_SET_OBJ
+
+  return dict;
+}
+
+static PyObject *
 akb_load_meshes(PyObject *self, PyObject *args) {
   const char *filepath;
   AkDoc *doc = NULL;
@@ -1424,10 +1607,12 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   AkbSavedOptions saved_options;
   AkbSharedDoc *doc_owner;
   AkResult result;
-  AkbPrimitiveList list = {0};
-  AkbPrimitiveList *owner_list;
+  AkbImport import = {0};
+  AkbImport *owner_import;
   PyObject *options_obj = NULL;
   PyObject *out;
+  PyObject *mesh_list;
+  PyObject *node_list;
   PyObject *owner;
   PyObject *item;
   size_t i;
@@ -1451,7 +1636,7 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   result = ak_load(&doc, filepath, AK_FILE_TYPE_AUTO);
   doc_owner->doc = doc;
   if (result == AK_OK && doc)
-    ok = akb_extract_doc(doc, doc_owner, &list, &options);
+    ok = akb_extract_doc(doc, doc_owner, &import, &options);
   else
     ok = 0;
   akb_options_restore(&saved_options);
@@ -1464,52 +1649,94 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   }
 
   if (!ok) {
-    akb_list_free(&list);
+    akb_import_free(&import);
     akb_shared_doc_release(doc_owner);
     PyErr_SetString(PyExc_MemoryError, "AssetKit bridge could not prepare mesh buffers");
     return NULL;
   }
 
-  out = PyList_New((Py_ssize_t)list.count);
+  out = PyDict_New();
   if (!out) {
-    akb_list_free(&list);
+    akb_import_free(&import);
     akb_shared_doc_release(doc_owner);
     return NULL;
   }
 
-  owner_list = (AkbPrimitiveList *)malloc(sizeof(*owner_list));
-  if (!owner_list) {
+  mesh_list = PyList_New((Py_ssize_t)import.primitives.count);
+  node_list = PyList_New((Py_ssize_t)import.nodes.count);
+  if (!mesh_list || !node_list) {
+    Py_XDECREF(mesh_list);
+    Py_XDECREF(node_list);
     Py_DECREF(out);
-    akb_list_free(&list);
+    akb_import_free(&import);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
+  owner_import = (AkbImport *)malloc(sizeof(*owner_import));
+  if (!owner_import) {
+    Py_DECREF(node_list);
+    Py_DECREF(mesh_list);
+    Py_DECREF(out);
+    akb_import_free(&import);
     akb_shared_doc_release(doc_owner);
     return PyErr_NoMemory();
   }
 
-  *owner_list = list;
-  memset(&list, 0, sizeof(list));
+  *owner_import = import;
+  memset(&import, 0, sizeof(import));
 
-  owner = PyCapsule_New(owner_list,
-                        "assetkit_blender.AkbPrimitiveList",
-                        akb_list_capsule_destructor);
+  owner = PyCapsule_New(owner_import,
+                        "assetkit_blender.AkbImport",
+                        akb_import_capsule_destructor);
   if (!owner) {
+    Py_DECREF(node_list);
+    Py_DECREF(mesh_list);
     Py_DECREF(out);
-    akb_list_free(owner_list);
-    free(owner_list);
+    akb_import_free(owner_import);
+    free(owner_import);
     akb_shared_doc_release(doc_owner);
     return NULL;
   }
 
-  for (i = 0; i < owner_list->count; i++) {
-    item = akb_primitive_to_py(&owner_list->items[i], owner);
+  for (i = 0; i < owner_import->primitives.count; i++) {
+    item = akb_primitive_to_py(&owner_import->primitives.items[i], owner);
     if (!item) {
+      Py_DECREF(node_list);
+      Py_DECREF(mesh_list);
       Py_DECREF(out);
       Py_DECREF(owner);
       akb_shared_doc_release(doc_owner);
       return NULL;
     }
-    PyList_SET_ITEM(out, (Py_ssize_t)i, item);
+    PyList_SET_ITEM(mesh_list, (Py_ssize_t)i, item);
   }
 
+  for (i = 0; i < owner_import->nodes.count; i++) {
+    item = akb_scene_node_to_py(&owner_import->nodes.items[i], owner);
+    if (!item) {
+      Py_DECREF(node_list);
+      Py_DECREF(mesh_list);
+      Py_DECREF(out);
+      Py_DECREF(owner);
+      akb_shared_doc_release(doc_owner);
+      return NULL;
+    }
+    PyList_SET_ITEM(node_list, (Py_ssize_t)i, item);
+  }
+
+  if (PyDict_SetItemString(out, "meshes", mesh_list) < 0
+      || PyDict_SetItemString(out, "nodes", node_list) < 0) {
+    Py_DECREF(node_list);
+    Py_DECREF(mesh_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
+  Py_DECREF(node_list);
+  Py_DECREF(mesh_list);
   Py_DECREF(owner);
   akb_shared_doc_release(doc_owner);
   return out;

@@ -5,7 +5,7 @@ from array import array
 import bpy
 from mathutils import Matrix
 
-from .assetkit import AssetKit, MeshPrimitiveData, native_load_meshes
+from .assetkit import AssetKit, AssetKitSceneData, MeshPrimitiveData, SceneNodeData, native_load_meshes
 
 _ANIM_TRANSLATION = 1
 _ANIM_ROTATION_QUAT = 2
@@ -21,22 +21,44 @@ def import_assetkit_file(
 ) -> list[bpy.types.Object]:
     objects: list[bpy.types.Object] = []
 
-    primitives = native_load_meshes(filepath, load_options) if not library_path else None
-    if primitives is None:
+    loaded = native_load_meshes(filepath, load_options) if not library_path else None
+    if loaded is None:
         kit = AssetKit(library_path or None)
-        primitives = kit.load_meshes(filepath)
+        loaded = kit.load_meshes(filepath)
+
+    if isinstance(loaded, AssetKitSceneData):
+        primitives = loaded.meshes
+        scene_nodes = loaded.nodes
+    else:
+        primitives = loaded
+        scene_nodes = []
 
     coord_root = _create_coord_root(primitives)
+    node_objects = _create_scene_nodes(scene_nodes, coord_root)
     for primitive in primitives:
-        obj = _create_mesh_object(primitive, coord_root)
+        node_parent = node_objects.get(primitive.node_index)
+        parent = node_parent or coord_root
+        use_node_parent = node_parent is not None
+        obj = _create_mesh_object(
+            primitive,
+            parent,
+            apply_transform=not use_node_parent,
+            apply_animation=not use_node_parent,
+        )
         objects.append(obj)
 
     return objects
 
 
-def _create_mesh_object(data: MeshPrimitiveData, parent: bpy.types.Object | None = None) -> bpy.types.Object:
+def _create_mesh_object(
+    data: MeshPrimitiveData,
+    parent: bpy.types.Object | None = None,
+    *,
+    apply_transform: bool = True,
+    apply_animation: bool = True,
+) -> bpy.types.Object:
     if data.vertices_f32 and data.indices_u32:
-        return _create_mesh_object_bulk(data, parent)
+        return _create_mesh_object_bulk(data, parent, apply_transform=apply_transform, apply_animation=apply_animation)
 
     mesh = bpy.data.meshes.new(data.name)
     mesh.from_pydata(data.vertices, [], data.faces)
@@ -54,11 +76,13 @@ def _create_mesh_object(data: MeshPrimitiveData, parent: bpy.types.Object | None
 
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
-    _apply_matrix(obj, data)
+    if apply_transform:
+        _apply_matrix(obj, data)
     material = _create_material(data)
     if material:
         mesh.materials.append(material)
-    _apply_animation(obj, data)
+    if apply_animation:
+        _apply_animation(obj, data)
 
     bpy.context.collection.objects.link(obj)
     obj.select_set(True)
@@ -66,7 +90,13 @@ def _create_mesh_object(data: MeshPrimitiveData, parent: bpy.types.Object | None
     return obj
 
 
-def _create_mesh_object_bulk(data: MeshPrimitiveData, parent: bpy.types.Object | None = None) -> bpy.types.Object:
+def _create_mesh_object_bulk(
+    data: MeshPrimitiveData,
+    parent: bpy.types.Object | None = None,
+    *,
+    apply_transform: bool = True,
+    apply_animation: bool = True,
+) -> bpy.types.Object:
     mesh = bpy.data.meshes.new(data.name)
 
     mesh.vertices.add(data.vertex_count)
@@ -109,16 +139,41 @@ def _create_mesh_object_bulk(data: MeshPrimitiveData, parent: bpy.types.Object |
 
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
-    _apply_matrix(obj, data)
+    if apply_transform:
+        _apply_matrix(obj, data)
     material = _create_material(data)
     if material:
         mesh.materials.append(material)
-    _apply_animation(obj, data)
+    if apply_animation:
+        _apply_animation(obj, data)
 
     bpy.context.collection.objects.link(obj)
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     return obj
+
+
+def _create_scene_nodes(
+    nodes: list[SceneNodeData],
+    coord_root: bpy.types.Object | None,
+) -> dict[int, bpy.types.Object]:
+    objects: dict[int, bpy.types.Object] = {}
+
+    for index, node in enumerate(nodes):
+        obj = bpy.data.objects.new(node.name or f"AssetKitNode_{index}", None)
+        obj.empty_display_type = "PLAIN_AXES"
+        obj.empty_display_size = 0.35
+        bpy.context.collection.objects.link(obj)
+        objects[index] = obj
+
+    for index, node in enumerate(nodes):
+        obj = objects[index]
+        parent = objects.get(node.parent_index) if node.parent_index >= 0 else coord_root
+        _set_parent(obj, parent)
+        _apply_matrix_buffer(obj, node.matrix_f32)
+        _apply_animation(obj, node)
+
+    return objects
 
 
 def _create_coord_root(primitives: list[MeshPrimitiveData]) -> bpy.types.Object | None:
@@ -146,7 +201,11 @@ def _set_parent(obj: bpy.types.Object, parent: bpy.types.Object | None) -> None:
 
 
 def _apply_matrix(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
-    matrix = _matrix_from_buffer(data.matrix_f32)
+    _apply_matrix_buffer(obj, data.matrix_f32)
+
+
+def _apply_matrix_buffer(obj: bpy.types.Object, buffer: object) -> None:
+    matrix = _matrix_from_buffer(buffer)
     if matrix is None:
         return
 

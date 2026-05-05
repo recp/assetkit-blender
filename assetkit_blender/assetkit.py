@@ -230,6 +230,7 @@ class MeshPrimitiveData:
     object_name: str = ""
     matrix_f32: object = b""
     coord_matrix_f32: object = b""
+    node_index: int = -1
     has_node: bool = False
     anim_count: int = 0
     material_name: str = ""
@@ -247,6 +248,22 @@ class MeshPrimitiveData:
     normal_texture: str = ""
     emissive_texture: str = ""
     _native_owner: object | None = None
+
+
+@dataclass
+class SceneNodeData:
+    name: str
+    parent_index: int = -1
+    matrix_f32: object = b""
+    anim_channels: list[dict] | None = None
+    anim_count: int = 0
+    _native_owner: object | None = None
+
+
+@dataclass
+class AssetKitSceneData:
+    meshes: list[MeshPrimitiveData]
+    nodes: list[SceneNodeData]
 
 
 class AssetKitError(RuntimeError):
@@ -487,14 +504,31 @@ def _decode(value: bytes | None) -> str:
 def native_load_meshes(
     filepath: str | os.PathLike[str],
     options: dict | None = None,
-) -> list[MeshPrimitiveData] | None:
+) -> AssetKitSceneData | None:
     try:
         from . import _assetkit_blender
     except ImportError:
         return None
 
+    result = _assetkit_blender.load_meshes(os.fspath(filepath), options or None)
+    raw_meshes = result.get("meshes", []) if isinstance(result, dict) else result
+    raw_nodes = result.get("nodes", []) if isinstance(result, dict) else []
+
+    nodes = []
+    for item in raw_nodes:
+        nodes.append(
+            SceneNodeData(
+                name=item.get("name") or "AssetKitNode",
+                parent_index=int(item.get("parent_index") if item.get("parent_index") is not None else -1),
+                matrix_f32=item.get("matrix_f32") or b"",
+                anim_channels=item.get("anim_channels") or [],
+                anim_count=int(item.get("anim_count") or 0),
+                _native_owner=item.get("_owner"),
+            )
+        )
+
     meshes = []
-    for item in _assetkit_blender.load_meshes(os.fspath(filepath), options or None):
+    for item in raw_meshes:
         meshes.append(
             MeshPrimitiveData(
                 name=item.get("name") or "AssetKitMesh",
@@ -516,6 +550,7 @@ def native_load_meshes(
                 object_name=item.get("object_name") or "",
                 matrix_f32=item.get("matrix_f32") or b"",
                 coord_matrix_f32=item.get("coord_matrix_f32") or b"",
+                node_index=int(item.get("node_index") if item.get("node_index") is not None else -1),
                 has_node=bool(item.get("has_node")),
                 anim_count=int(item.get("anim_count") or 0),
                 material_name=item.get("material_name") or "",
@@ -535,4 +570,4 @@ def native_load_meshes(
                 _native_owner=item.get("_owner"),
             )
         )
-    return meshes
+    return AssetKitSceneData(meshes=meshes, nodes=nodes)
