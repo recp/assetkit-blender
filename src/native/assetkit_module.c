@@ -21,6 +21,7 @@
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
+#define AKB_SKIN_JOINTS_PER_VERTEX 4
 
 typedef struct AkbMorphTarget {
   char     name[512];
@@ -34,6 +35,8 @@ typedef struct AkbPrimitive {
   struct AkbAnimation *animation;
   struct AkbAnimation *morph_animation;
   AkbMorphTarget *morph_targets;
+  AkNode   **skin_joint_sources;
+  AkNode    *skin_root_source;
   char     name[512];
   char     object_name[512];
   char     material_name[512];
@@ -48,6 +51,10 @@ typedef struct AkbPrimitive {
   int32_t  *loop_totals;
   float   *normals;
   float   *uvs;
+  uint16_t *skin_joints;
+  int32_t  *skin_joint_nodes;
+  float   *skin_weights;
+  float   *skin_inverse_bind_matrices;
   float    base_color[4];
   float    emissive_color[3];
   float    metallic;
@@ -57,12 +64,17 @@ typedef struct AkbPrimitive {
   float    matrix[16];
   float    coord_matrix[16];
   int32_t  node_index;
+  int32_t  skin_root_node_index;
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
   uint32_t morph_target_count;
+  uint32_t skin_vertex_count;
+  uint32_t skin_joint_count;
+  uint32_t skin_joint_width;
   uint8_t  has_normals;
   uint8_t  has_uvs;
+  uint8_t  has_skin;
   uint8_t  double_sided;
   uint8_t  alpha_mode;
   uint8_t  has_node;
@@ -80,6 +92,7 @@ typedef struct AkbPrimitiveList {
 
 typedef struct AkbSceneNode {
   struct AkbAnimation *animation;
+  AkNode   *source;
   char     name[512];
   char     camera_name[512];
   char     light_name[512];
@@ -409,6 +422,11 @@ akb_primitive_free(AkbPrimitive *prim) {
   free(prim->loop_meta);
   free(prim->normals);
   free(prim->uvs);
+  free(prim->skin_joints);
+  free(prim->skin_joint_nodes);
+  free(prim->skin_weights);
+  free(prim->skin_inverse_bind_matrices);
+  free(prim->skin_joint_sources);
   for (i = 0; i < prim->morph_target_count; i++)
     free(prim->morph_targets[i].positions);
   free(prim->morph_targets);
@@ -934,6 +952,143 @@ akb_extract_morph_targets(AkbPrimitive *out,
   return 1;
 }
 
+static int32_t
+akb_scene_node_index_for(AkbSceneNodeList *nodes, AkNode *node) {
+  const char *target_id;
+  const char *source_id;
+  size_t i;
+
+  if (!nodes || !node)
+    return -1;
+
+  target_id = (const char *)ak_mem_getId(node);
+  for (i = 0; i < nodes->count; i++) {
+    if (nodes->items[i].source == node)
+      return (int32_t)i;
+    source_id = (const char *)ak_mem_getId(nodes->items[i].source);
+    if (source_id && target_id && strcmp(source_id, target_id) == 0)
+      return (int32_t)i;
+  }
+
+  return -1;
+}
+
+static int
+akb_extract_skin(AkbPrimitive *out,
+                 AkbSceneNodeList *nodes,
+                 AkMeshPrimitive *prim,
+                 uint32_t prim_index,
+                 AkInstanceSkin *skinner) {
+  AkSkin *skin;
+  AkNode **joints;
+  AkNode **joint_sources;
+  uint16_t *joint_indices;
+  int32_t *joint_nodes;
+  float *weights;
+  float *inverse_bind_matrices;
+  size_t filled_count;
+  size_t i;
+
+  if (!out || !prim || !skinner || !(skin = skinner->skin)
+      || !skin->nJoints || !out->vertex_count)
+    return 1;
+
+  joint_indices = (uint16_t *)calloc((size_t)out->vertex_count
+                                     * AKB_SKIN_JOINTS_PER_VERTEX,
+                                     sizeof(*joint_indices));
+  weights = (float *)calloc((size_t)out->vertex_count
+                            * AKB_SKIN_JOINTS_PER_VERTEX,
+                            sizeof(*weights));
+  if (!joint_indices || !weights) {
+    free(joint_indices);
+    free(weights);
+    return 0;
+  }
+
+  filled_count = ak_skinFillWeights(skin,
+                                    prim,
+                                    prim_index,
+                                    AKB_SKIN_JOINTS_PER_VERTEX,
+                                    joint_indices,
+                                    weights);
+  if (!filled_count) {
+    free(joint_indices);
+    free(weights);
+    return 1;
+  }
+
+  joint_nodes = (int32_t *)malloc((size_t)skin->nJoints * sizeof(*joint_nodes));
+  joint_sources = (AkNode **)malloc((size_t)skin->nJoints * sizeof(*joint_sources));
+  if (!joint_nodes || !joint_sources) {
+    free(joint_sources);
+    free(joint_nodes);
+    free(joint_indices);
+    free(weights);
+    return 0;
+  }
+
+  joints = skinner->overrideJoints ? skinner->overrideJoints : skin->joints;
+  for (i = 0; i < skin->nJoints; i++) {
+    joint_sources[i] = joints ? joints[i] : NULL;
+    joint_nodes[i] = joint_sources[i]
+                     ? akb_scene_node_index_for(nodes, joint_sources[i])
+                     : -1;
+  }
+
+  inverse_bind_matrices = NULL;
+  if (skin->invBindPoses) {
+    inverse_bind_matrices = (float *)malloc((size_t)skin->nJoints
+                                            * 16
+                                            * sizeof(*inverse_bind_matrices));
+    if (!inverse_bind_matrices) {
+      free(joint_nodes);
+      free(joint_sources);
+      free(joint_indices);
+      free(weights);
+      return 0;
+    }
+    memcpy(inverse_bind_matrices,
+           skin->invBindPoses,
+           (size_t)skin->nJoints * 16 * sizeof(*inverse_bind_matrices));
+  }
+
+  out->skin_joints = joint_indices;
+  out->skin_weights = weights;
+  out->skin_joint_nodes = joint_nodes;
+  out->skin_joint_sources = joint_sources;
+  out->skin_inverse_bind_matrices = inverse_bind_matrices;
+  out->skin_root_source = skin->skeleton;
+  out->skin_root_node_index = akb_scene_node_index_for(nodes, skin->skeleton);
+  out->skin_vertex_count = (uint32_t)filled_count;
+  out->skin_joint_count = (uint32_t)skin->nJoints;
+  out->skin_joint_width = AKB_SKIN_JOINTS_PER_VERTEX;
+  out->has_skin = 1;
+  return 1;
+}
+
+static void
+akb_resolve_skin_joint_nodes(AkbPrimitiveList *list, AkbSceneNodeList *nodes) {
+  AkbPrimitive *prim;
+  uint32_t i;
+  size_t j;
+
+  if (!list || !nodes)
+    return;
+
+  for (j = 0; j < list->count; j++) {
+    prim = &list->items[j];
+    if (!prim->has_skin || !prim->skin_joint_sources || !prim->skin_joint_nodes)
+      continue;
+
+    for (i = 0; i < prim->skin_joint_count; i++) {
+      prim->skin_joint_nodes[i] = akb_scene_node_index_for(nodes,
+                                                           prim->skin_joint_sources[i]);
+    }
+    prim->skin_root_node_index = akb_scene_node_index_for(nodes,
+                                                          prim->skin_root_source);
+  }
+}
+
 static AkInput *
 akb_anim_sampler_input(AkAnimSampler *sampler, AkInputSemantic semantic) {
   AkInput *input;
@@ -1457,6 +1612,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
     return 0;
 
   *node_index = (int32_t)nodes->count;
+  out.source = node;
   snprintf(out.name, sizeof(out.name), "%s", akb_name(node->name, "AssetKitNode"));
   out.parent_index = parent_index;
   ak_transformCombine(node->transform, out.matrix);
@@ -1479,6 +1635,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
 
 static int
 akb_extract_primitive(AkbPrimitiveList *list,
+                      AkbSceneNodeList *nodes,
                       AkDoc *doc,
                       AkbSharedDoc *doc_owner,
                       AkbAnimation *animation,
@@ -1610,6 +1767,17 @@ akb_extract_primitive(AkbPrimitiveList *list,
     }
   }
 
+  if (node && node->geometry && node->geometry->skinner) {
+    if (!akb_extract_skin(&out,
+                          nodes,
+                          prim,
+                          prim_index,
+                          node->geometry->skinner)) {
+      akb_primitive_free(&out);
+      return 0;
+    }
+  }
+
   base_name = akb_name(mesh->name, akb_name(geom->name, "AssetKitMesh"));
   if (mesh->primitiveCount > 1)
     snprintf(out.name, sizeof(out.name), "%s_%u", base_name, prim_index);
@@ -1626,6 +1794,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
 
 static int
 akb_extract_mesh(AkbPrimitiveList *list,
+                 AkbSceneNodeList *nodes,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
                  AkbAnimation *animation,
@@ -1646,6 +1815,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
     if (prim->type != AKB_PRIMITIVE_TRIANGLES)
       continue;
     if (!akb_extract_primitive(list,
+                               nodes,
                                doc,
                                doc_owner,
                                animation,
@@ -1710,6 +1880,7 @@ akb_extract_node(AkbPrimitiveList *list,
 
     geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
     if (!akb_extract_mesh(list,
+                          nodes,
                           doc,
                           doc_owner,
                           animation,
@@ -1792,6 +1963,8 @@ akb_extract_doc(AkDoc *doc,
                          &coord))
     return 0;
 
+  akb_resolve_skin_joint_nodes(&import->primitives, &import->nodes);
+
   if (import->primitives.count > 0) {
     akb_list_set_coord_matrix(&import->primitives, &coord);
     return 1;
@@ -1799,7 +1972,7 @@ akb_extract_doc(AkDoc *doc,
 
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
-      if (!akb_extract_mesh(&import->primitives, doc, doc_owner, NULL, NULL, NULL, -1, geom))
+      if (!akb_extract_mesh(&import->primitives, &import->nodes, doc, doc_owner, NULL, NULL, NULL, -1, geom))
         return 0;
     }
   }
@@ -1993,6 +2166,11 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
   AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
+  AKB_SET_OBJ("has_skin", PyBool_FromLong(prim->has_skin));
+  AKB_SET_OBJ("skin_vertex_count", PyLong_FromUnsignedLong(prim->skin_vertex_count));
+  AKB_SET_OBJ("skin_joint_count", PyLong_FromUnsignedLong(prim->skin_joint_count));
+  AKB_SET_OBJ("skin_joint_width", PyLong_FromUnsignedLong(prim->skin_joint_width));
+  AKB_SET_OBJ("skin_root_node_index", PyLong_FromLong(prim->skin_root_node_index));
   AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
   AKB_SET_OBJ("anim_count",
               PyLong_FromUnsignedLong(prim->animation
@@ -2020,6 +2198,33 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("loop_totals_i32", akb_memoryview_or_empty(prim->loop_totals, (size_t)prim->face_count * sizeof(int32_t)));
   AKB_SET_OBJ("normals_f32", akb_memoryview_or_empty(prim->normals, prim->has_normals ? (size_t)prim->loop_count * 3 * sizeof(float) : 0));
   AKB_SET_OBJ("uvs_f32", akb_memoryview_or_empty(prim->uvs, prim->has_uvs ? (size_t)prim->loop_count * 2 * sizeof(float) : 0));
+  AKB_SET_OBJ("skin_joints_u16",
+              akb_memoryview_or_empty(prim->skin_joints,
+                                      prim->has_skin
+                                      ? (size_t)prim->skin_vertex_count
+                                        * prim->skin_joint_width
+                                        * sizeof(uint16_t)
+                                      : 0));
+  AKB_SET_OBJ("skin_weights_f32",
+              akb_memoryview_or_empty(prim->skin_weights,
+                                      prim->has_skin
+                                      ? (size_t)prim->skin_vertex_count
+                                        * prim->skin_joint_width
+                                        * sizeof(float)
+                                      : 0));
+  AKB_SET_OBJ("skin_joint_nodes_i32",
+              akb_memoryview_or_empty(prim->skin_joint_nodes,
+                                      prim->has_skin
+                                      ? (size_t)prim->skin_joint_count
+                                        * sizeof(int32_t)
+                                      : 0));
+  AKB_SET_OBJ("skin_inverse_bind_matrices_f32",
+              akb_memoryview_or_empty(prim->skin_inverse_bind_matrices,
+                                      prim->has_skin && prim->skin_inverse_bind_matrices
+                                      ? (size_t)prim->skin_joint_count
+                                        * 16
+                                        * sizeof(float)
+                                      : 0));
 
 #undef AKB_SET_OBJ
 

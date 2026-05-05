@@ -3,7 +3,7 @@ from __future__ import annotations
 from array import array
 
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 
 from .assetkit import AssetKit, AssetKitSceneData, MeshPrimitiveData, SceneNodeData, native_load_meshes
 
@@ -36,6 +36,7 @@ def import_assetkit_file(
 
     coord_root = _create_coord_root(primitives)
     node_objects = _create_scene_nodes(scene_nodes, coord_root)
+    node_data = {index: node for index, node in enumerate(scene_nodes)}
     for primitive in primitives:
         node_parent = node_objects.get(primitive.node_index)
         parent = node_parent or coord_root
@@ -43,6 +44,8 @@ def import_assetkit_file(
         obj = _create_mesh_object(
             primitive,
             parent,
+            node_objects=node_objects,
+            node_data=node_data,
             apply_transform=not use_node_parent,
             apply_animation=not use_node_parent,
         )
@@ -55,11 +58,20 @@ def _create_mesh_object(
     data: MeshPrimitiveData,
     parent: bpy.types.Object | None = None,
     *,
+    node_objects: dict[int, bpy.types.Object] | None = None,
+    node_data: dict[int, SceneNodeData] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
 ) -> bpy.types.Object:
     if data.vertices_f32 and data.indices_u32:
-        return _create_mesh_object_bulk(data, parent, apply_transform=apply_transform, apply_animation=apply_animation)
+        return _create_mesh_object_bulk(
+            data,
+            parent,
+            node_objects=node_objects,
+            node_data=node_data,
+            apply_transform=apply_transform,
+            apply_animation=apply_animation,
+        )
 
     mesh = bpy.data.meshes.new(data.name)
     mesh.from_pydata(data.vertices, [], data.faces)
@@ -83,6 +95,7 @@ def _create_mesh_object(
     if material:
         mesh.materials.append(material)
     _apply_shape_keys(obj, data)
+    _apply_skin(obj, data, node_objects or {}, node_data or {})
     if apply_animation:
         _apply_animation(obj, data)
 
@@ -96,6 +109,8 @@ def _create_mesh_object_bulk(
     data: MeshPrimitiveData,
     parent: bpy.types.Object | None = None,
     *,
+    node_objects: dict[int, bpy.types.Object] | None = None,
+    node_data: dict[int, SceneNodeData] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
 ) -> bpy.types.Object:
@@ -147,6 +162,7 @@ def _create_mesh_object_bulk(
     if material:
         mesh.materials.append(material)
     _apply_shape_keys(obj, data)
+    _apply_skin(obj, data, node_objects or {}, node_data or {})
     if apply_animation:
         _apply_animation(obj, data)
 
@@ -427,6 +443,226 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
             fcurve.update()
 
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
+
+    if end_frame > scene.frame_end:
+        scene.frame_end = end_frame
+
+
+def _apply_skin(
+    obj: bpy.types.Object,
+    data: MeshPrimitiveData,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+) -> None:
+    if not data.has_skin or data.skin_vertex_count <= 0 or data.skin_joint_count <= 0:
+        return
+
+    joints = _buffer_view(data.skin_joints_u16, "H")
+    weights = _buffer_view(data.skin_weights_f32, "f")
+    joint_nodes = _buffer_view(data.skin_joint_nodes_i32, "i")
+    if joints is None or weights is None or joint_nodes is None:
+        return
+
+    width = max(1, int(data.skin_joint_width or 4))
+    vertex_count = min(data.skin_vertex_count, len(obj.data.vertices))
+    joint_names = _create_skin_vertex_groups(obj, data, joints, weights, vertex_count, width, joint_nodes, node_objects)
+    armature = _create_skin_armature(obj, joint_names, joint_nodes, node_objects, node_data)
+    if not armature:
+        return
+
+    modifier = obj.modifiers.new("AssetKit Skin", "ARMATURE")
+    modifier.object = armature
+    modifier.use_vertex_groups = True
+
+
+def _create_skin_vertex_groups(
+    obj: bpy.types.Object,
+    data: MeshPrimitiveData,
+    joints: memoryview,
+    weights: memoryview,
+    vertex_count: int,
+    width: int,
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+) -> list[str]:
+    groups = []
+    for joint_index in range(data.skin_joint_count):
+        node_index = int(joint_nodes[joint_index]) if joint_index < len(joint_nodes) else -1
+        node = node_objects.get(node_index)
+        group = obj.vertex_groups.new(name=node.name if node else f"AssetKitJoint_{joint_index}")
+        groups.append(group)
+
+    group_count = len(groups)
+    for vertex_index in range(vertex_count):
+        base = vertex_index * width
+        for slot in range(width):
+            weight = weights[base + slot]
+            if weight <= 0.0:
+                continue
+            joint_index = int(joints[base + slot])
+            if 0 <= joint_index < group_count:
+                groups[joint_index].add((vertex_index,), weight, "REPLACE")
+
+    return [group.name for group in groups]
+
+
+def _create_skin_armature(
+    obj: bpy.types.Object,
+    joint_names: list[str],
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+) -> bpy.types.Object | None:
+    if not joint_names:
+        return None
+
+    armature_data = bpy.data.armatures.new(f"{obj.name}_Armature")
+    armature = bpy.data.objects.new(f"{obj.name}_Armature", armature_data)
+    bpy.context.collection.objects.link(armature)
+
+    previous_active = bpy.context.view_layer.objects.active
+    previous_selection = list(bpy.context.selected_objects)
+    if previous_active and previous_active.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    bpy.ops.object.select_all(action="DESELECT")
+    armature.select_set(True)
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode="EDIT")
+
+    edit_bones = armature_data.edit_bones
+    positions = _joint_positions(joint_nodes, node_objects)
+    node_to_joint = {
+        int(joint_nodes[index]): index
+        for index in range(min(len(joint_nodes), len(joint_names)))
+        if int(joint_nodes[index]) >= 0
+    }
+
+    for index, name in enumerate(joint_names):
+        bone = edit_bones.new(name)
+        head = positions[index]
+        tail = _joint_tail(index, joint_nodes, node_objects, node_to_joint, positions)
+        bone.head = head
+        bone.tail = tail
+
+    for index, name in enumerate(joint_names):
+        node_index = int(joint_nodes[index]) if index < len(joint_nodes) else -1
+        node = node_objects.get(node_index)
+        parent = node.parent if node else None
+        parent_joint = None
+        while parent and parent_joint is None:
+            for candidate_node_index, candidate_joint in node_to_joint.items():
+                if node_objects.get(candidate_node_index) == parent:
+                    parent_joint = candidate_joint
+                    break
+            parent = parent.parent
+        if parent_joint is not None and parent_joint < len(joint_names):
+            edit_bones[name].parent = edit_bones[joint_names[parent_joint]]
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for selected in previous_selection:
+        selected.select_set(True)
+    bpy.context.view_layer.objects.active = previous_active
+    return armature
+
+
+def _joint_positions(joint_nodes: memoryview, node_objects: dict[int, bpy.types.Object]) -> list[Vector]:
+    positions = []
+    for index in range(len(joint_nodes)):
+        node = node_objects.get(int(joint_nodes[index]))
+        if node:
+            positions.append(node.matrix_world.to_translation())
+        else:
+            positions.append(Vector((0.0, float(index) * 0.05, 0.0)))
+    return positions
+
+
+def _joint_tail(
+    joint_index: int,
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    node_to_joint: dict[int, int],
+    positions: list[Vector],
+) -> Vector:
+    node = node_objects.get(int(joint_nodes[joint_index])) if joint_index < len(joint_nodes) else None
+    if node:
+        for child_node_index, child_joint_index in node_to_joint.items():
+            child = node_objects.get(child_node_index)
+            if child and child.parent == node and child_joint_index < len(positions):
+                tail = positions[child_joint_index]
+                if (tail - positions[joint_index]).length > 1.0e-5:
+                    return tail
+    return positions[joint_index] + Vector((0.0, 0.05, 0.0))
+
+
+def _apply_bone_animations(
+    armature: bpy.types.Object,
+    joint_names: list[str],
+    joint_nodes: memoryview,
+    node_data: dict[int, SceneNodeData],
+) -> None:
+    animated = False
+    for index, name in enumerate(joint_names):
+        pose_bone = armature.pose.bones.get(name)
+        if pose_bone:
+            pose_bone.rotation_mode = "QUATERNION"
+        node = node_data.get(int(joint_nodes[index]) if index < len(joint_nodes) else -1)
+        if node and node.anim_channels:
+            animated = True
+
+    if not animated:
+        return
+
+    scene = bpy.context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    action = bpy.data.actions.new(f"{armature.name}_AssetKit")
+    armature.animation_data_create()
+    armature.animation_data.action = action
+    end_frame = scene.frame_end
+
+    for index, name in enumerate(joint_names):
+        pose_bone = armature.pose.bones.get(name)
+        node = node_data.get(int(joint_nodes[index]) if index < len(joint_nodes) else -1)
+        if not pose_bone or not node or not node.anim_channels:
+            continue
+
+        for channel in node.anim_channels:
+            target = int(channel.get("target") or 0)
+            path, width = _anim_target_path(target)
+            if not path:
+                continue
+
+            count = int(channel.get("count") or 0)
+            value_width = int(channel.get("value_width") or 0)
+            target_offset = int(channel.get("target_offset") or 0)
+            is_partial = bool(channel.get("is_partial"))
+            times = _buffer_view(channel.get("times_f32") or b"", "f")
+            values = _buffer_view(channel.get("values_f32") or b"", "f")
+            if count <= 0 or value_width <= 0 or times is None or values is None:
+                continue
+
+            interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+            component_count = 1 if is_partial else min(width - target_offset, value_width)
+            data_path = pose_bone.path_from_id(path)
+            for component in range(component_count):
+                target_index = target_offset + component
+                value_index = 0 if is_partial else component
+                fcurve = _ensure_fcurve(action, armature, data_path, target_index, group_name=name)
+                coords = array("f", [0.0]) * (count * 2)
+                for key_index in range(count):
+                    coords[key_index * 2] = times[key_index] * fps
+                    coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
+
+                fcurve.keyframe_points.add(count)
+                fcurve.keyframe_points.foreach_set("co", coords)
+                for point in fcurve.keyframe_points:
+                    point.interpolation = interpolation
+                fcurve.update()
+
+            end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
