@@ -42,8 +42,17 @@ typedef struct AkbPrimitive {
   char     material_name[512];
   char     base_color_texture[1024];
   char     metallic_roughness_texture[1024];
+  char     occlusion_texture[1024];
   char     normal_texture[1024];
   char     emissive_texture[1024];
+  char     specular_texture[1024];
+  char     specular_color_texture[1024];
+  char     clearcoat_texture[1024];
+  char     clearcoat_roughness_texture[1024];
+  char     clearcoat_normal_texture[1024];
+  char     transmission_texture[1024];
+  char     sheen_color_texture[1024];
+  char     sheen_roughness_texture[1024];
   float   *vertices;
   uint32_t *indices;
   int32_t  *loop_meta;
@@ -57,10 +66,20 @@ typedef struct AkbPrimitive {
   float   *skin_inverse_bind_matrices;
   float    base_color[4];
   float    emissive_color[3];
+  float    specular_color[3];
+  float    sheen_color[3];
   float    metallic;
   float    roughness;
   float    alpha_cutoff;
   float    normal_scale;
+  float    occlusion_strength;
+  float    specular_strength;
+  float    ior;
+  float    clearcoat;
+  float    clearcoat_roughness;
+  float    clearcoat_normal_scale;
+  float    transmission;
+  float    sheen_roughness;
   float    matrix[16];
   float    coord_matrix[16];
   int32_t  node_index;
@@ -563,10 +582,20 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
   out->emissive_color[0] = 0.0f;
   out->emissive_color[1] = 0.0f;
   out->emissive_color[2] = 0.0f;
+  out->specular_color[0] = 1.0f;
+  out->specular_color[1] = 1.0f;
+  out->specular_color[2] = 1.0f;
+  out->sheen_color[0] = 0.0f;
+  out->sheen_color[1] = 0.0f;
+  out->sheen_color[2] = 0.0f;
   out->metallic = 1.0f;
   out->roughness = 1.0f;
   out->alpha_cutoff = 0.5f;
   out->normal_scale = 1.0f;
+  out->occlusion_strength = 1.0f;
+  out->specular_strength = 1.0f;
+  out->ior = 1.5f;
+  out->clearcoat_normal_scale = 1.0f;
 
   mat = prim ? prim->material : NULL;
   if (!mat)
@@ -601,6 +630,53 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
   if (cmn->normal) {
     out->normal_scale = cmn->normal->scale == 0.0f ? 1.0f : cmn->normal->scale;
     akb_copy_texture_path(doc, cmn->normal->tex, out->normal_texture, sizeof(out->normal_texture));
+  }
+
+  if (cmn->occlusion) {
+    out->occlusion_strength = cmn->occlusion->strength == 0.0f ? 1.0f : cmn->occlusion->strength;
+    akb_copy_texture_path(doc, cmn->occlusion->tex, out->occlusion_texture, sizeof(out->occlusion_texture));
+  }
+
+  if (cmn->specular) {
+    out->specular_strength = cmn->specular->strength;
+    if (cmn->specular->color) {
+      if (cmn->specular->color->color) {
+        out->specular_color[0] = cmn->specular->color->color->vec[0];
+        out->specular_color[1] = cmn->specular->color->color->vec[1];
+        out->specular_color[2] = cmn->specular->color->color->vec[2];
+      }
+      akb_copy_texture_path(doc, cmn->specular->color->texture, out->specular_color_texture, sizeof(out->specular_color_texture));
+    }
+    akb_copy_texture_path(doc, cmn->specular->specularTex, out->specular_texture, sizeof(out->specular_texture));
+  }
+
+  out->ior = cmn->ior > 0.0f ? cmn->ior : out->ior;
+
+  if (cmn->clearcoat) {
+    out->clearcoat = cmn->clearcoat->intensity;
+    out->clearcoat_roughness = cmn->clearcoat->roughness;
+    out->clearcoat_normal_scale = cmn->clearcoat->normalScale == 0.0f ? 1.0f : cmn->clearcoat->normalScale;
+    akb_copy_texture_path(doc, cmn->clearcoat->texture, out->clearcoat_texture, sizeof(out->clearcoat_texture));
+    akb_copy_texture_path(doc, cmn->clearcoat->roughnessTexture, out->clearcoat_roughness_texture, sizeof(out->clearcoat_roughness_texture));
+    akb_copy_texture_path(doc, cmn->clearcoat->normalTexture, out->clearcoat_normal_texture, sizeof(out->clearcoat_normal_texture));
+  }
+
+  if (cmn->transmission) {
+    out->transmission = cmn->transmission->factor;
+    akb_copy_texture_path(doc, cmn->transmission->texture, out->transmission_texture, sizeof(out->transmission_texture));
+  }
+
+  if (cmn->sheen) {
+    out->sheen_roughness = cmn->sheen->roughness;
+    if (cmn->sheen->color) {
+      if (cmn->sheen->color->color) {
+        out->sheen_color[0] = cmn->sheen->color->color->vec[0];
+        out->sheen_color[1] = cmn->sheen->color->color->vec[1];
+        out->sheen_color[2] = cmn->sheen->color->color->vec[2];
+      }
+      akb_copy_texture_path(doc, cmn->sheen->color->texture, out->sheen_color_texture, sizeof(out->sheen_color_texture));
+    }
+    akb_copy_texture_path(doc, cmn->sheen->roughnessTexture, out->sheen_roughness_texture, sizeof(out->sheen_roughness_texture));
   }
 
   if (cmn->emission) {
@@ -2158,10 +2234,26 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                              prim->emissive_color[0],
                                              prim->emissive_color[1],
                                              prim->emissive_color[2]));
+  AKB_SET_OBJ("specular_color", Py_BuildValue("(fff)",
+                                             prim->specular_color[0],
+                                             prim->specular_color[1],
+                                             prim->specular_color[2]));
+  AKB_SET_OBJ("sheen_color", Py_BuildValue("(fff)",
+                                          prim->sheen_color[0],
+                                          prim->sheen_color[1],
+                                          prim->sheen_color[2]));
   AKB_SET_OBJ("metallic", PyFloat_FromDouble(prim->metallic));
   AKB_SET_OBJ("roughness", PyFloat_FromDouble(prim->roughness));
   AKB_SET_OBJ("alpha_cutoff", PyFloat_FromDouble(prim->alpha_cutoff));
   AKB_SET_OBJ("normal_scale", PyFloat_FromDouble(prim->normal_scale));
+  AKB_SET_OBJ("occlusion_strength", PyFloat_FromDouble(prim->occlusion_strength));
+  AKB_SET_OBJ("specular_strength", PyFloat_FromDouble(prim->specular_strength));
+  AKB_SET_OBJ("ior", PyFloat_FromDouble(prim->ior));
+  AKB_SET_OBJ("clearcoat", PyFloat_FromDouble(prim->clearcoat));
+  AKB_SET_OBJ("clearcoat_roughness", PyFloat_FromDouble(prim->clearcoat_roughness));
+  AKB_SET_OBJ("clearcoat_normal_scale", PyFloat_FromDouble(prim->clearcoat_normal_scale));
+  AKB_SET_OBJ("transmission", PyFloat_FromDouble(prim->transmission));
+  AKB_SET_OBJ("sheen_roughness", PyFloat_FromDouble(prim->sheen_roughness));
   AKB_SET_OBJ("alpha_mode", PyLong_FromUnsignedLong(prim->alpha_mode));
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
@@ -2190,8 +2282,17 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                       prim->has_coord_matrix ? 16 * sizeof(float) : 0));
   AKB_SET_OBJ("base_color_texture", PyUnicode_FromString(prim->base_color_texture));
   AKB_SET_OBJ("metallic_roughness_texture", PyUnicode_FromString(prim->metallic_roughness_texture));
+  AKB_SET_OBJ("occlusion_texture", PyUnicode_FromString(prim->occlusion_texture));
   AKB_SET_OBJ("normal_texture", PyUnicode_FromString(prim->normal_texture));
   AKB_SET_OBJ("emissive_texture", PyUnicode_FromString(prim->emissive_texture));
+  AKB_SET_OBJ("specular_texture", PyUnicode_FromString(prim->specular_texture));
+  AKB_SET_OBJ("specular_color_texture", PyUnicode_FromString(prim->specular_color_texture));
+  AKB_SET_OBJ("clearcoat_texture", PyUnicode_FromString(prim->clearcoat_texture));
+  AKB_SET_OBJ("clearcoat_roughness_texture", PyUnicode_FromString(prim->clearcoat_roughness_texture));
+  AKB_SET_OBJ("clearcoat_normal_texture", PyUnicode_FromString(prim->clearcoat_normal_texture));
+  AKB_SET_OBJ("transmission_texture", PyUnicode_FromString(prim->transmission_texture));
+  AKB_SET_OBJ("sheen_color_texture", PyUnicode_FromString(prim->sheen_color_texture));
+  AKB_SET_OBJ("sheen_roughness_texture", PyUnicode_FromString(prim->sheen_roughness_texture));
   AKB_SET_OBJ("vertices_f32", akb_memoryview_or_empty(prim->vertices, (size_t)prim->vertex_count * 3 * sizeof(float)));
   AKB_SET_OBJ("indices_u32", akb_memoryview_or_empty(prim->indices, (size_t)prim->loop_count * sizeof(uint32_t)));
   AKB_SET_OBJ("loop_starts_i32", akb_memoryview_or_empty(prim->loop_starts, (size_t)prim->face_count * sizeof(int32_t)));

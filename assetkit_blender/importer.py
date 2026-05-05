@@ -721,15 +721,42 @@ def _create_material(data: MeshPrimitiveData) -> bpy.types.Material | None:
     _set_input(bsdf, "Roughness", data.roughness)
     _set_input(bsdf, "Alpha", data.base_color[3])
     _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
+    _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
+    _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
+    _set_first_input(bsdf, ("IOR",), data.ior)
+    _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
+    _set_first_input(bsdf, ("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
+    _set_first_input(bsdf, ("Transmission Weight", "Transmission"), data.transmission)
+    _set_first_input(bsdf, ("Sheen Weight", "Sheen"), max(data.sheen_color))
+    _set_first_input(bsdf, ("Sheen Tint",), (*data.sheen_color, 1.0))
+    _set_first_input(bsdf, ("Sheen Roughness",), data.sheen_roughness)
 
     if data.base_color_texture:
         _link_base_color_texture(mat, bsdf, data)
     if data.metallic_roughness_texture:
         _link_metallic_roughness_texture(mat, bsdf, data.metallic_roughness_texture)
+    if data.occlusion_texture:
+        _link_image_first(mat, bsdf, data.occlusion_texture, ("Ambient Occlusion", "Occlusion"), colorspace="Non-Color")
     if data.normal_texture:
         _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale)
     if data.emissive_texture:
         _link_image(mat, bsdf, data.emissive_texture, "Emission Color", colorspace="sRGB")
+    if data.specular_texture:
+        _link_image_first(mat, bsdf, data.specular_texture, ("Specular IOR Level", "Specular"), colorspace="Non-Color")
+    if data.specular_color_texture:
+        _link_image_first(mat, bsdf, data.specular_color_texture, ("Specular Tint",), colorspace="sRGB")
+    if data.clearcoat_texture:
+        _link_image_first(mat, bsdf, data.clearcoat_texture, ("Coat Weight", "Clearcoat"), colorspace="Non-Color")
+    if data.clearcoat_roughness_texture:
+        _link_image_first(mat, bsdf, data.clearcoat_roughness_texture, ("Coat Roughness", "Clearcoat Roughness"), colorspace="Non-Color")
+    if data.clearcoat_normal_texture:
+        _link_normal_texture(mat, bsdf, data.clearcoat_normal_texture, data.clearcoat_normal_scale, input_name="Coat Normal")
+    if data.transmission_texture:
+        _link_image_first(mat, bsdf, data.transmission_texture, ("Transmission Weight", "Transmission"), colorspace="Non-Color")
+    if data.sheen_color_texture:
+        _link_image_first(mat, bsdf, data.sheen_color_texture, ("Sheen Tint",), colorspace="sRGB")
+    if data.sheen_roughness_texture:
+        _link_image_first(mat, bsdf, data.sheen_roughness_texture, ("Sheen Roughness",), colorspace="Non-Color")
 
     return mat
 
@@ -737,7 +764,21 @@ def _create_material(data: MeshPrimitiveData) -> bpy.types.Material | None:
 def _set_input(node, name: str, value) -> None:
     socket = node.inputs.get(name)
     if socket:
-        socket.default_value = value
+        try:
+            socket.default_value = value
+        except TypeError:
+            pass
+
+
+def _set_first_input(node, names: tuple[str, ...], value) -> None:
+    for name in names:
+        socket = node.inputs.get(name)
+        if socket:
+            try:
+                socket.default_value = value
+            except TypeError:
+                pass
+            return
 
 
 def _link_image(mat: bpy.types.Material, target, path: str, input_name: str, colorspace: str) -> None:
@@ -748,6 +789,24 @@ def _link_image(mat: bpy.types.Material, target, path: str, input_name: str, col
     socket = target.inputs.get(input_name)
     if socket:
         mat.node_tree.links.new(tex.outputs["Color"], socket)
+
+
+def _link_image_first(
+    mat: bpy.types.Material,
+    target,
+    path: str,
+    input_names: tuple[str, ...],
+    colorspace: str,
+) -> None:
+    tex = _image_texture_node(mat, path, colorspace)
+    if not tex:
+        return
+
+    for input_name in input_names:
+        socket = target.inputs.get(input_name)
+        if socket:
+            mat.node_tree.links.new(tex.outputs["Color"], socket)
+            return
 
 
 def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveData) -> None:
@@ -782,7 +841,13 @@ def _link_metallic_roughness_texture(mat: bpy.types.Material, bsdf, path: str) -
         links.new(separate.outputs["Blue"], metallic)
 
 
-def _link_normal_texture(mat: bpy.types.Material, bsdf, path: str, strength: float) -> None:
+def _link_normal_texture(
+    mat: bpy.types.Material,
+    bsdf,
+    path: str,
+    strength: float,
+    input_name: str = "Normal",
+) -> None:
     tex = _image_texture_node(mat, path, "Non-Color")
     if not tex:
         return
@@ -792,7 +857,7 @@ def _link_normal_texture(mat: bpy.types.Material, bsdf, path: str, strength: flo
     normal_map = nodes.new("ShaderNodeNormalMap")
     normal_map.inputs["Strength"].default_value = strength
     links.new(tex.outputs["Color"], normal_map.inputs["Color"])
-    normal = bsdf.inputs.get("Normal")
+    normal = bsdf.inputs.get(input_name)
     if normal:
         links.new(normal_map.outputs["Normal"], normal)
 
