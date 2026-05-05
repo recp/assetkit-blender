@@ -12,7 +12,9 @@
 #define AKB_PRIMITIVE_TRIANGLES 3
 #define AKB_INPUT_NORMAL 13
 #define AKB_INPUT_POSITION 16
+#define AKB_INPUT_TANGENT 17
 #define AKB_INPUT_TEXCOORD 19
+#define AKB_INPUT_TEXTANGENT 20
 #define AKB_INPUT_UV 21
 #define AKB_ANIM_TRANSLATION 1
 #define AKB_ANIM_ROTATION_QUAT 2
@@ -22,6 +24,7 @@
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
 #define AKB_SKIN_JOINTS_PER_VERTEX 4
+#define AKB_TEXTURE_INFO_MAX 24
 
 typedef struct AkbMorphTarget {
   char     name[512];
@@ -30,11 +33,47 @@ typedef struct AkbMorphTarget {
   uint32_t vertex_count;
 } AkbMorphTarget;
 
+typedef struct AkbLoopFloatAttribute {
+  char     name[64];
+  float   *values;
+  uint32_t width;
+  uint32_t set;
+} AkbLoopFloatAttribute;
+
+typedef struct AkbTextureInfo {
+  char    role[64];
+  char    path[1024];
+  char    texcoord[64];
+  char    coord_input_name[64];
+  float   transform_offset[2];
+  float   transform_scale[2];
+  float   transform_rotation;
+  int32_t slot;
+  int32_t transform_slot;
+  int32_t wrap_s;
+  int32_t wrap_t;
+  int32_t wrap_p;
+  int32_t min_filter;
+  int32_t mag_filter;
+  int32_t mip_filter;
+  uint8_t has_transform;
+} AkbTextureInfo;
+
+typedef struct AkbMaterialVariantMap {
+  char     variant_name[512];
+  char     material_name[512];
+  uint32_t variant_index;
+} AkbMaterialVariantMap;
+
 typedef struct AkbPrimitive {
   struct AkbSharedDoc *doc_owner;
   struct AkbAnimation *animation;
   struct AkbAnimation *morph_animation;
   AkbMorphTarget *morph_targets;
+  AkbLoopFloatAttribute *uv_sets;
+  AkbLoopFloatAttribute *color_sets;
+  AkbMaterialVariantMap *material_variants;
+  AkbTextureInfo texture_infos[AKB_TEXTURE_INFO_MAX];
   AkNode   **skin_joint_sources;
   AkNode    *skin_root_source;
   char     name[512];
@@ -53,6 +92,11 @@ typedef struct AkbPrimitive {
   char     transmission_texture[1024];
   char     sheen_color_texture[1024];
   char     sheen_roughness_texture[1024];
+  char     iridescence_texture[1024];
+  char     iridescence_thickness_texture[1024];
+  char     volume_thickness_texture[1024];
+  char     anisotropy_texture[1024];
+  char     diffuse_transmission_texture[1024];
   float   *vertices;
   uint32_t *indices;
   int32_t  *loop_meta;
@@ -61,6 +105,7 @@ typedef struct AkbPrimitive {
   float   *normals;
   float   *uvs;
   float   *colors;
+  float   *tangents;
   uint16_t *skin_joints;
   int32_t  *skin_joint_nodes;
   float   *skin_weights;
@@ -69,6 +114,8 @@ typedef struct AkbPrimitive {
   float    emissive_color[3];
   float    specular_color[3];
   float    sheen_color[3];
+  float    volume_attenuation_color[3];
+  float    diffuse_transmission_color[3];
   float    metallic;
   float    roughness;
   float    alpha_cutoff;
@@ -81,6 +128,16 @@ typedef struct AkbPrimitive {
   float    clearcoat_normal_scale;
   float    transmission;
   float    sheen_roughness;
+  float    iridescence;
+  float    iridescence_ior;
+  float    iridescence_thickness_minimum;
+  float    iridescence_thickness_maximum;
+  float    volume_thickness;
+  float    volume_attenuation_distance;
+  float    anisotropy;
+  float    anisotropy_rotation;
+  float    diffuse_transmission;
+  float    dispersion;
   float    matrix[16];
   float    coord_matrix[16];
   int32_t  node_index;
@@ -88,13 +145,18 @@ typedef struct AkbPrimitive {
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
+  uint32_t uv_set_count;
+  uint32_t color_set_count;
+  uint32_t texture_info_count;
   uint32_t morph_target_count;
+  uint32_t material_variant_count;
   uint32_t skin_vertex_count;
   uint32_t skin_joint_count;
   uint32_t skin_joint_width;
   uint8_t  has_normals;
   uint8_t  has_uvs;
   uint8_t  has_colors;
+  uint8_t  has_tangents;
   uint8_t  has_skin;
   uint8_t  double_sided;
   uint8_t  alpha_mode;
@@ -153,6 +215,7 @@ typedef struct AkbLoadOptions {
   uint8_t     gen_normals;
   uint8_t     cvt_triangle_strip;
   uint8_t     cvt_triangle_fan;
+  uint8_t     use_mmap;
 } AkbLoadOptions;
 
 typedef struct AkbSavedOptions {
@@ -162,6 +225,7 @@ typedef struct AkbSavedOptions {
   uintptr_t gen_normals;
   uintptr_t cvt_triangle_strip;
   uintptr_t cvt_triangle_fan;
+  uintptr_t use_mmap;
 } AkbSavedOptions;
 
 typedef struct AkbSharedDoc {
@@ -303,6 +367,7 @@ akb_load_options_default(AkbLoadOptions *options) {
   options->gen_normals = 1;
   options->cvt_triangle_strip = 1;
   options->cvt_triangle_fan = 1;
+  options->use_mmap = 0;
 }
 
 static int
@@ -341,6 +406,10 @@ akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
   if (value)
     options->cvt_triangle_fan = PyObject_IsTrue(value) ? 1 : 0;
 
+  value = PyDict_GetItemString(dict, "use_mmap");
+  if (value)
+    options->use_mmap = PyObject_IsTrue(value) ? 1 : 0;
+
   return !PyErr_Occurred();
 }
 
@@ -361,6 +430,7 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   saved->gen_normals = ak_opt_get(AK_OPT_GEN_NORMALS_IF_NEEDED);
   saved->cvt_triangle_strip = ak_opt_get(AK_OPT_CVT_TRIANGLESTRIP);
   saved->cvt_triangle_fan = ak_opt_get(AK_OPT_CVT_TRIANGLEFAN);
+  saved->use_mmap = ak_opt_get(AK_OPT_USE_MMAP);
 
   ak_opt_set(AK_OPT_COORD, (uintptr_t)options->target_coord);
   ak_opt_set(AK_OPT_COORD_CONVERT_TYPE,
@@ -369,6 +439,7 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_GEN_NORMALS_IF_NEEDED, options->gen_normals);
   ak_opt_set(AK_OPT_CVT_TRIANGLESTRIP, options->cvt_triangle_strip);
   ak_opt_set(AK_OPT_CVT_TRIANGLEFAN, options->cvt_triangle_fan);
+  ak_opt_set(AK_OPT_USE_MMAP, options->use_mmap);
 }
 
 static void
@@ -379,6 +450,7 @@ akb_options_restore(const AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_GEN_NORMALS_IF_NEEDED, saved->gen_normals);
   ak_opt_set(AK_OPT_CVT_TRIANGLESTRIP, saved->cvt_triangle_strip);
   ak_opt_set(AK_OPT_CVT_TRIANGLEFAN, saved->cvt_triangle_fan);
+  ak_opt_set(AK_OPT_USE_MMAP, saved->use_mmap);
 }
 
 static void
@@ -442,13 +514,23 @@ akb_primitive_free(AkbPrimitive *prim) {
     free(prim->indices);
   free(prim->loop_meta);
   free(prim->normals);
-  free(prim->uvs);
-  free(prim->colors);
+  for (i = 0; i < prim->uv_set_count; i++)
+    free(prim->uv_sets[i].values);
+  free(prim->uv_sets);
+  for (i = 0; i < prim->color_set_count; i++)
+    free(prim->color_sets[i].values);
+  free(prim->color_sets);
+  if (!prim->uv_set_count)
+    free(prim->uvs);
+  if (!prim->color_set_count)
+    free(prim->colors);
+  free(prim->tangents);
   free(prim->skin_joints);
   free(prim->skin_joint_nodes);
   free(prim->skin_weights);
   free(prim->skin_inverse_bind_matrices);
   free(prim->skin_joint_sources);
+  free(prim->material_variants);
   for (i = 0; i < prim->morph_target_count; i++)
     free(prim->morph_targets[i].positions);
   free(prim->morph_targets);
@@ -572,9 +654,114 @@ akb_copy_texture_path(AkDoc *doc, AkTextureRef *texref, char *dest, size_t capac
     snprintf(dest, capacity, "%s/%s", doc->inf->dir, path);
 }
 
+static AkbTextureInfo *
+akb_texture_info_for_role(AkbPrimitive *out, const char *role) {
+  uint32_t i;
+
+  if (!out || !role || !role[0])
+    return NULL;
+
+  for (i = 0; i < out->texture_info_count; i++) {
+    if (strcmp(out->texture_infos[i].role, role) == 0)
+      return &out->texture_infos[i];
+  }
+
+  if (out->texture_info_count >= AKB_TEXTURE_INFO_MAX)
+    return NULL;
+
+  i = out->texture_info_count++;
+  memset(&out->texture_infos[i], 0, sizeof(out->texture_infos[i]));
+  snprintf(out->texture_infos[i].role, sizeof(out->texture_infos[i].role), "%s", role);
+  return &out->texture_infos[i];
+}
+
+static int32_t
+akb_texref_slot(AkTextureRef *texref, AkInstanceMaterial *inst_mat) {
+  AkBindVertexInput *bvi;
+  int32_t slot;
+
+  if (!texref)
+    return 0;
+
+  slot = texref->slot;
+  if (texref->transform && texref->transform->slot > -1)
+    slot = texref->transform->slot;
+
+  if (texref->texcoord && inst_mat) {
+    for (bvi = inst_mat->bindVertexInput; bvi; bvi = bvi->next) {
+      if (bvi->semantic && strcmp(bvi->semantic, texref->texcoord) == 0) {
+        slot = (int32_t)bvi->inputSet;
+        break;
+      }
+    }
+  }
+
+  return slot >= 0 ? slot : 0;
+}
+
 static void
-akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
+akb_copy_texture_info(AkDoc *doc,
+                      AkTextureRef *texref,
+                      AkInstanceMaterial *inst_mat,
+                      const char *role,
+                      char *dest,
+                      size_t capacity,
+                      AkbPrimitive *out) {
+  AkbTextureInfo *info;
+  AkSampler *sampler;
+  AkTextureTransform *transform;
+
+  akb_copy_texture_path(doc, texref, dest, capacity);
+  if (!dest || !dest[0])
+    return;
+
+  info = akb_texture_info_for_role(out, role);
+  if (!info)
+    return;
+
+  memset(info->path, 0, sizeof(info->path));
+  snprintf(info->path, sizeof(info->path), "%s", dest);
+  info->slot = akb_texref_slot(texref, inst_mat);
+
+  if (texref->texcoord)
+    snprintf(info->texcoord, sizeof(info->texcoord), "%s", texref->texcoord);
+  if (texref->coordInputName)
+    snprintf(info->coord_input_name, sizeof(info->coord_input_name), "%s", texref->coordInputName);
+
+  sampler = texref->texture ? texref->texture->sampler : NULL;
+  info->wrap_s = sampler ? sampler->wrapS : AK_WRAP_MODE_WRAP;
+  info->wrap_t = sampler ? sampler->wrapT : AK_WRAP_MODE_WRAP;
+  info->wrap_p = sampler ? sampler->wrapP : AK_WRAP_MODE_WRAP;
+  info->min_filter = sampler ? sampler->minfilter : AK_MINFILTER_LINEAR;
+  info->mag_filter = sampler ? sampler->magfilter : AK_MAGFILTER_LINEAR;
+  info->mip_filter = sampler ? sampler->mipfilter : AK_MIPFILTER_LINEAR;
+
+  transform = texref->transform;
+  info->transform_offset[0] = 0.0f;
+  info->transform_offset[1] = 0.0f;
+  info->transform_scale[0] = 1.0f;
+  info->transform_scale[1] = 1.0f;
+  info->transform_rotation = 0.0f;
+  info->transform_slot = -1;
+  info->has_transform = 0;
+  if (transform) {
+    info->transform_offset[0] = transform->offset[0];
+    info->transform_offset[1] = transform->offset[1];
+    info->transform_scale[0] = transform->scale[0];
+    info->transform_scale[1] = transform->scale[1];
+    info->transform_rotation = transform->rotation;
+    info->transform_slot = transform->slot;
+    info->has_transform = 1;
+  }
+}
+
+static void
+akb_extract_material(AkDoc *doc,
+                     AkMeshPrimitive *prim,
+                     AkBindMaterial *bind_material,
+                     AkbPrimitive *out) {
   AkMaterial *mat;
+  AkInstanceMaterial *inst_mat;
   AkEffect *effect;
   AkTechniqueFxCommon *cmn;
 
@@ -591,6 +778,12 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
   out->sheen_color[0] = 0.0f;
   out->sheen_color[1] = 0.0f;
   out->sheen_color[2] = 0.0f;
+  out->volume_attenuation_color[0] = 1.0f;
+  out->volume_attenuation_color[1] = 1.0f;
+  out->volume_attenuation_color[2] = 1.0f;
+  out->diffuse_transmission_color[0] = 1.0f;
+  out->diffuse_transmission_color[1] = 1.0f;
+  out->diffuse_transmission_color[2] = 1.0f;
   out->metallic = 1.0f;
   out->roughness = 1.0f;
   out->alpha_cutoff = 0.5f;
@@ -599,17 +792,44 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
   out->specular_strength = 1.0f;
   out->ior = 1.5f;
   out->clearcoat_normal_scale = 1.0f;
+  out->iridescence_ior = 1.3f;
+  out->iridescence_thickness_minimum = 100.0f;
+  out->iridescence_thickness_maximum = 400.0f;
+  out->volume_attenuation_distance = 1000000.0f;
 
   mat = prim ? prim->material : NULL;
-  if (!mat)
+  inst_mat = NULL;
+  effect = NULL;
+
+  if (mat) {
+    effect = mat->effect ? (AkEffect *)ak_instanceObject(&mat->effect->base) : NULL;
+  } else if (bind_material) {
+    effect = ak_effectForBindMaterial(bind_material, prim, &inst_mat);
+    if (inst_mat)
+      mat = (AkMaterial *)ak_instanceObject(&inst_mat->base);
+  }
+
+  if (!mat && !effect)
     return;
 
-  snprintf(out->material_name, sizeof(out->material_name), "%s", akb_name(mat->name, "AssetKitMaterial"));
+  if (mat && mat->name) {
+    snprintf(out->material_name,
+             sizeof(out->material_name),
+             "%s",
+             akb_name(mat->name, "AssetKitMaterial"));
+  } else if (inst_mat && inst_mat->symbol) {
+    snprintf(out->material_name,
+             sizeof(out->material_name),
+             "%s",
+             akb_name(inst_mat->symbol, "AssetKitMaterial"));
+  }
 
-  effect = mat->effect ? (AkEffect *)ak_instanceObject(&mat->effect->base) : NULL;
   cmn = effect ? ak_getProfileTechniqueCommon(effect) : NULL;
   if (!cmn)
     return;
+
+#define AKB_COPY_TEX(ROLE, TEXREF, DEST) \
+  akb_copy_texture_info(doc, (TEXREF), inst_mat, (ROLE), (DEST), sizeof(DEST), out)
 
   out->double_sided = cmn->doubleSided ? 1 : 0;
 
@@ -620,24 +840,24 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
       out->base_color[2] = cmn->albedo->color->vec[2];
       out->base_color[3] = cmn->albedo->color->vec[3];
     }
-    akb_copy_texture_path(doc, cmn->albedo->texture, out->base_color_texture, sizeof(out->base_color_texture));
+    AKB_COPY_TEX("base_color", cmn->albedo->texture, out->base_color_texture);
   }
 
   if (cmn->metalness) {
     out->metallic = cmn->metalness->intensity;
-    akb_copy_texture_path(doc, cmn->metalness->tex, out->metallic_roughness_texture, sizeof(out->metallic_roughness_texture));
+    AKB_COPY_TEX("metallic_roughness", cmn->metalness->tex, out->metallic_roughness_texture);
   }
   if (cmn->roughness)
     out->roughness = cmn->roughness->intensity;
 
   if (cmn->normal) {
     out->normal_scale = cmn->normal->scale == 0.0f ? 1.0f : cmn->normal->scale;
-    akb_copy_texture_path(doc, cmn->normal->tex, out->normal_texture, sizeof(out->normal_texture));
+    AKB_COPY_TEX("normal", cmn->normal->tex, out->normal_texture);
   }
 
   if (cmn->occlusion) {
     out->occlusion_strength = cmn->occlusion->strength == 0.0f ? 1.0f : cmn->occlusion->strength;
-    akb_copy_texture_path(doc, cmn->occlusion->tex, out->occlusion_texture, sizeof(out->occlusion_texture));
+    AKB_COPY_TEX("occlusion", cmn->occlusion->tex, out->occlusion_texture);
   }
 
   if (cmn->specular) {
@@ -648,9 +868,9 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
         out->specular_color[1] = cmn->specular->color->color->vec[1];
         out->specular_color[2] = cmn->specular->color->color->vec[2];
       }
-      akb_copy_texture_path(doc, cmn->specular->color->texture, out->specular_color_texture, sizeof(out->specular_color_texture));
+      AKB_COPY_TEX("specular_color", cmn->specular->color->texture, out->specular_color_texture);
     }
-    akb_copy_texture_path(doc, cmn->specular->specularTex, out->specular_texture, sizeof(out->specular_texture));
+    AKB_COPY_TEX("specular", cmn->specular->specularTex, out->specular_texture);
   }
 
   out->ior = cmn->ior > 0.0f ? cmn->ior : out->ior;
@@ -659,14 +879,18 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
     out->clearcoat = cmn->clearcoat->intensity;
     out->clearcoat_roughness = cmn->clearcoat->roughness;
     out->clearcoat_normal_scale = cmn->clearcoat->normalScale == 0.0f ? 1.0f : cmn->clearcoat->normalScale;
-    akb_copy_texture_path(doc, cmn->clearcoat->texture, out->clearcoat_texture, sizeof(out->clearcoat_texture));
-    akb_copy_texture_path(doc, cmn->clearcoat->roughnessTexture, out->clearcoat_roughness_texture, sizeof(out->clearcoat_roughness_texture));
-    akb_copy_texture_path(doc, cmn->clearcoat->normalTexture, out->clearcoat_normal_texture, sizeof(out->clearcoat_normal_texture));
+    AKB_COPY_TEX("clearcoat", cmn->clearcoat->texture, out->clearcoat_texture);
+    AKB_COPY_TEX("clearcoat_roughness",
+                 cmn->clearcoat->roughnessTexture,
+                 out->clearcoat_roughness_texture);
+    AKB_COPY_TEX("clearcoat_normal",
+                 cmn->clearcoat->normalTexture,
+                 out->clearcoat_normal_texture);
   }
 
   if (cmn->transmission) {
     out->transmission = cmn->transmission->factor;
-    akb_copy_texture_path(doc, cmn->transmission->texture, out->transmission_texture, sizeof(out->transmission_texture));
+    AKB_COPY_TEX("transmission", cmn->transmission->texture, out->transmission_texture);
   }
 
   if (cmn->sheen) {
@@ -677,10 +901,60 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
         out->sheen_color[1] = cmn->sheen->color->color->vec[1];
         out->sheen_color[2] = cmn->sheen->color->color->vec[2];
       }
-      akb_copy_texture_path(doc, cmn->sheen->color->texture, out->sheen_color_texture, sizeof(out->sheen_color_texture));
+      AKB_COPY_TEX("sheen_color", cmn->sheen->color->texture, out->sheen_color_texture);
     }
-    akb_copy_texture_path(doc, cmn->sheen->roughnessTexture, out->sheen_roughness_texture, sizeof(out->sheen_roughness_texture));
+    AKB_COPY_TEX("sheen_roughness", cmn->sheen->roughnessTexture, out->sheen_roughness_texture);
   }
+
+  if (cmn->iridescence) {
+    out->iridescence = cmn->iridescence->factor;
+    out->iridescence_ior = cmn->iridescence->ior > 0.0f
+                           ? cmn->iridescence->ior
+                           : out->iridescence_ior;
+    out->iridescence_thickness_minimum = cmn->iridescence->thicknessMinimum;
+    out->iridescence_thickness_maximum = cmn->iridescence->thicknessMaximum;
+    AKB_COPY_TEX("iridescence", cmn->iridescence->texture, out->iridescence_texture);
+    AKB_COPY_TEX("iridescence_thickness",
+                 cmn->iridescence->thicknessTexture,
+                 out->iridescence_thickness_texture);
+  }
+
+  if (cmn->volume) {
+    out->volume_thickness = cmn->volume->thicknessFactor;
+    out->volume_attenuation_distance = cmn->volume->attenuationDistance > 0.0f
+                                       ? cmn->volume->attenuationDistance
+                                       : out->volume_attenuation_distance;
+    out->volume_attenuation_color[0] = cmn->volume->attenuationColor.vec[0];
+    out->volume_attenuation_color[1] = cmn->volume->attenuationColor.vec[1];
+    out->volume_attenuation_color[2] = cmn->volume->attenuationColor.vec[2];
+    AKB_COPY_TEX("volume_thickness", cmn->volume->thicknessTexture, out->volume_thickness_texture);
+  }
+
+  if (cmn->anisotropy) {
+    out->anisotropy = cmn->anisotropy->strength;
+    out->anisotropy_rotation = cmn->anisotropy->rotation;
+    AKB_COPY_TEX("anisotropy", cmn->anisotropy->texture, out->anisotropy_texture);
+  }
+
+  if (cmn->diffuseTransmission) {
+    out->diffuse_transmission = cmn->diffuseTransmission->factor;
+    if (cmn->diffuseTransmission->color) {
+      if (cmn->diffuseTransmission->color->color) {
+        out->diffuse_transmission_color[0] = cmn->diffuseTransmission->color->color->vec[0];
+        out->diffuse_transmission_color[1] = cmn->diffuseTransmission->color->color->vec[1];
+        out->diffuse_transmission_color[2] = cmn->diffuseTransmission->color->color->vec[2];
+      }
+      AKB_COPY_TEX("diffuse_transmission_color",
+                   cmn->diffuseTransmission->color->texture,
+                   out->diffuse_transmission_texture);
+    }
+    AKB_COPY_TEX("diffuse_transmission",
+                 cmn->diffuseTransmission->texture,
+                 out->diffuse_transmission_texture);
+  }
+
+  if (cmn->dispersion)
+    out->dispersion = cmn->dispersion->dispersion;
 
   if (cmn->emission) {
     if (cmn->emission->color.color) {
@@ -688,7 +962,7 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
       out->emissive_color[1] = cmn->emission->color.color->vec[1] * cmn->emission->strength;
       out->emissive_color[2] = cmn->emission->color.color->vec[2] * cmn->emission->strength;
     }
-    akb_copy_texture_path(doc, cmn->emission->color.texture, out->emissive_texture, sizeof(out->emissive_texture));
+    AKB_COPY_TEX("emissive", cmn->emission->color.texture, out->emissive_texture);
   }
 
   if (cmn->transparent) {
@@ -707,6 +981,60 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
   } else {
     out->alpha_mode = out->base_color[3] < 1.0f ? 1 : 0;
   }
+
+#undef AKB_COPY_TEX
+}
+
+static const char *
+akb_material_variant_name(AkDoc *doc, uint32_t index) {
+  AkMaterialVariant *variant;
+  uint32_t i;
+
+  variant = doc ? doc->materialVariants : NULL;
+  for (i = 0; variant && i < index; i++)
+    variant = variant->next;
+
+  return variant ? variant->name : NULL;
+}
+
+static int
+akb_extract_material_variants(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
+  AkMaterialVariantMapping *mapping;
+  AkbMaterialVariantMap *items;
+  const char *variant_name;
+  const char *material_name;
+  uint32_t i;
+
+  if (!doc || !prim || !out || !prim->variantMappings || prim->variantMappingCount == 0)
+    return 1;
+
+  items = (AkbMaterialVariantMap *)calloc(prim->variantMappingCount, sizeof(*items));
+  if (!items)
+    return 0;
+
+  i = 0;
+  for (mapping = prim->variantMappings;
+       mapping && i < prim->variantMappingCount;
+       mapping = mapping->next) {
+    items[i].variant_index = mapping->variantIndex;
+    variant_name = akb_material_variant_name(doc, mapping->variantIndex);
+    material_name = mapping->material ? mapping->material->name : NULL;
+
+    if (variant_name && variant_name[0])
+      snprintf(items[i].variant_name, sizeof(items[i].variant_name), "%s", variant_name);
+    if (material_name && material_name[0])
+      snprintf(items[i].material_name, sizeof(items[i].material_name), "%s", material_name);
+    i++;
+  }
+
+  if (!i) {
+    free(items);
+    return 1;
+  }
+
+  out->material_variants = items;
+  out->material_variant_count = i;
+  return 1;
 }
 
 static const uint32_t *
@@ -859,6 +1187,147 @@ akb_loop_attribute_copy(AkMeshPrimitive *prim,
   free(values);
   *has_attr = 1;
   return out;
+}
+
+static int
+akb_input_matches(AkInput *input,
+                  AkInputSemantic semantic_a,
+                  AkInputSemantic semantic_b,
+                  const char *raw_a,
+                  const char *raw_b) {
+  return input
+         && (input->semantic == semantic_a
+             || input->semantic == semantic_b
+             || (raw_a && akb_raw_semantic_is(input, raw_a))
+             || (raw_b && akb_raw_semantic_is(input, raw_b)));
+}
+
+static void
+akb_fill_missing_components(float *values,
+                            uint32_t loop_count,
+                            uint32_t width,
+                            uint32_t source_width,
+                            float default_value) {
+  uint32_t i, j;
+
+  if (!values || source_width >= width)
+    return;
+
+  for (i = 0; i < loop_count; i++) {
+    for (j = source_width; j < width; j++)
+      values[(size_t)i * width + j] = default_value;
+  }
+}
+
+static void
+akb_loop_attr_name(AkbLoopFloatAttribute *attr,
+                   const char *prefix,
+                   uint32_t fallback_index) {
+  uint32_t set;
+
+  if (!attr || !prefix)
+    return;
+
+  set = attr->set;
+  if (strcmp(prefix, "UVMap") == 0) {
+    if (set == 0)
+      snprintf(attr->name, sizeof(attr->name), "UVMap");
+    else
+      snprintf(attr->name, sizeof(attr->name), "UVMap.%03u", set);
+  } else if (strcmp(prefix, "Color") == 0) {
+    if (set == 0)
+      snprintf(attr->name, sizeof(attr->name), "Color");
+    else
+      snprintf(attr->name, sizeof(attr->name), "Color.%03u", set);
+  } else {
+    snprintf(attr->name, sizeof(attr->name), "%s.%03u", prefix, fallback_index);
+  }
+}
+
+static int
+akb_extract_loop_float_attrs(AkbPrimitive *out,
+                             AkMeshPrimitive *prim,
+                             const uint32_t *raw_indices,
+                             size_t raw_count,
+                             const uint32_t *vertex_indices,
+                             uint32_t loop_count,
+                             AkInputSemantic semantic_a,
+                             AkInputSemantic semantic_b,
+                             const char *raw_a,
+                             const char *raw_b,
+                             uint32_t width,
+                             int flip_v,
+                             float missing_default,
+                             const char *name_prefix,
+                             AkbLoopFloatAttribute **attrs_out,
+                             uint32_t *count_out) {
+  AkbLoopFloatAttribute *attrs;
+  AkInput *input;
+  uint32_t max_count, count;
+  uint8_t has_attr;
+
+  (void)out;
+
+  if (!attrs_out || !count_out)
+    return 0;
+
+  *attrs_out = NULL;
+  *count_out = 0;
+  if (!prim || !loop_count)
+    return 1;
+
+  max_count = 0;
+  for (input = prim->input; input; input = input->next) {
+    if (input->accessor
+        && akb_input_matches(input, semantic_a, semantic_b, raw_a, raw_b))
+      max_count++;
+  }
+
+  if (!max_count)
+    return 1;
+
+  attrs = (AkbLoopFloatAttribute *)calloc(max_count, sizeof(*attrs));
+  if (!attrs)
+    return 0;
+
+  count = 0;
+  for (input = prim->input; input; input = input->next) {
+    if (!input->accessor
+        || !akb_input_matches(input, semantic_a, semantic_b, raw_a, raw_b))
+      continue;
+
+    has_attr = 0;
+    attrs[count].values = akb_loop_attribute_copy(prim,
+                                                  input,
+                                                  raw_indices,
+                                                  raw_count,
+                                                  vertex_indices,
+                                                  loop_count,
+                                                  width,
+                                                  flip_v,
+                                                  &has_attr);
+    if (!attrs[count].values || !has_attr)
+      continue;
+
+    attrs[count].width = width;
+    attrs[count].set = input->set;
+    akb_fill_missing_components(attrs[count].values,
+                                loop_count,
+                                width,
+                                input->accessor->componentCount,
+                                missing_default);
+    akb_loop_attr_name(&attrs[count], name_prefix, count);
+    count++;
+  }
+
+  if (!count) {
+    free(attrs);
+    return 1;
+  }
+
+  *attrs_out = attrs;
+  *count_out = count;
+  return 1;
 }
 
 static AkMorphInspectMorphable *
@@ -1726,7 +2195,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
                       AkMeshPrimitive *prim,
                       uint32_t prim_index) {
   AkbPrimitive out = {0};
-  AkInput *pos_input, *normal_input, *uv_input, *color_input;
+  AkInput *pos_input, *normal_input, *tangent_input;
   const uint32_t *raw_indices = NULL;
   size_t raw_count = 0;
   uint32_t pos_count = 0;
@@ -1740,7 +2209,14 @@ akb_extract_primitive(AkbPrimitiveList *list,
     return 1;
 
   out.node_index = node_index;
-  akb_extract_material(doc, prim, &out);
+  akb_extract_material(doc,
+                       prim,
+                       node && node->geometry ? node->geometry->bindMaterial : NULL,
+                       &out);
+  if (!akb_extract_material_variants(doc, prim, &out)) {
+    akb_primitive_free(&out);
+    return 0;
+  }
   out.animation = akb_animation_retain(animation);
   out.morph_animation = akb_animation_retain(morph_animation);
 
@@ -1823,27 +2299,74 @@ akb_extract_primitive(AkbPrimitiveList *list,
                                         0,
                                         &out.has_normals);
 
-  uv_input = akb_find_input(prim, AK_INPUT_TEXCOORD, AK_INPUT_UV, "TEXCOORD", "UV");
-  out.uvs = akb_loop_attribute_copy(prim,
-                                    uv_input,
+  if (!akb_extract_loop_float_attrs(&out,
+                                    prim,
                                     raw_indices,
                                     raw_count,
                                     out.indices,
                                     out.loop_count,
+                                    AK_INPUT_TEXCOORD,
+                                    AK_INPUT_UV,
+                                    "TEXCOORD",
+                                    "UV",
                                     2,
                                     1,
-                                    &out.has_uvs);
+                                    0.0f,
+                                    "UVMap",
+                                    &out.uv_sets,
+                                    &out.uv_set_count)) {
+    akb_primitive_free(&out);
+    return 0;
+  }
+  if (out.uv_set_count) {
+    out.uvs = out.uv_sets[0].values;
+    out.has_uvs = 1;
+  }
 
-  color_input = akb_find_input(prim, AK_INPUT_COLOR, AK_INPUT_COLOR, "COLOR", NULL);
-  out.colors = akb_loop_attribute_copy(prim,
-                                       color_input,
-                                       raw_indices,
-                                       raw_count,
-                                       out.indices,
-                                       out.loop_count,
-                                       4,
-                                       0,
-                                       &out.has_colors);
+  if (!akb_extract_loop_float_attrs(&out,
+                                    prim,
+                                    raw_indices,
+                                    raw_count,
+                                    out.indices,
+                                    out.loop_count,
+                                    AK_INPUT_COLOR,
+                                    AK_INPUT_COLOR,
+                                    "COLOR",
+                                    NULL,
+                                    4,
+                                    0,
+                                    1.0f,
+                                    "Color",
+                                    &out.color_sets,
+                                    &out.color_set_count)) {
+    akb_primitive_free(&out);
+    return 0;
+  }
+  if (out.color_set_count) {
+    out.colors = out.color_sets[0].values;
+    out.has_colors = 1;
+  }
+
+  tangent_input = akb_find_input(prim,
+                                 AK_INPUT_TANGENT,
+                                 AK_INPUT_TEXTANGENT,
+                                 "TANGENT",
+                                 "TEXTANGENT");
+  out.tangents = akb_loop_attribute_copy(prim,
+                                         tangent_input,
+                                         raw_indices,
+                                         raw_count,
+                                         out.indices,
+                                         out.loop_count,
+                                         4,
+                                         0,
+                                         &out.has_tangents);
+  if (out.tangents && tangent_input && tangent_input->accessor)
+    akb_fill_missing_components(out.tangents,
+                                out.loop_count,
+                                4,
+                                tangent_input->accessor->componentCount,
+                                1.0f);
 
   if (node && node->geometry && node->geometry->morpher) {
     if (!akb_extract_morph_targets(&out,
@@ -2179,6 +2702,170 @@ akb_anim_channels_to_py(AkbAnimation *animation) {
 }
 
 static PyObject *
+akb_loop_float_attrs_to_py(AkbLoopFloatAttribute *attrs, uint32_t count, uint32_t loop_count) {
+  PyObject *list;
+  PyObject *dict;
+  PyObject *value;
+  uint32_t i;
+
+  if (!attrs || !count)
+    return PyList_New(0);
+
+  list = PyList_New((Py_ssize_t)count);
+  if (!list)
+    return NULL;
+
+#define AKB_ATTR_SET_OBJ(KEY, OBJ) do {           \
+    value = (OBJ);                                \
+    if (!value) { Py_DECREF(dict); Py_DECREF(list); return NULL; } \
+    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
+      Py_DECREF(value);                           \
+      Py_DECREF(dict);                            \
+      Py_DECREF(list);                            \
+      return NULL;                                \
+    }                                             \
+    Py_DECREF(value);                             \
+  } while (0)
+
+  for (i = 0; i < count; i++) {
+    dict = PyDict_New();
+    if (!dict) {
+      Py_DECREF(list);
+      return NULL;
+    }
+
+    AKB_ATTR_SET_OBJ("name", akb_unicode_from_cstr(attrs[i].name));
+    AKB_ATTR_SET_OBJ("set", PyLong_FromUnsignedLong(attrs[i].set));
+    AKB_ATTR_SET_OBJ("width", PyLong_FromUnsignedLong(attrs[i].width));
+    AKB_ATTR_SET_OBJ("values_f32",
+                     akb_memoryview_or_empty(attrs[i].values,
+                                             attrs[i].values
+                                             ? (size_t)loop_count
+                                               * attrs[i].width
+                                               * sizeof(float)
+                                             : 0));
+
+    PyList_SET_ITEM(list, (Py_ssize_t)i, dict);
+  }
+
+#undef AKB_ATTR_SET_OBJ
+
+  return list;
+}
+
+static PyObject *
+akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
+  PyObject *dict;
+  PyObject *item;
+  PyObject *value;
+  uint32_t i;
+
+  dict = PyDict_New();
+  if (!dict)
+    return NULL;
+
+#define AKB_TEX_SET_OBJ(KEY, OBJ) do {            \
+    value = (OBJ);                                \
+    if (!value) { Py_DECREF(item); Py_DECREF(dict); return NULL; } \
+    if (PyDict_SetItemString(item, (KEY), value) < 0) { \
+      Py_DECREF(value);                           \
+      Py_DECREF(item);                            \
+      Py_DECREF(dict);                            \
+      return NULL;                                \
+    }                                             \
+    Py_DECREF(value);                             \
+  } while (0)
+
+  for (i = 0; i < count; i++) {
+    item = PyDict_New();
+    if (!item) {
+      Py_DECREF(dict);
+      return NULL;
+    }
+
+    AKB_TEX_SET_OBJ("path", akb_unicode_from_cstr(infos[i].path));
+    AKB_TEX_SET_OBJ("texcoord", akb_unicode_from_cstr(infos[i].texcoord));
+    AKB_TEX_SET_OBJ("coord_input_name", akb_unicode_from_cstr(infos[i].coord_input_name));
+    AKB_TEX_SET_OBJ("slot", PyLong_FromLong(infos[i].slot));
+    AKB_TEX_SET_OBJ("wrap_s", PyLong_FromLong(infos[i].wrap_s));
+    AKB_TEX_SET_OBJ("wrap_t", PyLong_FromLong(infos[i].wrap_t));
+    AKB_TEX_SET_OBJ("wrap_p", PyLong_FromLong(infos[i].wrap_p));
+    AKB_TEX_SET_OBJ("min_filter", PyLong_FromLong(infos[i].min_filter));
+    AKB_TEX_SET_OBJ("mag_filter", PyLong_FromLong(infos[i].mag_filter));
+    AKB_TEX_SET_OBJ("mip_filter", PyLong_FromLong(infos[i].mip_filter));
+    AKB_TEX_SET_OBJ("has_transform", PyBool_FromLong(infos[i].has_transform));
+    AKB_TEX_SET_OBJ("transform_offset", Py_BuildValue("(ff)",
+                                                      infos[i].transform_offset[0],
+                                                      infos[i].transform_offset[1]));
+    AKB_TEX_SET_OBJ("transform_scale", Py_BuildValue("(ff)",
+                                                     infos[i].transform_scale[0],
+                                                     infos[i].transform_scale[1]));
+    AKB_TEX_SET_OBJ("transform_rotation",
+                    PyFloat_FromDouble(infos[i].transform_rotation));
+    AKB_TEX_SET_OBJ("transform_slot", PyLong_FromLong(infos[i].transform_slot));
+
+    if (PyDict_SetItemString(dict, infos[i].role, item) < 0) {
+      Py_DECREF(item);
+      Py_DECREF(dict);
+      return NULL;
+    }
+    Py_DECREF(item);
+  }
+
+#undef AKB_TEX_SET_OBJ
+
+  return dict;
+}
+
+static PyObject *
+akb_material_variants_to_py(AkbPrimitive *prim) {
+  PyObject *list;
+  PyObject *dict;
+  PyObject *value;
+  uint32_t i;
+
+  if (!prim->material_variants || !prim->material_variant_count)
+    return PyList_New(0);
+
+  list = PyList_New((Py_ssize_t)prim->material_variant_count);
+  if (!list)
+    return NULL;
+
+#define AKB_VARIANT_SET_OBJ(KEY, OBJ) do {        \
+    value = (OBJ);                                \
+    if (!value) { Py_DECREF(dict); Py_DECREF(list); return NULL; } \
+    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
+      Py_DECREF(value);                           \
+      Py_DECREF(dict);                            \
+      Py_DECREF(list);                            \
+      return NULL;                                \
+    }                                             \
+    Py_DECREF(value);                             \
+  } while (0)
+
+  for (i = 0; i < prim->material_variant_count; i++) {
+    dict = PyDict_New();
+    if (!dict) {
+      Py_DECREF(list);
+      return NULL;
+    }
+
+    AKB_VARIANT_SET_OBJ("variant_index",
+                        PyLong_FromUnsignedLong(prim->material_variants[i].variant_index));
+    AKB_VARIANT_SET_OBJ("variant_name",
+                        akb_unicode_from_cstr(prim->material_variants[i].variant_name));
+    AKB_VARIANT_SET_OBJ("material_name",
+                        akb_unicode_from_cstr(prim->material_variants[i].material_name));
+
+    PyList_SET_ITEM(list, (Py_ssize_t)i, dict);
+  }
+
+#undef AKB_VARIANT_SET_OBJ
+
+  return list;
+}
+
+static PyObject *
 akb_morph_targets_to_py(AkbPrimitive *prim) {
   PyObject *list;
   PyObject *dict;
@@ -2278,6 +2965,14 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                           prim->sheen_color[0],
                                           prim->sheen_color[1],
                                           prim->sheen_color[2]));
+  AKB_SET_OBJ("volume_attenuation_color", Py_BuildValue("(fff)",
+                                                        prim->volume_attenuation_color[0],
+                                                        prim->volume_attenuation_color[1],
+                                                        prim->volume_attenuation_color[2]));
+  AKB_SET_OBJ("diffuse_transmission_color", Py_BuildValue("(fff)",
+                                                          prim->diffuse_transmission_color[0],
+                                                          prim->diffuse_transmission_color[1],
+                                                          prim->diffuse_transmission_color[2]));
   AKB_SET_OBJ("metallic", PyFloat_FromDouble(prim->metallic));
   AKB_SET_OBJ("roughness", PyFloat_FromDouble(prim->roughness));
   AKB_SET_OBJ("alpha_cutoff", PyFloat_FromDouble(prim->alpha_cutoff));
@@ -2290,6 +2985,19 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("clearcoat_normal_scale", PyFloat_FromDouble(prim->clearcoat_normal_scale));
   AKB_SET_OBJ("transmission", PyFloat_FromDouble(prim->transmission));
   AKB_SET_OBJ("sheen_roughness", PyFloat_FromDouble(prim->sheen_roughness));
+  AKB_SET_OBJ("iridescence", PyFloat_FromDouble(prim->iridescence));
+  AKB_SET_OBJ("iridescence_ior", PyFloat_FromDouble(prim->iridescence_ior));
+  AKB_SET_OBJ("iridescence_thickness_minimum",
+              PyFloat_FromDouble(prim->iridescence_thickness_minimum));
+  AKB_SET_OBJ("iridescence_thickness_maximum",
+              PyFloat_FromDouble(prim->iridescence_thickness_maximum));
+  AKB_SET_OBJ("volume_thickness", PyFloat_FromDouble(prim->volume_thickness));
+  AKB_SET_OBJ("volume_attenuation_distance",
+              PyFloat_FromDouble(prim->volume_attenuation_distance));
+  AKB_SET_OBJ("anisotropy", PyFloat_FromDouble(prim->anisotropy));
+  AKB_SET_OBJ("anisotropy_rotation", PyFloat_FromDouble(prim->anisotropy_rotation));
+  AKB_SET_OBJ("diffuse_transmission", PyFloat_FromDouble(prim->diffuse_transmission));
+  AKB_SET_OBJ("dispersion", PyFloat_FromDouble(prim->dispersion));
   AKB_SET_OBJ("alpha_mode", PyLong_FromUnsignedLong(prim->alpha_mode));
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
@@ -2300,6 +3008,8 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("skin_joint_width", PyLong_FromUnsignedLong(prim->skin_joint_width));
   AKB_SET_OBJ("skin_root_node_index", PyLong_FromLong(prim->skin_root_node_index));
   AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
+  AKB_SET_OBJ("uv_set_count", PyLong_FromUnsignedLong(prim->uv_set_count));
+  AKB_SET_OBJ("color_set_count", PyLong_FromUnsignedLong(prim->color_set_count));
   AKB_SET_OBJ("anim_count",
               PyLong_FromUnsignedLong(prim->animation
                                       ? (unsigned long)prim->animation->count
@@ -2312,6 +3022,17 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                       ? (unsigned long)prim->morph_animation->count
                                       : 0));
   AKB_SET_OBJ("morph_anim_channels", akb_anim_channels_to_py(prim->morph_animation));
+  AKB_SET_OBJ("uv_sets", akb_loop_float_attrs_to_py(prim->uv_sets,
+                                                    prim->uv_set_count,
+                                                    prim->loop_count));
+  AKB_SET_OBJ("color_sets", akb_loop_float_attrs_to_py(prim->color_sets,
+                                                       prim->color_set_count,
+                                                       prim->loop_count));
+  AKB_SET_OBJ("texture_infos", akb_texture_infos_to_py(prim->texture_infos,
+                                                       prim->texture_info_count));
+  AKB_SET_OBJ("material_variant_count",
+              PyLong_FromUnsignedLong(prim->material_variant_count));
+  AKB_SET_OBJ("material_variants", akb_material_variants_to_py(prim));
   AKB_SET_OBJ("matrix_f32", akb_memoryview_or_empty(prim->matrix, prim->has_node ? 16 * sizeof(float) : 0));
   AKB_SET_OBJ("coord_matrix_f32",
               akb_memoryview_or_empty(prim->coord_matrix,
@@ -2329,6 +3050,13 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("transmission_texture", akb_unicode_from_cstr(prim->transmission_texture));
   AKB_SET_OBJ("sheen_color_texture", akb_unicode_from_cstr(prim->sheen_color_texture));
   AKB_SET_OBJ("sheen_roughness_texture", akb_unicode_from_cstr(prim->sheen_roughness_texture));
+  AKB_SET_OBJ("iridescence_texture", akb_unicode_from_cstr(prim->iridescence_texture));
+  AKB_SET_OBJ("iridescence_thickness_texture",
+              akb_unicode_from_cstr(prim->iridescence_thickness_texture));
+  AKB_SET_OBJ("volume_thickness_texture", akb_unicode_from_cstr(prim->volume_thickness_texture));
+  AKB_SET_OBJ("anisotropy_texture", akb_unicode_from_cstr(prim->anisotropy_texture));
+  AKB_SET_OBJ("diffuse_transmission_texture",
+              akb_unicode_from_cstr(prim->diffuse_transmission_texture));
   AKB_SET_OBJ("vertices_f32", akb_memoryview_or_empty(prim->vertices, (size_t)prim->vertex_count * 3 * sizeof(float)));
   AKB_SET_OBJ("indices_u32", akb_memoryview_or_empty(prim->indices, (size_t)prim->loop_count * sizeof(uint32_t)));
   AKB_SET_OBJ("loop_starts_i32", akb_memoryview_or_empty(prim->loop_starts, (size_t)prim->face_count * sizeof(int32_t)));
@@ -2336,6 +3064,13 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("normals_f32", akb_memoryview_or_empty(prim->normals, prim->has_normals ? (size_t)prim->loop_count * 3 * sizeof(float) : 0));
   AKB_SET_OBJ("uvs_f32", akb_memoryview_or_empty(prim->uvs, prim->has_uvs ? (size_t)prim->loop_count * 2 * sizeof(float) : 0));
   AKB_SET_OBJ("colors_f32", akb_memoryview_or_empty(prim->colors, prim->has_colors ? (size_t)prim->loop_count * 4 * sizeof(float) : 0));
+  AKB_SET_OBJ("tangents_f32",
+              akb_memoryview_or_empty(prim->tangents,
+                                      prim->has_tangents
+                                      ? (size_t)prim->loop_count
+                                        * 4
+                                        * sizeof(float)
+                                      : 0));
   AKB_SET_OBJ("skin_joints_u16",
               akb_memoryview_or_empty(prim->skin_joints,
                                       prim->has_skin

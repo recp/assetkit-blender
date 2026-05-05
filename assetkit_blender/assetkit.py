@@ -218,6 +218,33 @@ class MorphTargetData:
 
 
 @dataclass
+class LoopFloatAttributeData:
+    name: str
+    set: int = 0
+    width: int = 0
+    values_f32: object = b""
+
+
+@dataclass
+class TextureRefData:
+    path: str = ""
+    texcoord: str = ""
+    coord_input_name: str = ""
+    slot: int = 0
+    wrap_s: int = 1
+    wrap_t: int = 1
+    wrap_p: int = 1
+    min_filter: int = 0
+    mag_filter: int = 0
+    mip_filter: int = 0
+    has_transform: bool = False
+    transform_offset: tuple[float, float] = (0.0, 0.0)
+    transform_scale: tuple[float, float] = (1.0, 1.0)
+    transform_rotation: float = 0.0
+    transform_slot: int = -1
+
+
+@dataclass
 class MeshPrimitiveData:
     name: str
     vertices: list[tuple[float, float, float]]
@@ -235,12 +262,17 @@ class MeshPrimitiveData:
     normals_f32: object = b""
     uvs_f32: object = b""
     colors_f32: object = b""
+    tangents_f32: object = b""
     skin_joints_u16: object = b""
     skin_weights_f32: object = b""
     skin_joint_nodes_i32: object = b""
     skin_inverse_bind_matrices_f32: object = b""
     anim_channels: list[dict] | None = None
+    uv_sets: list[LoopFloatAttributeData] | None = None
+    color_sets: list[LoopFloatAttributeData] | None = None
+    texture_infos: dict[str, TextureRefData] | None = None
     morph_targets: list[MorphTargetData] | None = None
+    material_variants: list[dict] | None = None
     morph_anim_channels: list[dict] | None = None
     object_name: str = ""
     matrix_f32: object = b""
@@ -251,15 +283,20 @@ class MeshPrimitiveData:
     anim_count: int = 0
     morph_target_count: int = 0
     morph_anim_count: int = 0
+    material_variant_count: int = 0
     skin_vertex_count: int = 0
     skin_joint_count: int = 0
     skin_joint_width: int = 0
+    uv_set_count: int = 0
+    color_set_count: int = 0
     skin_root_node_index: int = -1
     material_name: str = ""
     base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     emissive_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
     specular_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     sheen_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    volume_attenuation_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    diffuse_transmission_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     metallic: float = 1.0
     roughness: float = 1.0
     alpha_cutoff: float = 0.5
@@ -272,6 +309,16 @@ class MeshPrimitiveData:
     clearcoat_normal_scale: float = 1.0
     transmission: float = 0.0
     sheen_roughness: float = 0.0
+    iridescence: float = 0.0
+    iridescence_ior: float = 1.3
+    iridescence_thickness_minimum: float = 100.0
+    iridescence_thickness_maximum: float = 400.0
+    volume_thickness: float = 0.0
+    volume_attenuation_distance: float = 1000000.0
+    anisotropy: float = 0.0
+    anisotropy_rotation: float = 0.0
+    diffuse_transmission: float = 0.0
+    dispersion: float = 0.0
     alpha_mode: int = 0
     double_sided: bool = False
     zero_copy_flags: int = 0
@@ -288,6 +335,11 @@ class MeshPrimitiveData:
     transmission_texture: str = ""
     sheen_color_texture: str = ""
     sheen_roughness_texture: str = ""
+    iridescence_texture: str = ""
+    iridescence_thickness_texture: str = ""
+    volume_thickness_texture: str = ""
+    anisotropy_texture: str = ""
+    diffuse_transmission_texture: str = ""
     _native_owner: object | None = None
 
 
@@ -584,6 +636,52 @@ def native_load_meshes(
 
     meshes = []
     for item in raw_meshes:
+        uv_sets = []
+        for attr in item.get("uv_sets") or []:
+            uv_sets.append(
+                LoopFloatAttributeData(
+                    name=attr.get("name") or "UVMap",
+                    set=int(attr.get("set") or 0),
+                    width=int(attr.get("width") or 0),
+                    values_f32=attr.get("values_f32") or b"",
+                )
+            )
+
+        color_sets = []
+        for attr in item.get("color_sets") or []:
+            color_sets.append(
+                LoopFloatAttributeData(
+                    name=attr.get("name") or "Color",
+                    set=int(attr.get("set") or 0),
+                    width=int(attr.get("width") or 0),
+                    values_f32=attr.get("values_f32") or b"",
+                )
+            )
+
+        texture_infos = {}
+        for role, info in (item.get("texture_infos") or {}).items():
+            texture_infos[str(role)] = TextureRefData(
+                path=info.get("path") or "",
+                texcoord=info.get("texcoord") or "",
+                coord_input_name=info.get("coord_input_name") or "",
+                slot=int(info.get("slot") or 0),
+                wrap_s=int(info.get("wrap_s") or 1),
+                wrap_t=int(info.get("wrap_t") or 1),
+                wrap_p=int(info.get("wrap_p") or 1),
+                min_filter=int(info.get("min_filter") or 0),
+                mag_filter=int(info.get("mag_filter") or 0),
+                mip_filter=int(info.get("mip_filter") or 0),
+                has_transform=bool(info.get("has_transform")),
+                transform_offset=tuple(info.get("transform_offset") or (0.0, 0.0)),
+                transform_scale=tuple(info.get("transform_scale") or (1.0, 1.0)),
+                transform_rotation=float(
+                    info.get("transform_rotation")
+                    if info.get("transform_rotation") is not None
+                    else 0.0
+                ),
+                transform_slot=int(info.get("transform_slot") if info.get("transform_slot") is not None else -1),
+            )
+
         morph_targets = []
         for target in item.get("morph_targets") or []:
             morph_targets.append(
@@ -613,12 +711,17 @@ def native_load_meshes(
                 normals_f32=item.get("normals_f32") or b"",
                 uvs_f32=item.get("uvs_f32") or b"",
                 colors_f32=item.get("colors_f32") or b"",
+                tangents_f32=item.get("tangents_f32") or b"",
                 skin_joints_u16=item.get("skin_joints_u16") or b"",
                 skin_weights_f32=item.get("skin_weights_f32") or b"",
                 skin_joint_nodes_i32=item.get("skin_joint_nodes_i32") or b"",
                 skin_inverse_bind_matrices_f32=item.get("skin_inverse_bind_matrices_f32") or b"",
                 anim_channels=item.get("anim_channels") or [],
+                uv_sets=uv_sets,
+                color_sets=color_sets,
+                texture_infos=texture_infos,
                 morph_targets=morph_targets,
+                material_variants=item.get("material_variants") or [],
                 morph_anim_channels=item.get("morph_anim_channels") or [],
                 object_name=item.get("object_name") or "",
                 matrix_f32=item.get("matrix_f32") or b"",
@@ -629,15 +732,20 @@ def native_load_meshes(
                 anim_count=int(item.get("anim_count") or 0),
                 morph_target_count=int(item.get("morph_target_count") or 0),
                 morph_anim_count=int(item.get("morph_anim_count") or 0),
+                material_variant_count=int(item.get("material_variant_count") or 0),
                 skin_vertex_count=int(item.get("skin_vertex_count") or 0),
                 skin_joint_count=int(item.get("skin_joint_count") or 0),
                 skin_joint_width=int(item.get("skin_joint_width") or 0),
+                uv_set_count=int(item.get("uv_set_count") or 0),
+                color_set_count=int(item.get("color_set_count") or 0),
                 skin_root_node_index=int(item.get("skin_root_node_index") if item.get("skin_root_node_index") is not None else -1),
                 material_name=item.get("material_name") or "",
                 base_color=tuple(item.get("base_color") or (1.0, 1.0, 1.0, 1.0)),
                 emissive_color=tuple(item.get("emissive_color") or (0.0, 0.0, 0.0)),
                 specular_color=tuple(item.get("specular_color") or (1.0, 1.0, 1.0)),
                 sheen_color=tuple(item.get("sheen_color") or (0.0, 0.0, 0.0)),
+                volume_attenuation_color=tuple(item.get("volume_attenuation_color") or (1.0, 1.0, 1.0)),
+                diffuse_transmission_color=tuple(item.get("diffuse_transmission_color") or (1.0, 1.0, 1.0)),
                 metallic=float(item.get("metallic") if item.get("metallic") is not None else 1.0),
                 roughness=float(item.get("roughness") if item.get("roughness") is not None else 1.0),
                 alpha_cutoff=float(item.get("alpha_cutoff") if item.get("alpha_cutoff") is not None else 0.5),
@@ -650,6 +758,32 @@ def native_load_meshes(
                 clearcoat_normal_scale=float(item.get("clearcoat_normal_scale") if item.get("clearcoat_normal_scale") is not None else 1.0),
                 transmission=float(item.get("transmission") if item.get("transmission") is not None else 0.0),
                 sheen_roughness=float(item.get("sheen_roughness") if item.get("sheen_roughness") is not None else 0.0),
+                iridescence=float(item.get("iridescence") if item.get("iridescence") is not None else 0.0),
+                iridescence_ior=float(item.get("iridescence_ior") if item.get("iridescence_ior") is not None else 1.3),
+                iridescence_thickness_minimum=float(
+                    item.get("iridescence_thickness_minimum")
+                    if item.get("iridescence_thickness_minimum") is not None
+                    else 100.0
+                ),
+                iridescence_thickness_maximum=float(
+                    item.get("iridescence_thickness_maximum")
+                    if item.get("iridescence_thickness_maximum") is not None
+                    else 400.0
+                ),
+                volume_thickness=float(item.get("volume_thickness") if item.get("volume_thickness") is not None else 0.0),
+                volume_attenuation_distance=float(
+                    item.get("volume_attenuation_distance")
+                    if item.get("volume_attenuation_distance") is not None
+                    else 1000000.0
+                ),
+                anisotropy=float(item.get("anisotropy") if item.get("anisotropy") is not None else 0.0),
+                anisotropy_rotation=float(item.get("anisotropy_rotation") if item.get("anisotropy_rotation") is not None else 0.0),
+                diffuse_transmission=float(
+                    item.get("diffuse_transmission")
+                    if item.get("diffuse_transmission") is not None
+                    else 0.0
+                ),
+                dispersion=float(item.get("dispersion") if item.get("dispersion") is not None else 0.0),
                 alpha_mode=int(item.get("alpha_mode") or 0),
                 double_sided=bool(item.get("double_sided")),
                 zero_copy_flags=int(item.get("zero_copy_flags") or 0),
@@ -666,6 +800,11 @@ def native_load_meshes(
                 transmission_texture=item.get("transmission_texture") or "",
                 sheen_color_texture=item.get("sheen_color_texture") or "",
                 sheen_roughness_texture=item.get("sheen_roughness_texture") or "",
+                iridescence_texture=item.get("iridescence_texture") or "",
+                iridescence_thickness_texture=item.get("iridescence_thickness_texture") or "",
+                volume_thickness_texture=item.get("volume_thickness_texture") or "",
+                anisotropy_texture=item.get("anisotropy_texture") or "",
+                diffuse_transmission_texture=item.get("diffuse_transmission_texture") or "",
                 _native_owner=item.get("_owner"),
             )
         )

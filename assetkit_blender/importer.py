@@ -5,7 +5,7 @@ from array import array
 import bpy
 from mathutils import Matrix, Vector
 
-from .assetkit import AssetKit, AssetKitSceneData, MeshPrimitiveData, SceneNodeData, native_load_meshes
+from .assetkit import AssetKit, AssetKitSceneData, MeshPrimitiveData, SceneNodeData, TextureRefData, native_load_meshes
 
 _ANIM_TRANSLATION = 1
 _ANIM_ROTATION_QUAT = 2
@@ -37,6 +37,7 @@ def import_assetkit_file(
     coord_root = _create_coord_root(primitives)
     node_objects = _create_scene_nodes(scene_nodes, coord_root)
     node_data = {index: node for index, node in enumerate(scene_nodes)}
+    material_cache: dict[str, bpy.types.Material] = {}
     for primitive in primitives:
         node_parent = node_objects.get(primitive.node_index)
         parent = node_parent or coord_root
@@ -46,6 +47,7 @@ def import_assetkit_file(
             parent,
             node_objects=node_objects,
             node_data=node_data,
+            material_cache=material_cache,
             apply_transform=not use_node_parent,
             apply_animation=not use_node_parent,
         )
@@ -60,6 +62,7 @@ def _create_mesh_object(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
+    material_cache: dict[str, bpy.types.Material] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
 ) -> bpy.types.Object:
@@ -69,6 +72,7 @@ def _create_mesh_object(
             parent,
             node_objects=node_objects,
             node_data=node_data,
+            material_cache=material_cache,
             apply_transform=apply_transform,
             apply_animation=apply_animation,
         )
@@ -91,9 +95,10 @@ def _create_mesh_object(
     _set_parent(obj, parent)
     if apply_transform:
         _apply_matrix(obj, data)
-    material = _create_material(data)
+    material = _create_material(data, material_cache)
     if material:
         mesh.materials.append(material)
+    _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
     _apply_skin(obj, data, node_objects or {}, node_data or {})
     if apply_animation:
@@ -111,6 +116,7 @@ def _create_mesh_object_bulk(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
+    material_cache: dict[str, bpy.types.Material] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
 ) -> bpy.types.Object:
@@ -136,17 +142,39 @@ def _create_mesh_object_bulk(
     mesh.polygons.foreach_set("loop_start", loop_starts)
     mesh.polygons.foreach_set("loop_total", loop_totals)
 
-    if data.uvs_f32:
+    if data.uv_sets:
+        for index, attr in enumerate(data.uv_sets):
+            uvs = _buffer_view(attr.values_f32, "f")
+            uv_layer = mesh.uv_layers.new(name=attr.name or ("UVMap" if index == 0 else f"UVMap.{index:03d}"))
+            if uvs is not None:
+                uv_layer.data.foreach_set("uv", uvs)
+    elif data.uvs_f32:
         uvs = _buffer_view(data.uvs_f32, "f")
         uv_layer = mesh.uv_layers.new(name="UVMap")
         if uvs is not None:
             uv_layer.data.foreach_set("uv", uvs)
 
-    if data.colors_f32:
+    if data.color_sets:
+        for index, attr in enumerate(data.color_sets):
+            colors = _buffer_view(attr.values_f32, "f")
+            if colors is not None:
+                color_attr = mesh.color_attributes.new(
+                    name=attr.name or ("Color" if index == 0 else f"Color.{index:03d}"),
+                    type="FLOAT_COLOR",
+                    domain="CORNER",
+                )
+                color_attr.data.foreach_set("color", colors)
+    elif data.colors_f32:
         colors = _buffer_view(data.colors_f32, "f")
         if colors is not None:
             color_attr = mesh.color_attributes.new(name="Color", type="FLOAT_COLOR", domain="CORNER")
             color_attr.data.foreach_set("color", colors)
+
+    if data.tangents_f32:
+        tangents = _buffer_view(data.tangents_f32, "f")
+        if tangents is not None:
+            tangent_attr = mesh.attributes.new(name="assetkit_tangent", type="FLOAT_COLOR", domain="CORNER")
+            tangent_attr.data.foreach_set("color", tangents)
 
     mesh.update(calc_edges=True)
 
@@ -164,9 +192,10 @@ def _create_mesh_object_bulk(
     _set_parent(obj, parent)
     if apply_transform:
         _apply_matrix(obj, data)
-    material = _create_material(data)
+    material = _create_material(data, material_cache)
     if material:
         mesh.materials.append(material)
+    _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
     _apply_skin(obj, data, node_objects or {}, node_data or {})
     if apply_animation:
@@ -705,9 +734,28 @@ def _blender_interpolation(interpolation: int) -> str:
     return "LINEAR"
 
 
-def _create_material(data: MeshPrimitiveData) -> bpy.types.Material | None:
+def _apply_material_variants(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    variants = data.material_variants or []
+    if not variants:
+        return
+
+    obj["assetkit_material_variant_count"] = len(variants)
+    for index, variant in enumerate(variants):
+        prefix = f"assetkit_material_variant_{index}"
+        obj[f"{prefix}_index"] = int(variant.get("variant_index") or 0)
+        obj[f"{prefix}_name"] = variant.get("variant_name") or ""
+        obj[f"{prefix}_material"] = variant.get("material_name") or ""
+
+
+def _create_material(
+    data: MeshPrimitiveData,
+    material_cache: dict[str, bpy.types.Material] | None = None,
+) -> bpy.types.Material | None:
     if not data.material_name:
         return None
+
+    if material_cache is not None and data.material_name in material_cache:
+        return material_cache[data.material_name]
 
     mat = bpy.data.materials.get(data.material_name) or bpy.data.materials.new(data.material_name)
     mat.use_nodes = True
@@ -720,6 +768,8 @@ def _create_material(data: MeshPrimitiveData) -> bpy.types.Material | None:
 
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     if not bsdf:
+        if material_cache is not None:
+            material_cache[data.material_name] = mat
         return mat
 
     _set_input(bsdf, "Base Color", data.base_color)
@@ -736,35 +786,183 @@ def _create_material(data: MeshPrimitiveData) -> bpy.types.Material | None:
     _set_first_input(bsdf, ("Sheen Weight", "Sheen"), max(data.sheen_color))
     _set_first_input(bsdf, ("Sheen Tint",), (*data.sheen_color, 1.0))
     _set_first_input(bsdf, ("Sheen Roughness",), data.sheen_roughness)
+    _set_first_input(bsdf, ("Anisotropic",), data.anisotropy)
+    _set_first_input(bsdf, ("Anisotropic Rotation",), data.anisotropy_rotation)
+    _set_first_input(bsdf, ("Thin Film IOR",), data.iridescence_ior)
+    if data.iridescence or data.iridescence_thickness_texture:
+        _set_first_input(bsdf, ("Thin Film Thickness",), data.iridescence_thickness_maximum)
+
+    _set_assetkit_material_props(mat, data)
 
     if data.base_color_texture:
         _link_base_color_texture(mat, bsdf, data)
     if data.metallic_roughness_texture:
-        _link_metallic_roughness_texture(mat, bsdf, data.metallic_roughness_texture)
+        _link_metallic_roughness_texture(
+            mat,
+            bsdf,
+            data.metallic_roughness_texture,
+            _texture_info(data, "metallic_roughness"),
+        )
     if data.occlusion_texture:
-        _link_image_first(mat, bsdf, data.occlusion_texture, ("Ambient Occlusion", "Occlusion"), colorspace="Non-Color")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.occlusion_texture,
+            ("Ambient Occlusion", "Occlusion"),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "occlusion"),
+        )
     if data.normal_texture:
-        _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale)
+        _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale, _texture_info(data, "normal"))
     if data.emissive_texture:
-        _link_image(mat, bsdf, data.emissive_texture, "Emission Color", colorspace="sRGB")
+        _link_image(
+            mat,
+            bsdf,
+            data.emissive_texture,
+            "Emission Color",
+            colorspace="sRGB",
+            tex_info=_texture_info(data, "emissive"),
+        )
     if data.specular_texture:
-        _link_image_first(mat, bsdf, data.specular_texture, ("Specular IOR Level", "Specular"), colorspace="Non-Color")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.specular_texture,
+            ("Specular IOR Level", "Specular"),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "specular"),
+        )
     if data.specular_color_texture:
-        _link_image_first(mat, bsdf, data.specular_color_texture, ("Specular Tint",), colorspace="sRGB")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.specular_color_texture,
+            ("Specular Tint",),
+            colorspace="sRGB",
+            tex_info=_texture_info(data, "specular_color"),
+        )
     if data.clearcoat_texture:
-        _link_image_first(mat, bsdf, data.clearcoat_texture, ("Coat Weight", "Clearcoat"), colorspace="Non-Color")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.clearcoat_texture,
+            ("Coat Weight", "Clearcoat"),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "clearcoat"),
+        )
     if data.clearcoat_roughness_texture:
-        _link_image_first(mat, bsdf, data.clearcoat_roughness_texture, ("Coat Roughness", "Clearcoat Roughness"), colorspace="Non-Color")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.clearcoat_roughness_texture,
+            ("Coat Roughness", "Clearcoat Roughness"),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "clearcoat_roughness"),
+        )
     if data.clearcoat_normal_texture:
-        _link_normal_texture(mat, bsdf, data.clearcoat_normal_texture, data.clearcoat_normal_scale, input_name="Coat Normal")
+        _link_normal_texture(
+            mat,
+            bsdf,
+            data.clearcoat_normal_texture,
+            data.clearcoat_normal_scale,
+            _texture_info(data, "clearcoat_normal"),
+            input_name="Coat Normal",
+        )
     if data.transmission_texture:
-        _link_image_first(mat, bsdf, data.transmission_texture, ("Transmission Weight", "Transmission"), colorspace="Non-Color")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.transmission_texture,
+            ("Transmission Weight", "Transmission"),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "transmission"),
+        )
     if data.sheen_color_texture:
-        _link_image_first(mat, bsdf, data.sheen_color_texture, ("Sheen Tint",), colorspace="sRGB")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.sheen_color_texture,
+            ("Sheen Tint",),
+            colorspace="sRGB",
+            tex_info=_texture_info(data, "sheen_color"),
+        )
     if data.sheen_roughness_texture:
-        _link_image_first(mat, bsdf, data.sheen_roughness_texture, ("Sheen Roughness",), colorspace="Non-Color")
+        _link_image_first(
+            mat,
+            bsdf,
+            data.sheen_roughness_texture,
+            ("Sheen Roughness",),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "sheen_roughness"),
+        )
+    if data.iridescence_thickness_texture:
+        _link_image_first(
+            mat,
+            bsdf,
+            data.iridescence_thickness_texture,
+            ("Thin Film Thickness",),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "iridescence_thickness"),
+        )
+    if data.anisotropy_texture:
+        _link_image_first(
+            mat,
+            bsdf,
+            data.anisotropy_texture,
+            ("Anisotropic",),
+            colorspace="Non-Color",
+            tex_info=_texture_info(data, "anisotropy"),
+        )
 
+    if material_cache is not None:
+        material_cache[data.material_name] = mat
     return mat
+
+
+def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
+    props = {
+        "assetkit_iridescence": data.iridescence,
+        "assetkit_iridescence_ior": data.iridescence_ior,
+        "assetkit_iridescence_thickness_minimum": data.iridescence_thickness_minimum,
+        "assetkit_iridescence_thickness_maximum": data.iridescence_thickness_maximum,
+        "assetkit_volume_thickness": data.volume_thickness,
+        "assetkit_volume_attenuation_color": data.volume_attenuation_color,
+        "assetkit_volume_attenuation_distance": data.volume_attenuation_distance,
+        "assetkit_anisotropy": data.anisotropy,
+        "assetkit_anisotropy_rotation": data.anisotropy_rotation,
+        "assetkit_diffuse_transmission": data.diffuse_transmission,
+        "assetkit_diffuse_transmission_color": data.diffuse_transmission_color,
+        "assetkit_dispersion": data.dispersion,
+        "assetkit_iridescence_texture": data.iridescence_texture,
+        "assetkit_iridescence_thickness_texture": data.iridescence_thickness_texture,
+        "assetkit_volume_thickness_texture": data.volume_thickness_texture,
+        "assetkit_anisotropy_texture": data.anisotropy_texture,
+        "assetkit_diffuse_transmission_texture": data.diffuse_transmission_texture,
+    }
+    for key, value in props.items():
+        if value == "" or value == 0.0:
+            continue
+        mat[key] = value
+
+    for role, info in (data.texture_infos or {}).items():
+        prefix = f"assetkit_texture_{role}"
+        mat[f"{prefix}_slot"] = info.slot
+        if info.texcoord:
+            mat[f"{prefix}_texcoord"] = info.texcoord
+        if info.coord_input_name:
+            mat[f"{prefix}_coord_input_name"] = info.coord_input_name
+        mat[f"{prefix}_wrap_s"] = info.wrap_s
+        mat[f"{prefix}_wrap_t"] = info.wrap_t
+        mat[f"{prefix}_min_filter"] = info.min_filter
+        mat[f"{prefix}_mag_filter"] = info.mag_filter
+        if info.has_transform:
+            mat[f"{prefix}_transform_offset"] = info.transform_offset
+            mat[f"{prefix}_transform_scale"] = info.transform_scale
+            mat[f"{prefix}_transform_rotation"] = info.transform_rotation
+
+
+def _texture_info(data: MeshPrimitiveData, role: str) -> TextureRefData | None:
+    return (data.texture_infos or {}).get(role)
 
 
 def _set_input(node, name: str, value) -> None:
@@ -787,8 +985,15 @@ def _set_first_input(node, names: tuple[str, ...], value) -> None:
             return
 
 
-def _link_image(mat: bpy.types.Material, target, path: str, input_name: str, colorspace: str) -> None:
-    tex = _image_texture_node(mat, path, colorspace)
+def _link_image(
+    mat: bpy.types.Material,
+    target,
+    path: str,
+    input_name: str,
+    colorspace: str,
+    tex_info: TextureRefData | None = None,
+) -> None:
+    tex = _image_texture_node(mat, path, colorspace, tex_info)
     if not tex:
         return
 
@@ -803,8 +1008,9 @@ def _link_image_first(
     path: str,
     input_names: tuple[str, ...],
     colorspace: str,
+    tex_info: TextureRefData | None = None,
 ) -> None:
-    tex = _image_texture_node(mat, path, colorspace)
+    tex = _image_texture_node(mat, path, colorspace, tex_info)
     if not tex:
         return
 
@@ -816,7 +1022,7 @@ def _link_image_first(
 
 
 def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveData) -> None:
-    tex = _image_texture_node(mat, data.base_color_texture, "sRGB")
+    tex = _image_texture_node(mat, data.base_color_texture, "sRGB", _texture_info(data, "base_color"))
     if not tex:
         return
 
@@ -829,8 +1035,13 @@ def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveD
         links.new(tex.outputs["Alpha"], alpha)
 
 
-def _link_metallic_roughness_texture(mat: bpy.types.Material, bsdf, path: str) -> None:
-    tex = _image_texture_node(mat, path, "Non-Color")
+def _link_metallic_roughness_texture(
+    mat: bpy.types.Material,
+    bsdf,
+    path: str,
+    tex_info: TextureRefData | None = None,
+) -> None:
+    tex = _image_texture_node(mat, path, "Non-Color", tex_info)
     if not tex:
         return
 
@@ -852,9 +1063,10 @@ def _link_normal_texture(
     bsdf,
     path: str,
     strength: float,
+    tex_info: TextureRefData | None = None,
     input_name: str = "Normal",
 ) -> None:
-    tex = _image_texture_node(mat, path, "Non-Color")
+    tex = _image_texture_node(mat, path, "Non-Color", tex_info)
     if not tex:
         return
 
@@ -868,7 +1080,12 @@ def _link_normal_texture(
         links.new(normal_map.outputs["Normal"], normal)
 
 
-def _image_texture_node(mat: bpy.types.Material, path: str, colorspace: str):
+def _image_texture_node(
+    mat: bpy.types.Material,
+    path: str,
+    colorspace: str,
+    tex_info: TextureRefData | None = None,
+):
     try:
         image = bpy.data.images.load(path, check_existing=True)
     except RuntimeError:
@@ -882,4 +1099,61 @@ def _image_texture_node(mat: bpy.types.Material, path: str, colorspace: str):
     nodes = mat.node_tree.nodes
     tex = nodes.new("ShaderNodeTexImage")
     tex.image = image
+    _configure_texture_node(mat, tex, tex_info)
     return tex
+
+
+def _configure_texture_node(mat: bpy.types.Material, tex, tex_info: TextureRefData | None) -> None:
+    if not tex_info:
+        return
+
+    tex.extension = _texture_extension(tex_info)
+    tex.interpolation = _texture_interpolation(tex_info)
+
+    needs_uv_node = tex_info.slot > 0 or tex_info.has_transform
+    if not needs_uv_node:
+        return
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    uv = nodes.new("ShaderNodeUVMap")
+    uv.uv_map = _uv_layer_name(tex_info.slot)
+    vector_output = uv.outputs.get("UV")
+
+    if tex_info.has_transform:
+        mapping = nodes.new("ShaderNodeMapping")
+        mapping.inputs["Location"].default_value[0] = tex_info.transform_offset[0]
+        mapping.inputs["Location"].default_value[1] = tex_info.transform_offset[1]
+        mapping.inputs["Rotation"].default_value[2] = tex_info.transform_rotation
+        mapping.inputs["Scale"].default_value[0] = tex_info.transform_scale[0]
+        mapping.inputs["Scale"].default_value[1] = tex_info.transform_scale[1]
+        if vector_output:
+            links.new(vector_output, mapping.inputs["Vector"])
+        vector_output = mapping.outputs.get("Vector")
+
+    if vector_output:
+        links.new(vector_output, tex.inputs["Vector"])
+
+
+def _uv_layer_name(slot: int) -> str:
+    return "UVMap" if slot <= 0 else f"UVMap.{slot:03d}"
+
+
+def _texture_extension(tex_info: TextureRefData) -> str:
+    wrap_s = tex_info.wrap_s
+    wrap_t = tex_info.wrap_t
+    if wrap_s != wrap_t:
+        return "REPEAT"
+    if wrap_s == 2 or wrap_s == 5:
+        return "MIRROR"
+    if wrap_s == 3:
+        return "EXTEND"
+    if wrap_s == 4:
+        return "CLIP"
+    return "REPEAT"
+
+
+def _texture_interpolation(tex_info: TextureRefData) -> str:
+    if tex_info.mag_filter == 1 or tex_info.min_filter == 1:
+        return "Closest"
+    return "Linear"
