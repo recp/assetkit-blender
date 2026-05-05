@@ -53,6 +53,11 @@ def import_assetkit_file(
         )
         objects.append(obj)
 
+    if objects:
+        for obj in objects:
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = objects[-1]
+
     return objects
 
 
@@ -105,8 +110,6 @@ def _create_mesh_object(
         _apply_animation(obj, data)
 
     bpy.context.collection.objects.link(obj)
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
     return obj
 
 
@@ -202,8 +205,6 @@ def _create_mesh_object_bulk(
         _apply_animation(obj, data)
 
     bpy.context.collection.objects.link(obj)
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
     return obj
 
 
