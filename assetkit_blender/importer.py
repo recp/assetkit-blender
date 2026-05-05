@@ -22,16 +22,17 @@ def import_assetkit_file(filepath: str, library_path: str = "") -> list[bpy.type
         kit = AssetKit(library_path or None)
         primitives = kit.load_meshes(filepath)
 
+    coord_root = _create_coord_root(primitives)
     for primitive in primitives:
-        obj = _create_mesh_object(primitive)
+        obj = _create_mesh_object(primitive, coord_root)
         objects.append(obj)
 
     return objects
 
 
-def _create_mesh_object(data: MeshPrimitiveData) -> bpy.types.Object:
+def _create_mesh_object(data: MeshPrimitiveData, parent: bpy.types.Object | None = None) -> bpy.types.Object:
     if data.vertices_f32 and data.indices_u32:
-        return _create_mesh_object_bulk(data)
+        return _create_mesh_object_bulk(data, parent)
 
     mesh = bpy.data.meshes.new(data.name)
     mesh.from_pydata(data.vertices, [], data.faces)
@@ -48,6 +49,7 @@ def _create_mesh_object(data: MeshPrimitiveData) -> bpy.types.Object:
             poly.use_smooth = True
 
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
+    _set_parent(obj, parent)
     _apply_matrix(obj, data)
     material = _create_material(data)
     if material:
@@ -60,7 +62,7 @@ def _create_mesh_object(data: MeshPrimitiveData) -> bpy.types.Object:
     return obj
 
 
-def _create_mesh_object_bulk(data: MeshPrimitiveData) -> bpy.types.Object:
+def _create_mesh_object_bulk(data: MeshPrimitiveData, parent: bpy.types.Object | None = None) -> bpy.types.Object:
     mesh = bpy.data.meshes.new(data.name)
 
     mesh.vertices.add(data.vertex_count)
@@ -102,6 +104,7 @@ def _create_mesh_object_bulk(data: MeshPrimitiveData) -> bpy.types.Object:
             pass
 
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
+    _set_parent(obj, parent)
     _apply_matrix(obj, data)
     material = _create_material(data)
     if material:
@@ -114,15 +117,47 @@ def _create_mesh_object_bulk(data: MeshPrimitiveData) -> bpy.types.Object:
     return obj
 
 
+def _create_coord_root(primitives: list[MeshPrimitiveData]) -> bpy.types.Object | None:
+    for primitive in primitives:
+        matrix = _matrix_from_buffer(primitive.coord_matrix_f32)
+        if matrix is None:
+            continue
+
+        root = bpy.data.objects.new("AssetKit Coordinates", None)
+        root.empty_display_type = "ARROWS"
+        root.empty_display_size = 0.5
+        root.matrix_local = matrix
+        bpy.context.collection.objects.link(root)
+        return root
+
+    return None
+
+
+def _set_parent(obj: bpy.types.Object, parent: bpy.types.Object | None) -> None:
+    if not parent:
+        return
+
+    obj.parent = parent
+    obj.matrix_parent_inverse.identity()
+
+
 def _apply_matrix(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
-    if not data.matrix_f32:
+    matrix = _matrix_from_buffer(data.matrix_f32)
+    if matrix is None:
         return
 
-    values = _buffer_view(data.matrix_f32, "f")
+    obj.matrix_local = matrix
+
+
+def _matrix_from_buffer(buffer: object) -> Matrix | None:
+    if not buffer:
+        return None
+
+    values = _buffer_view(buffer, "f")
     if values is None or len(values) != 16:
-        return
+        return None
 
-    obj.matrix_local = Matrix(
+    return Matrix(
         (
             (values[0], values[4], values[8], values[12]),
             (values[1], values[5], values[9], values[13]),
@@ -151,7 +186,7 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
 
     scene = bpy.context.scene
     fps = scene.render.fps / scene.render.fps_base
-    start_frame = float(scene.frame_start)
+    start_frame = 0.0
 
     if any(int(channel.get("target") or 0) == _ANIM_ROTATION_QUAT for channel in channels):
         obj.rotation_mode = "QUATERNION"
@@ -248,9 +283,11 @@ def _create_material(data: MeshPrimitiveData) -> bpy.types.Material | None:
     _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
 
     if data.base_color_texture:
-        _link_image(mat, bsdf, data.base_color_texture, "Base Color", colorspace="sRGB")
+        _link_base_color_texture(mat, bsdf, data)
     if data.metallic_roughness_texture:
-        _link_image(mat, bsdf, data.metallic_roughness_texture, "Roughness", colorspace="Non-Color")
+        _link_metallic_roughness_texture(mat, bsdf, data.metallic_roughness_texture)
+    if data.normal_texture:
+        _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale)
     if data.emissive_texture:
         _link_image(mat, bsdf, data.emissive_texture, "Emission Color", colorspace="sRGB")
 
@@ -264,10 +301,67 @@ def _set_input(node, name: str, value) -> None:
 
 
 def _link_image(mat: bpy.types.Material, target, path: str, input_name: str, colorspace: str) -> None:
+    tex = _image_texture_node(mat, path, colorspace)
+    if not tex:
+        return
+
+    socket = target.inputs.get(input_name)
+    if socket:
+        mat.node_tree.links.new(tex.outputs["Color"], socket)
+
+
+def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveData) -> None:
+    tex = _image_texture_node(mat, data.base_color_texture, "sRGB")
+    if not tex:
+        return
+
+    links = mat.node_tree.links
+    base_color = bsdf.inputs.get("Base Color")
+    alpha = bsdf.inputs.get("Alpha")
+    if base_color:
+        links.new(tex.outputs["Color"], base_color)
+    if data.alpha_mode and alpha and "Alpha" in tex.outputs:
+        links.new(tex.outputs["Alpha"], alpha)
+
+
+def _link_metallic_roughness_texture(mat: bpy.types.Material, bsdf, path: str) -> None:
+    tex = _image_texture_node(mat, path, "Non-Color")
+    if not tex:
+        return
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    separate = nodes.new("ShaderNodeSeparateColor")
+    links.new(tex.outputs["Color"], separate.inputs["Color"])
+
+    roughness = bsdf.inputs.get("Roughness")
+    metallic = bsdf.inputs.get("Metallic")
+    if roughness:
+        links.new(separate.outputs["Green"], roughness)
+    if metallic:
+        links.new(separate.outputs["Blue"], metallic)
+
+
+def _link_normal_texture(mat: bpy.types.Material, bsdf, path: str, strength: float) -> None:
+    tex = _image_texture_node(mat, path, "Non-Color")
+    if not tex:
+        return
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    normal_map = nodes.new("ShaderNodeNormalMap")
+    normal_map.inputs["Strength"].default_value = strength
+    links.new(tex.outputs["Color"], normal_map.inputs["Color"])
+    normal = bsdf.inputs.get("Normal")
+    if normal:
+        links.new(normal_map.outputs["Normal"], normal)
+
+
+def _image_texture_node(mat: bpy.types.Material, path: str, colorspace: str):
     try:
         image = bpy.data.images.load(path, check_existing=True)
     except RuntimeError:
-        return
+        return None
 
     try:
         image.colorspace_settings.name = colorspace
@@ -275,9 +369,6 @@ def _link_image(mat: bpy.types.Material, target, path: str, input_name: str, col
         pass
 
     nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
     tex = nodes.new("ShaderNodeTexImage")
     tex.image = image
-    socket = target.inputs.get(input_name)
-    if socket:
-        links.new(tex.outputs["Color"], socket)
+    return tex

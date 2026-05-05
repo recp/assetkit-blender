@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "ak/assetkit.h"
+#include "ak/options.h"
 
 #define AKB_GEOMETRY_MESH 1
 #define AKB_PRIMITIVE_TRIANGLES 3
@@ -16,6 +17,9 @@
 #define AKB_ANIM_TRANSLATION 1
 #define AKB_ANIM_ROTATION_QUAT 2
 #define AKB_ANIM_SCALE 3
+#define AKB_COORD_RAW 0
+#define AKB_COORD_TRANSFORM 1
+#define AKB_COORD_ALL 2
 
 typedef struct AkbPrimitive {
   struct AkbSharedDoc *doc_owner;
@@ -41,6 +45,7 @@ typedef struct AkbPrimitive {
   float    alpha_cutoff;
   float    normal_scale;
   float    matrix[16];
+  float    coord_matrix[16];
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
@@ -49,6 +54,7 @@ typedef struct AkbPrimitive {
   uint8_t  double_sided;
   uint8_t  alpha_mode;
   uint8_t  has_node;
+  uint8_t  has_coord_matrix;
   uint8_t  borrowed_vertices;
   uint8_t  borrowed_indices;
   uint8_t  zero_copy_flags;
@@ -59,6 +65,32 @@ typedef struct AkbPrimitiveList {
   size_t        count;
   size_t        capacity;
 } AkbPrimitiveList;
+
+typedef struct AkbCoordContext {
+  AkCoordSys *source;
+  AkCoordSys *target;
+  float       matrix[16];
+  uint8_t     convert;
+  uint8_t     conversion;
+} AkbCoordContext;
+
+typedef struct AkbLoadOptions {
+  AkCoordSys *target_coord;
+  uint8_t     coord_conversion;
+  uint8_t     triangulate;
+  uint8_t     gen_normals;
+  uint8_t     cvt_triangle_strip;
+  uint8_t     cvt_triangle_fan;
+} AkbLoadOptions;
+
+typedef struct AkbSavedOptions {
+  uintptr_t coord;
+  uintptr_t coord_convert_type;
+  uintptr_t triangulate;
+  uintptr_t gen_normals;
+  uintptr_t cvt_triangle_strip;
+  uintptr_t cvt_triangle_fan;
+} AkbSavedOptions;
 
 typedef struct AkbSharedDoc {
   AkDoc *doc;
@@ -116,6 +148,159 @@ akb_animation_retain(AkbAnimation *animation) {
   if (animation)
     animation->refcount++;
   return animation;
+}
+
+static void
+akb_coord_matrix(AkbCoordContext *coord) {
+  float in[3];
+  float out[3];
+  int i;
+
+  memset(coord->matrix, 0, sizeof(coord->matrix));
+  coord->matrix[15] = 1.0f;
+
+  for (i = 0; i < 3; i++) {
+    in[0] = 0.0f;
+    in[1] = 0.0f;
+    in[2] = 0.0f;
+    in[i] = 1.0f;
+    ak_coordCvtVectorTo(coord->source, in, coord->target, out);
+    coord->matrix[(size_t)i * 4]     = out[0];
+    coord->matrix[(size_t)i * 4 + 1] = out[1];
+    coord->matrix[(size_t)i * 4 + 2] = out[2];
+  }
+}
+
+static void
+akb_coord_ctx_init(AkbCoordContext *coord, AkDoc *doc, const AkbLoadOptions *options) {
+  coord->source = doc && doc->coordSys ? doc->coordSys : AK_YUP;
+  coord->target = options->target_coord ? options->target_coord : AK_ZUP;
+  coord->convert = coord->source != coord->target
+                   && !ak_coordOrientationIsEq(coord->source, coord->target);
+  coord->conversion = options->coord_conversion;
+  akb_coord_matrix(coord);
+}
+
+static void
+akb_prepare_blender_coords(AkDoc *doc,
+                           AkbCoordContext *coord,
+                           const AkbLoadOptions *options) {
+  akb_coord_ctx_init(coord, doc, options);
+}
+
+static AkCoordSys *
+akb_coord_from_name(const char *name) {
+  if (!name || !name[0])
+    return AK_ZUP;
+  if (strcmp(name, "Y_UP") == 0)
+    return AK_YUP;
+  if (strcmp(name, "X_UP") == 0)
+    return AK_XUP;
+  if (strcmp(name, "Z_UP_LH") == 0)
+    return AK_ZUP_LH;
+  if (strcmp(name, "Y_UP_LH") == 0)
+    return AK_YUP_LH;
+  if (strcmp(name, "X_UP_LH") == 0)
+    return AK_XUP_LH;
+  return AK_ZUP;
+}
+
+static uint8_t
+akb_conversion_from_name(const char *name) {
+  if (!name || !name[0])
+    return AKB_COORD_TRANSFORM;
+  if (strcmp(name, "RAW") == 0)
+    return AKB_COORD_RAW;
+  if (strcmp(name, "ALL") == 0)
+    return AKB_COORD_ALL;
+  return AKB_COORD_TRANSFORM;
+}
+
+static void
+akb_load_options_default(AkbLoadOptions *options) {
+  memset(options, 0, sizeof(*options));
+  options->target_coord = AK_ZUP;
+  options->coord_conversion = AKB_COORD_TRANSFORM;
+  options->triangulate = 1;
+  options->gen_normals = 1;
+  options->cvt_triangle_strip = 1;
+  options->cvt_triangle_fan = 1;
+}
+
+static int
+akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
+  PyObject *value;
+
+  akb_load_options_default(options);
+  if (!dict || dict == Py_None)
+    return 1;
+  if (!PyDict_Check(dict)) {
+    PyErr_SetString(PyExc_TypeError, "AssetKit load options must be a dict");
+    return 0;
+  }
+
+  value = PyDict_GetItemString(dict, "coordinate_system");
+  if (value && PyUnicode_Check(value))
+    options->target_coord = akb_coord_from_name(PyUnicode_AsUTF8(value));
+
+  value = PyDict_GetItemString(dict, "coordinate_conversion");
+  if (value && PyUnicode_Check(value))
+    options->coord_conversion = akb_conversion_from_name(PyUnicode_AsUTF8(value));
+
+  value = PyDict_GetItemString(dict, "triangulate");
+  if (value)
+    options->triangulate = PyObject_IsTrue(value) ? 1 : 0;
+
+  value = PyDict_GetItemString(dict, "generate_normals");
+  if (value)
+    options->gen_normals = PyObject_IsTrue(value) ? 1 : 0;
+
+  value = PyDict_GetItemString(dict, "convert_triangle_strip");
+  if (value)
+    options->cvt_triangle_strip = PyObject_IsTrue(value) ? 1 : 0;
+
+  value = PyDict_GetItemString(dict, "convert_triangle_fan");
+  if (value)
+    options->cvt_triangle_fan = PyObject_IsTrue(value) ? 1 : 0;
+
+  return !PyErr_Occurred();
+}
+
+static AkCoordCvtType
+akb_assetkit_coord_cvt_type(uint8_t conversion) {
+  if (conversion == AKB_COORD_RAW)
+    return AK_COORD_CVT_DISABLED;
+  if (conversion == AKB_COORD_ALL)
+    return AK_COORD_CVT_ALL;
+  return AK_COORD_CVT_DISABLED;
+}
+
+static void
+akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
+  saved->coord = ak_opt_get(AK_OPT_COORD);
+  saved->coord_convert_type = ak_opt_get(AK_OPT_COORD_CONVERT_TYPE);
+  saved->triangulate = ak_opt_get(AK_OPT_TRIANGULATE);
+  saved->gen_normals = ak_opt_get(AK_OPT_GEN_NORMALS_IF_NEEDED);
+  saved->cvt_triangle_strip = ak_opt_get(AK_OPT_CVT_TRIANGLESTRIP);
+  saved->cvt_triangle_fan = ak_opt_get(AK_OPT_CVT_TRIANGLEFAN);
+
+  ak_opt_set(AK_OPT_COORD, (uintptr_t)options->target_coord);
+  ak_opt_set(AK_OPT_COORD_CONVERT_TYPE,
+             (uintptr_t)akb_assetkit_coord_cvt_type(options->coord_conversion));
+  ak_opt_set(AK_OPT_TRIANGULATE, options->triangulate);
+  ak_opt_set(AK_OPT_GEN_NORMALS_IF_NEEDED, options->gen_normals);
+  ak_opt_set(AK_OPT_CVT_TRIANGLESTRIP, options->cvt_triangle_strip);
+  ak_opt_set(AK_OPT_CVT_TRIANGLEFAN, options->cvt_triangle_fan);
+}
+
+static void
+akb_options_restore(const AkbSavedOptions *saved) {
+  ak_opt_set(AK_OPT_COORD, saved->coord);
+  ak_opt_set(AK_OPT_COORD_CONVERT_TYPE, saved->coord_convert_type);
+  ak_opt_set(AK_OPT_TRIANGULATE, saved->triangulate);
+  ak_opt_set(AK_OPT_GEN_NORMALS_IF_NEEDED, saved->gen_normals);
+  ak_opt_set(AK_OPT_CVT_TRIANGLESTRIP, saved->cvt_triangle_strip);
+  ak_opt_set(AK_OPT_CVT_TRIANGLEFAN, saved->cvt_triangle_fan);
 }
 
 static void
@@ -213,6 +398,21 @@ akb_list_push(AkbPrimitiveList *list, AkbPrimitive *prim) {
   list->items[list->count++] = *prim;
   memset(prim, 0, sizeof(*prim));
   return 1;
+}
+
+static void
+akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord) {
+  size_t i;
+
+  if (!list || !coord || !coord->convert || coord->conversion != AKB_COORD_TRANSFORM)
+    return;
+
+  for (i = 0; i < list->count; i++) {
+    memcpy(list->items[i].coord_matrix,
+           coord->matrix,
+           sizeof(list->items[i].coord_matrix));
+    list->items[i].has_coord_matrix = 1;
+  }
 }
 
 static void
@@ -537,16 +737,81 @@ akb_animation_push(AkbAnimation *animation, AkbAnimChannel *channel) {
 }
 
 static int
+akb_animation_convert_values(AkbAnimChannel *out,
+                             float *raw_values,
+                             uint32_t raw_count,
+                             uint8_t raw_borrowed,
+                             const AkbCoordContext *coord) {
+  float *values;
+  float dot;
+  uint32_t i;
+
+  (void)coord;
+
+  if (out->target != AKB_ANIM_ROTATION_QUAT || out->is_partial) {
+    if (out->target == AKB_ANIM_ROTATION_QUAT && out->is_partial) {
+      switch (out->target_offset) {
+        case 0: out->target_offset = 1; break;
+        case 1: out->target_offset = 2; break;
+        case 2: out->target_offset = 3; break;
+        case 3: out->target_offset = 0; break;
+        default: break;
+      }
+    }
+    out->values = raw_values;
+    out->borrowed_values = raw_borrowed;
+    return 1;
+  }
+
+  values = (float *)malloc((size_t)raw_count * 4 * sizeof(float));
+  if (!values) {
+    if (!raw_borrowed)
+      free(raw_values);
+    return 0;
+  }
+
+  for (i = 0; i < raw_count; i++) {
+    values[(size_t)i * 4]     = raw_values[(size_t)i * out->value_width + 3];
+    values[(size_t)i * 4 + 1] = raw_values[(size_t)i * out->value_width];
+    values[(size_t)i * 4 + 2] = raw_values[(size_t)i * out->value_width + 1];
+    values[(size_t)i * 4 + 3] = raw_values[(size_t)i * out->value_width + 2];
+
+    if (i > 0) {
+      dot = values[(size_t)i * 4] * values[(size_t)(i - 1) * 4]
+            + values[(size_t)i * 4 + 1] * values[(size_t)(i - 1) * 4 + 1]
+            + values[(size_t)i * 4 + 2] * values[(size_t)(i - 1) * 4 + 2]
+            + values[(size_t)i * 4 + 3] * values[(size_t)(i - 1) * 4 + 3];
+      if (dot < 0.0f) {
+        values[(size_t)i * 4]     = -values[(size_t)i * 4];
+        values[(size_t)i * 4 + 1] = -values[(size_t)i * 4 + 1];
+        values[(size_t)i * 4 + 2] = -values[(size_t)i * 4 + 2];
+        values[(size_t)i * 4 + 3] = -values[(size_t)i * 4 + 3];
+      }
+    }
+  }
+  out->value_width = 4;
+
+  if (!raw_borrowed)
+    free(raw_values);
+  out->values = values;
+  out->borrowed_values = 0;
+  return 1;
+}
+
+static int
 akb_animation_add_channel(AkbAnimation *animation,
                           AkChannel *channel,
-                          AkResolvedTarget *target) {
+                          AkResolvedTarget *target,
+                          const AkbCoordContext *coord) {
   AkbAnimChannel out = {0};
   AkAnimSampler *sampler;
   AkInput *time_input;
   AkInput *value_input;
+  float *raw_values;
   uint32_t target_width;
   uint32_t time_count;
   uint32_t value_count;
+  uint8_t raw_borrowed;
 
   sampler = ak_getObjectByUrl(&channel->source);
   if (!sampler)
@@ -577,16 +842,17 @@ akb_animation_add_channel(AkbAnimation *animation,
       return 0;
   }
 
-  out.values = akb_accessor_float_borrow(value_input->accessor,
+  raw_values = akb_accessor_float_borrow(value_input->accessor,
                                          out.value_width,
                                          &value_count);
-  if (out.values) {
-    out.borrowed_values = 1;
+  if (raw_values) {
+    raw_borrowed = 1;
   } else {
-    out.values = akb_accessor_float_copy(value_input->accessor,
+    raw_values = akb_accessor_float_copy(value_input->accessor,
                                          out.value_width,
                                          &value_count);
-    if (!out.values) {
+    raw_borrowed = 0;
+    if (!raw_values) {
       if (!out.borrowed_times)
         free(out.times);
       return 0;
@@ -600,6 +866,16 @@ akb_animation_add_channel(AkbAnimation *animation,
   out.target_offset = target->isPartial ? target->off : 0;
   out.is_partial = target->isPartial ? 1 : 0;
   out.interpolation = (uint8_t)sampler->uniInterpolation;
+
+  if (!akb_animation_convert_values(&out,
+                                    raw_values,
+                                    value_count,
+                                    raw_borrowed,
+                                    coord)) {
+    if (!out.borrowed_times)
+      free(out.times);
+    return 0;
+  }
 
   if (!out.count) {
     if (!out.borrowed_times)
@@ -625,7 +901,8 @@ akb_animation_collect_walk(AkbAnimation *animation,
                            AkAnimation *source,
                            AkContext *context,
                            AkObject **targets,
-                           int target_count) {
+                           int target_count,
+                           const AkbCoordContext *coord) {
   AkAnimation *stack[256];
   AkAnimation *next;
   AkChannel *channel;
@@ -642,7 +919,7 @@ akb_animation_collect_walk(AkbAnimation *animation,
 
       for (i = 0; i < target_count; i++) {
         if (resolved.target == targets[i]) {
-          if (!akb_animation_add_channel(animation, channel, &resolved))
+          if (!akb_animation_add_channel(animation, channel, &resolved, coord))
             return 0;
           break;
         }
@@ -685,7 +962,11 @@ akb_node_transform_targets(AkNode *node, AkObject **targets, int capacity) {
 }
 
 static AkbAnimation *
-akb_animation_new(AkDoc *doc, AkbSharedDoc *doc_owner, AkNode *node, int *ok) {
+akb_animation_new(AkDoc *doc,
+                  AkbSharedDoc *doc_owner,
+                  AkNode *node,
+                  const AkbCoordContext *coord,
+                  int *ok) {
   AkbAnimation *animation;
   AkLibrary *library;
   AkObject *targets[64];
@@ -715,7 +996,8 @@ akb_animation_new(AkDoc *doc, AkbSharedDoc *doc_owner, AkNode *node, int *ok) {
                                     (AkAnimation *)library->chld,
                                     &context,
                                     targets,
-                                    target_count)) {
+                                    target_count,
+                                    coord)) {
       akb_animation_release(animation);
       *ok = 0;
       return NULL;
@@ -888,7 +1170,11 @@ akb_extract_mesh(AkbPrimitiveList *list,
 }
 
 static int
-akb_extract_node(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, AkNode *node) {
+akb_extract_node(AkbPrimitiveList *list,
+                 AkDoc *doc,
+                 AkbSharedDoc *doc_owner,
+                 AkNode *node,
+                 const AkbCoordContext *coord) {
   AkNode *child;
   AkGeometry *geom;
   AkbAnimation *animation;
@@ -898,7 +1184,7 @@ akb_extract_node(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, Ak
     return 1;
 
   if (node->geometry) {
-    animation = akb_animation_new(doc, doc_owner, node, &ok);
+    animation = akb_animation_new(doc, doc_owner, node, coord, &ok);
     if (!ok)
       return 0;
 
@@ -911,7 +1197,7 @@ akb_extract_node(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, Ak
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(list, doc, doc_owner, child))
+    if (!akb_extract_node(list, doc, doc_owner, child, coord))
       return 0;
   }
 
@@ -919,7 +1205,10 @@ akb_extract_node(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, Ak
 }
 
 static int
-akb_extract_scene(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
+akb_extract_scene(AkDoc *doc,
+                  AkbSharedDoc *doc_owner,
+                  AkbPrimitiveList *list,
+                  const AkbCoordContext *coord) {
   AkVisualScene *scene;
   AkInstanceBase *inst;
   AkNode *node;
@@ -931,25 +1220,40 @@ akb_extract_scene(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
   if (!scene || !scene->node)
     return 1;
 
-  for (inst = scene->node->node ? &scene->node->node->base : NULL; inst; inst = inst->next) {
-    node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-    if (!akb_extract_node(list, doc, doc_owner, node))
-      return 0;
+  if (scene->node->node) {
+    for (inst = &scene->node->node->base; inst; inst = inst->next) {
+      node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
+      if (!akb_extract_node(list, doc, doc_owner, node, coord))
+        return 0;
+    }
+  } else {
+    for (node = scene->node; node; node = node->next) {
+      if (!akb_extract_node(list, doc, doc_owner, node, coord))
+        return 0;
+    }
   }
 
   return 1;
 }
 
 static int
-akb_extract_doc(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
+akb_extract_doc(AkDoc *doc,
+                AkbSharedDoc *doc_owner,
+                AkbPrimitiveList *list,
+                const AkbLoadOptions *options) {
+  AkbCoordContext coord;
   AkLibrary *lib;
   AkGeometry *geom;
 
-  if (!akb_extract_scene(doc, doc_owner, list))
+  akb_prepare_blender_coords(doc, &coord, options);
+
+  if (!akb_extract_scene(doc, doc_owner, list, &coord))
     return 0;
 
-  if (list->count > 0)
+  if (list->count > 0) {
+    akb_list_set_coord_matrix(list, &coord);
     return 1;
+  }
 
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
@@ -958,6 +1262,7 @@ akb_extract_doc(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
     }
   }
 
+  akb_list_set_coord_matrix(list, &coord);
   return 1;
 }
 
@@ -1092,6 +1397,9 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                       : 0));
   AKB_SET_OBJ("anim_channels", akb_anim_channels_to_py(prim->animation));
   AKB_SET_OBJ("matrix_f32", akb_memoryview_or_empty(prim->matrix, prim->has_node ? 16 * sizeof(float) : 0));
+  AKB_SET_OBJ("coord_matrix_f32",
+              akb_memoryview_or_empty(prim->coord_matrix,
+                                      prim->has_coord_matrix ? 16 * sizeof(float) : 0));
   AKB_SET_OBJ("base_color_texture", PyUnicode_FromString(prim->base_color_texture));
   AKB_SET_OBJ("metallic_roughness_texture", PyUnicode_FromString(prim->metallic_roughness_texture));
   AKB_SET_OBJ("normal_texture", PyUnicode_FromString(prim->normal_texture));
@@ -1112,10 +1420,13 @@ static PyObject *
 akb_load_meshes(PyObject *self, PyObject *args) {
   const char *filepath;
   AkDoc *doc = NULL;
+  AkbLoadOptions options;
+  AkbSavedOptions saved_options;
   AkbSharedDoc *doc_owner;
   AkResult result;
   AkbPrimitiveList list = {0};
   AkbPrimitiveList *owner_list;
+  PyObject *options_obj = NULL;
   PyObject *out;
   PyObject *owner;
   PyObject *item;
@@ -1124,7 +1435,10 @@ akb_load_meshes(PyObject *self, PyObject *args) {
 
   (void)self;
 
-  if (!PyArg_ParseTuple(args, "s", &filepath))
+  if (!PyArg_ParseTuple(args, "s|O", &filepath, &options_obj))
+    return NULL;
+
+  if (!akb_load_options_from_dict(&options, options_obj))
     return NULL;
 
   doc_owner = (AkbSharedDoc *)calloc(1, sizeof(*doc_owner));
@@ -1133,12 +1447,14 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   doc_owner->refcount = 1;
 
   Py_BEGIN_ALLOW_THREADS
+  akb_options_apply(&options, &saved_options);
   result = ak_load(&doc, filepath, AK_FILE_TYPE_AUTO);
   doc_owner->doc = doc;
   if (result == AK_OK && doc)
-    ok = akb_extract_doc(doc, doc_owner, &list);
+    ok = akb_extract_doc(doc, doc_owner, &list, &options);
   else
     ok = 0;
+  akb_options_restore(&saved_options);
   Py_END_ALLOW_THREADS
 
   if (result != AK_OK || !doc) {

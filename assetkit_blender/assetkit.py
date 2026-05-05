@@ -229,6 +229,7 @@ class MeshPrimitiveData:
     anim_channels: list[dict] | None = None
     object_name: str = ""
     matrix_f32: object = b""
+    coord_matrix_f32: object = b""
     has_node: bool = False
     anim_count: int = 0
     material_name: str = ""
@@ -511,6 +512,7 @@ def native_load_meshes(filepath: str | os.PathLike[str]) -> list[MeshPrimitiveDa
                 anim_channels=item.get("anim_channels") or [],
                 object_name=item.get("object_name") or "",
                 matrix_f32=item.get("matrix_f32") or b"",
+                coord_matrix_f32=item.get("coord_matrix_f32") or b"",
                 has_node=bool(item.get("has_node")),
                 anim_count=int(item.get("anim_count") or 0),
                 material_name=item.get("material_name") or "",
