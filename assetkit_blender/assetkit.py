@@ -618,6 +618,40 @@ def native_load_meshes(
     raw_meshes = result.get("meshes", []) if isinstance(result, dict) else result
     raw_nodes = result.get("nodes", []) if isinstance(result, dict) else []
 
+    return AssetKitSceneData(meshes=_native_meshes_from_raw(raw_meshes), nodes=_native_nodes_from_raw(raw_nodes))
+
+
+def native_open_scene_stream(
+    filepath: str | os.PathLike[str],
+    options: dict | None = None,
+) -> NativeSceneStream | None:
+    try:
+        from . import _assetkit_blender
+    except ImportError:
+        return None
+
+    result = _assetkit_blender.open_scene(os.fspath(filepath), options or None)
+    return NativeSceneStream(
+        _assetkit_blender,
+        result.get("_owner"),
+        int(result.get("mesh_count") or 0),
+        _native_nodes_from_raw(result.get("nodes", [])),
+    )
+
+
+class NativeSceneStream:
+    def __init__(self, module: object, owner: object, mesh_count: int, nodes: list[SceneNodeData]) -> None:
+        self._module = module
+        self._owner = owner
+        self.mesh_count = mesh_count
+        self.nodes = nodes
+
+    def read_mesh_batch(self, start: int, count: int) -> list[MeshPrimitiveData]:
+        raw_meshes = self._module.read_mesh_batch(self._owner, start, count)
+        return _native_meshes_from_raw(raw_meshes)
+
+
+def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
     nodes = []
     for item in raw_nodes:
         nodes.append(
@@ -637,7 +671,10 @@ def native_load_meshes(
                 _native_owner=item.get("_owner"),
             )
         )
+    return nodes
 
+
+def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveData]:
     meshes = []
     for item in raw_meshes:
         uv_sets = []
@@ -816,4 +853,4 @@ def native_load_meshes(
                 _native_owner=item.get("_owner"),
             )
         )
-    return AssetKitSceneData(meshes=meshes, nodes=nodes)
+    return meshes

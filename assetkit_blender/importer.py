@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from array import array
+from collections import deque
+import queue
 import threading
 import time
 import traceback
@@ -8,7 +10,15 @@ import traceback
 import bpy
 from mathutils import Matrix, Vector
 
-from .assetkit import AssetKit, AssetKitSceneData, MeshPrimitiveData, SceneNodeData, TextureRefData, native_load_meshes
+from .assetkit import (
+    AssetKit,
+    AssetKitSceneData,
+    MeshPrimitiveData,
+    SceneNodeData,
+    TextureRefData,
+    native_load_meshes,
+    native_open_scene_stream,
+)
 
 _ANIM_TRANSLATION = 1
 _ANIM_ROTATION_QUAT = 2
@@ -130,18 +140,21 @@ class _ProgressiveImportJob:
         self.load_options = load_options
         self.collection = collection
         self.batch_size = batch_size
-        self.primitives: list[MeshPrimitiveData] = []
         self.scene_nodes: list[SceneNodeData] = []
+        self.mesh_count = 0
+        self.pending_primitives: deque[MeshPrimitiveData] = deque()
         self.objects: list[bpy.types.Object] = []
         self.state: dict | None = None
         self.error: BaseException | None = None
         self.error_traceback = ""
+        self.producer_done = False
         self.load_started_at = 0.0
         self.build_started_at = 0.0
         self.first_object_at = 0.0
-        self.index = 0
+        self.created_count = 0
         self.progress_active = False
-        self._thread = threading.Thread(target=self._load, name="AssetKit progressive import", daemon=True)
+        self._queue: queue.SimpleQueue[list[MeshPrimitiveData]] = queue.SimpleQueue()
+        self._thread = threading.Thread(target=self._produce, name="AssetKit progressive import", daemon=True)
 
     def start(self) -> None:
         self.load_started_at = time.perf_counter()
@@ -149,16 +162,33 @@ class _ProgressiveImportJob:
         self._thread.start()
         bpy.app.timers.register(self._timer, first_interval=0.001)
 
-    def _load(self) -> None:
+    def _produce(self) -> None:
         try:
-            self.primitives, self.scene_nodes = _load_assetkit_scene(
-                self.filepath,
-                self.library_path,
-                self.load_options,
-            )
+            if not self.library_path:
+                stream = native_open_scene_stream(self.filepath, self.load_options)
+                if stream is not None:
+                    self.scene_nodes = stream.nodes
+                    self.mesh_count = stream.mesh_count
+                    start = 0
+                    producer_batch_size = max(self.batch_size * 4, 256)
+                    while start < stream.mesh_count:
+                        count = self.batch_size if start == 0 else producer_batch_size
+                        batch = stream.read_mesh_batch(start, count)
+                        if batch:
+                            self._queue.put(batch)
+                        start += count
+                    return
+
+            primitives, scene_nodes = _load_assetkit_scene(self.filepath, self.library_path, self.load_options)
+            self.scene_nodes = scene_nodes
+            self.mesh_count = len(primitives)
+            if primitives:
+                self._queue.put(primitives)
         except BaseException as exc:
             self.error = exc
             self.error_traceback = traceback.format_exc()
+        finally:
+            self.producer_done = True
 
     def _timer(self) -> float | None:
         try:
@@ -169,8 +199,7 @@ class _ProgressiveImportJob:
             return None
 
     def _step(self) -> float | None:
-        if self._thread.is_alive():
-            return 0.01
+        self._drain_queue()
 
         if self.error:
             print(self.error_traceback or str(self.error))
@@ -178,41 +207,57 @@ class _ProgressiveImportJob:
             return None
 
         if self.state is None:
+            if not self.pending_primitives and not self.producer_done:
+                return 0.01
             self.build_started_at = time.perf_counter()
-            self.state = _begin_scene_build(self.primitives, self.scene_nodes, self.collection)
+            coord_probe = [self.pending_primitives[0]] if self.pending_primitives else []
+            self.state = _begin_scene_build(coord_probe, self.scene_nodes, self.collection)
             self._progress_begin()
-            if not self.primitives:
+            if not self.pending_primitives and self.producer_done:
                 self._finish()
                 return None
 
-        stop_at = min(len(self.primitives), self.index + self.batch_size)
+        created_this_step = 0
         slice_started_at = time.perf_counter()
-        while self.index < stop_at:
-            obj = _create_import_object(self.primitives[self.index], self.state, self.collection)
+        while self.pending_primitives and created_this_step < self.batch_size:
+            obj = _create_import_object(self.pending_primitives.popleft(), self.state, self.collection)
             self.objects.append(obj)
-            self.index += 1
+            self.created_count += 1
+            created_this_step += 1
             if self.first_object_at == 0.0:
                 self.first_object_at = time.perf_counter()
             if time.perf_counter() - slice_started_at >= _PROGRESSIVE_TIME_BUDGET:
                 break
 
-        if self.index >= len(self.primitives):
-            _select_imported_objects(self.objects)
-            finished_at = time.perf_counter()
-            load_seconds = self.build_started_at - self.load_started_at
-            build_seconds = finished_at - self.build_started_at
-            first_object_seconds = self.first_object_at - self.load_started_at if self.first_object_at else 0.0
-            print(
-                "AssetKit progressive import finished: "
-                f"{len(self.objects)} mesh object(s), "
-                f"first_object={first_object_seconds:.3f}s, "
-                f"load={load_seconds:.3f}s, build={build_seconds:.3f}s, total={finished_at - self.load_started_at:.3f}s"
-            )
-            self._finish()
+        self._drain_queue()
+        if self.producer_done and not self.pending_primitives:
+            self._finish_success()
             return None
 
         self._progress_update()
         return 0.001
+
+    def _drain_queue(self) -> None:
+        while True:
+            try:
+                batch = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            self.pending_primitives.extend(batch)
+
+    def _finish_success(self) -> None:
+        _select_imported_objects(self.objects)
+        finished_at = time.perf_counter()
+        load_seconds = self.build_started_at - self.load_started_at
+        build_seconds = finished_at - self.build_started_at
+        first_object_seconds = self.first_object_at - self.load_started_at if self.first_object_at else 0.0
+        print(
+            "AssetKit progressive import finished: "
+            f"{len(self.objects)} mesh object(s), "
+            f"first_object={first_object_seconds:.3f}s, "
+            f"load={load_seconds:.3f}s, build={build_seconds:.3f}s, total={finished_at - self.load_started_at:.3f}s"
+        )
+        self._finish()
 
     def _finish(self) -> None:
         self._progress_end()
@@ -221,7 +266,7 @@ class _ProgressiveImportJob:
 
     def _progress_begin(self) -> None:
         try:
-            bpy.context.window_manager.progress_begin(0, max(1, len(self.primitives)))
+            bpy.context.window_manager.progress_begin(0, max(1, self.mesh_count or len(self.pending_primitives)))
             self.progress_active = True
         except Exception:
             self.progress_active = False
@@ -230,7 +275,7 @@ class _ProgressiveImportJob:
         if not self.progress_active:
             return
         try:
-            bpy.context.window_manager.progress_update(self.index)
+            bpy.context.window_manager.progress_update(self.created_count)
         except Exception:
             self.progress_active = False
 

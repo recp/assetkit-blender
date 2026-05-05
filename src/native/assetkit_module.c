@@ -3401,8 +3401,195 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   return out;
 }
 
+static PyObject *
+akb_open_scene(PyObject *self, PyObject *args) {
+  const char *filepath;
+  AkDoc *doc = NULL;
+  AkbLoadOptions options;
+  AkbSavedOptions saved_options;
+  AkbSharedDoc *doc_owner;
+  AkResult result;
+  AkbImport import = {0};
+  AkbImport *owner_import;
+  PyObject *options_obj = NULL;
+  PyObject *out;
+  PyObject *node_list;
+  PyObject *owner;
+  PyObject *item;
+  size_t i;
+  int ok;
+
+  (void)self;
+
+  if (!PyArg_ParseTuple(args, "s|O", &filepath, &options_obj))
+    return NULL;
+
+  if (!akb_load_options_from_dict(&options, options_obj))
+    return NULL;
+  if (!akb_load_lock_ensure())
+    return NULL;
+
+  doc_owner = (AkbSharedDoc *)calloc(1, sizeof(*doc_owner));
+  if (!doc_owner)
+    return PyErr_NoMemory();
+  doc_owner->refcount = 1;
+
+  Py_BEGIN_ALLOW_THREADS
+  PyThread_acquire_lock(akb_load_lock, WAIT_LOCK);
+  akb_options_apply(&options, &saved_options);
+  result = ak_load(&doc, filepath, AK_FILE_TYPE_AUTO);
+  doc_owner->doc = doc;
+  if (result == AK_OK && doc)
+    ok = akb_extract_doc(doc, doc_owner, &import, &options);
+  else
+    ok = 0;
+  akb_options_restore(&saved_options);
+  PyThread_release_lock(akb_load_lock);
+  Py_END_ALLOW_THREADS
+
+  if (result != AK_OK || !doc) {
+    PyErr_Format(PyExc_RuntimeError, "AssetKit failed to load file: result=%d", result);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
+  if (!ok) {
+    akb_import_free(&import);
+    akb_shared_doc_release(doc_owner);
+    PyErr_SetString(PyExc_MemoryError, "AssetKit bridge could not prepare mesh buffers");
+    return NULL;
+  }
+
+  out = PyDict_New();
+  if (!out) {
+    akb_import_free(&import);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
+  node_list = PyList_New((Py_ssize_t)import.nodes.count);
+  if (!node_list) {
+    Py_DECREF(out);
+    akb_import_free(&import);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
+  owner_import = (AkbImport *)malloc(sizeof(*owner_import));
+  if (!owner_import) {
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    akb_import_free(&import);
+    akb_shared_doc_release(doc_owner);
+    return PyErr_NoMemory();
+  }
+
+  *owner_import = import;
+  memset(&import, 0, sizeof(import));
+
+  owner = PyCapsule_New(owner_import,
+                        "assetkit_blender.AkbImport",
+                        akb_import_capsule_destructor);
+  if (!owner) {
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    akb_import_free(owner_import);
+    free(owner_import);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
+  for (i = 0; i < owner_import->nodes.count; i++) {
+    item = akb_scene_node_to_py(&owner_import->nodes.items[i], owner);
+    if (!item) {
+      Py_DECREF(node_list);
+      Py_DECREF(out);
+      Py_DECREF(owner);
+      akb_shared_doc_release(doc_owner);
+      return NULL;
+    }
+    PyList_SET_ITEM(node_list, (Py_ssize_t)i, item);
+  }
+
+  item = PyLong_FromSize_t(owner_import->primitives.count);
+  if (!item) {
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
+  if (PyDict_SetItemString(out, "_owner", owner) < 0
+      || PyDict_SetItemString(out, "nodes", node_list) < 0
+      || PyDict_SetItemString(out, "mesh_count", item) < 0) {
+    Py_DECREF(item);
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(item);
+
+  Py_DECREF(node_list);
+  Py_DECREF(owner);
+  akb_shared_doc_release(doc_owner);
+  return out;
+}
+
+static PyObject *
+akb_read_mesh_batch(PyObject *self, PyObject *args) {
+  AkbImport *import;
+  PyObject *owner;
+  PyObject *item;
+  PyObject *list;
+  Py_ssize_t start;
+  Py_ssize_t count;
+  Py_ssize_t available;
+  Py_ssize_t i;
+
+  (void)self;
+
+  if (!PyArg_ParseTuple(args, "Onn", &owner, &start, &count))
+    return NULL;
+
+  if (start < 0 || count < 0) {
+    PyErr_SetString(PyExc_ValueError, "AssetKit mesh batch range must be non-negative");
+    return NULL;
+  }
+
+  import = (AkbImport *)PyCapsule_GetPointer(owner, "assetkit_blender.AkbImport");
+  if (!import)
+    return NULL;
+
+  if ((size_t)start >= import->primitives.count || count == 0)
+    return PyList_New(0);
+
+  available = (Py_ssize_t)(import->primitives.count - (size_t)start);
+  if (count > available)
+    count = available;
+
+  list = PyList_New(count);
+  if (!list)
+    return NULL;
+
+  for (i = 0; i < count; i++) {
+    item = akb_primitive_to_py(&import->primitives.items[start + i], owner);
+    if (!item) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, i, item);
+  }
+
+  return list;
+}
+
 static PyMethodDef akb_methods[] = {
   {"load_meshes", akb_load_meshes, METH_VARARGS, "Load mesh buffers through AssetKit."},
+  {"open_scene", akb_open_scene, METH_VARARGS, "Open an AssetKit scene for batched mesh reads."},
+  {"read_mesh_batch", akb_read_mesh_batch, METH_VARARGS, "Read a batch of mesh buffers from an open AssetKit scene."},
   {NULL, NULL, 0, NULL}
 };
 
