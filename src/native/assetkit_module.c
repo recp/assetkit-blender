@@ -70,8 +70,15 @@ typedef struct AkbPrimitiveList {
 typedef struct AkbSceneNode {
   struct AkbAnimation *animation;
   char     name[512];
+  char     camera_name[512];
+  char     light_name[512];
   float    matrix[16];
+  float    camera_values[6];
+  float    light_color[3];
+  float    light_values[5];
   int32_t  parent_index;
+  uint8_t  camera_type;
+  uint8_t  light_type;
   uint8_t  has_transform;
 } AkbSceneNode;
 
@@ -1072,6 +1079,80 @@ akb_animation_new(AkDoc *doc,
   return animation;
 }
 
+static void
+akb_extract_node_camera(AkbSceneNode *out, AkNode *node) {
+  AkCamera *camera;
+  AkProjection *projection;
+
+  if (!out || !node || !node->camera)
+    return;
+
+  camera = (AkCamera *)ak_instanceObject(node->camera);
+  if (!camera || !camera->optics || !camera->optics->tcommon)
+    return;
+
+  projection = camera->optics->tcommon;
+  out->camera_type = (uint8_t)projection->type + 1;
+  snprintf(out->camera_name,
+           sizeof(out->camera_name),
+           "%s",
+           akb_name(camera->name, out->name));
+
+  if (projection->type == AK_PROJECTION_PERSPECTIVE) {
+    AkPerspective *persp;
+
+    persp = (AkPerspective *)projection;
+    out->camera_values[0] = persp->xfov;
+    out->camera_values[1] = persp->yfov;
+    out->camera_values[2] = persp->aspectRatio;
+    out->camera_values[3] = persp->znear;
+    out->camera_values[4] = persp->zfar;
+  } else if (projection->type == AK_PROJECTION_ORTHOGRAPHIC) {
+    AkOrthographic *ortho;
+
+    ortho = (AkOrthographic *)projection;
+    out->camera_values[0] = ortho->xmag;
+    out->camera_values[1] = ortho->ymag;
+    out->camera_values[2] = ortho->aspectRatio;
+    out->camera_values[3] = ortho->znear;
+    out->camera_values[4] = ortho->zfar;
+  }
+}
+
+static void
+akb_extract_node_light(AkbSceneNode *out, AkNode *node) {
+  AkLight *light;
+  AkLightBase *base;
+
+  if (!out || !node || !node->light)
+    return;
+
+  light = (AkLight *)ak_instanceObject(node->light);
+  if (!light || !light->tcommon)
+    return;
+
+  base = light->tcommon;
+  out->light_type = (uint8_t)base->type;
+  snprintf(out->light_name,
+           sizeof(out->light_name),
+           "%s",
+           akb_name(light->name, out->name));
+  out->light_color[0] = base->color.rgba.R;
+  out->light_color[1] = base->color.rgba.G;
+  out->light_color[2] = base->color.rgba.B;
+  out->light_values[0] = base->intensity;
+  out->light_values[1] = base->range;
+
+  if (base->type == AK_LIGHT_TYPE_SPOT) {
+    AkSpotLight *spot;
+
+    spot = (AkSpotLight *)base;
+    out->light_values[2] = spot->innerConeAngle;
+    out->light_values[3] = spot->outerConeAngle ? spot->outerConeAngle : spot->falloffAngle;
+    out->light_values[4] = spot->falloffExp;
+  }
+}
+
 static int
 akb_extract_scene_node(AkbSceneNodeList *nodes,
                        AkDoc *doc,
@@ -1091,6 +1172,8 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   out.parent_index = parent_index;
   ak_transformCombine(node->transform, out.matrix);
   out.has_transform = 1;
+  akb_extract_node_camera(&out, node);
+  akb_extract_node_light(&out, node);
   out.animation = akb_animation_new(doc, doc_owner, node, coord, &ok);
   if (!ok) {
     akb_scene_node_free(&out);
@@ -1585,6 +1668,27 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
 
   AKB_NODE_SET_OBJ("name", PyUnicode_FromString(node->name));
   AKB_NODE_SET_OBJ("parent_index", PyLong_FromLong(node->parent_index));
+  AKB_NODE_SET_OBJ("camera_type", PyLong_FromUnsignedLong(node->camera_type));
+  AKB_NODE_SET_OBJ("camera_name", PyUnicode_FromString(node->camera_name));
+  AKB_NODE_SET_OBJ("camera_values", Py_BuildValue("(ffffff)",
+                                                  node->camera_values[0],
+                                                  node->camera_values[1],
+                                                  node->camera_values[2],
+                                                  node->camera_values[3],
+                                                  node->camera_values[4],
+                                                  node->camera_values[5]));
+  AKB_NODE_SET_OBJ("light_type", PyLong_FromUnsignedLong(node->light_type));
+  AKB_NODE_SET_OBJ("light_name", PyUnicode_FromString(node->light_name));
+  AKB_NODE_SET_OBJ("light_color", Py_BuildValue("(fff)",
+                                                node->light_color[0],
+                                                node->light_color[1],
+                                                node->light_color[2]));
+  AKB_NODE_SET_OBJ("light_values", Py_BuildValue("(fffff)",
+                                                 node->light_values[0],
+                                                 node->light_values[1],
+                                                 node->light_values[2],
+                                                 node->light_values[3],
+                                                 node->light_values[4]));
   AKB_NODE_SET_OBJ("matrix_f32",
                    akb_memoryview_or_empty(node->matrix,
                                            node->has_transform ? 16 * sizeof(float) : 0));

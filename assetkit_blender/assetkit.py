@@ -257,6 +257,13 @@ class SceneNodeData:
     matrix_f32: object = b""
     anim_channels: list[dict] | None = None
     anim_count: int = 0
+    camera_type: int = 0
+    camera_name: str = ""
+    camera_values: tuple[float, float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    light_type: int = 0
+    light_name: str = ""
+    light_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    light_values: tuple[float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0)
     _native_owner: object | None = None
 
 
@@ -523,6 +530,13 @@ def native_load_meshes(
                 matrix_f32=item.get("matrix_f32") or b"",
                 anim_channels=item.get("anim_channels") or [],
                 anim_count=int(item.get("anim_count") or 0),
+                camera_type=int(item.get("camera_type") or 0),
+                camera_name=item.get("camera_name") or "",
+                camera_values=tuple(item.get("camera_values") or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+                light_type=int(item.get("light_type") or 0),
+                light_name=item.get("light_name") or "",
+                light_color=tuple(item.get("light_color") or (1.0, 1.0, 1.0)),
+                light_values=tuple(item.get("light_values") or (0.0, 0.0, 0.0, 0.0, 0.0)),
                 _native_owner=item.get("_owner"),
             )
         )

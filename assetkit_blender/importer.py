@@ -160,9 +160,7 @@ def _create_scene_nodes(
     objects: dict[int, bpy.types.Object] = {}
 
     for index, node in enumerate(nodes):
-        obj = bpy.data.objects.new(node.name or f"AssetKitNode_{index}", None)
-        obj.empty_display_type = "PLAIN_AXES"
-        obj.empty_display_size = 0.35
+        obj = _new_scene_node_object(node, index)
         bpy.context.collection.objects.link(obj)
         objects[index] = obj
 
@@ -174,6 +172,63 @@ def _create_scene_nodes(
         _apply_animation(obj, node)
 
     return objects
+
+
+def _new_scene_node_object(node: SceneNodeData, index: int) -> bpy.types.Object:
+    name = node.name or f"AssetKitNode_{index}"
+
+    if node.camera_type:
+        camera = bpy.data.cameras.new(node.camera_name or name)
+        _configure_camera(camera, node)
+        return bpy.data.objects.new(name, camera)
+
+    if node.light_type:
+        light = bpy.data.lights.new(node.light_name or name, _blender_light_type(node.light_type))
+        _configure_light(light, node)
+        return bpy.data.objects.new(name, light)
+
+    obj = bpy.data.objects.new(name, None)
+    obj.empty_display_type = "PLAIN_AXES"
+    obj.empty_display_size = 0.35
+    return obj
+
+
+def _configure_camera(camera: bpy.types.Camera, node: SceneNodeData) -> None:
+    values = node.camera_values
+    if node.camera_type == 2:
+        camera.type = "ORTHO"
+        camera.ortho_scale = max(values[0], values[1]) * 2.0 if max(values[0], values[1]) > 0.0 else 1.0
+    else:
+        camera.type = "PERSP"
+        if values[1] > 0.0:
+            camera.angle_y = values[1]
+        elif values[0] > 0.0:
+            camera.angle_x = values[0]
+    if values[3] > 0.0:
+        camera.clip_start = values[3]
+    if values[4] > values[3]:
+        camera.clip_end = values[4]
+
+
+def _blender_light_type(light_type: int) -> str:
+    if light_type == 2:
+        return "SUN"
+    if light_type == 4:
+        return "SPOT"
+    return "POINT"
+
+
+def _configure_light(light: bpy.types.Light, node: SceneNodeData) -> None:
+    values = node.light_values
+    light.color = node.light_color
+    if values[0] > 0.0:
+        light.energy = values[0]
+    if hasattr(light, "cutoff_distance") and values[1] > 0.0:
+        light.cutoff_distance = values[1]
+    if light.type == "SPOT" and values[3] > 0.0:
+        light.spot_size = values[3] * 2.0
+        if values[2] > 0.0 and values[3] > values[2]:
+            light.spot_blend = max(0.0, min(1.0, 1.0 - values[2] / values[3]))
 
 
 def _create_coord_root(primitives: list[MeshPrimitiveData]) -> bpy.types.Object | None:
