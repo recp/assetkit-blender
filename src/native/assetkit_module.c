@@ -25,6 +25,7 @@ typedef struct AkbPrimitive {
   char     emissive_texture[1024];
   float   *vertices;
   uint32_t *indices;
+  int32_t  *loop_meta;
   int32_t  *loop_starts;
   int32_t  *loop_totals;
   float   *normals;
@@ -122,8 +123,7 @@ akb_primitive_free(AkbPrimitive *prim) {
     free(prim->vertices);
   if (!prim->borrowed_indices)
     free(prim->indices);
-  free(prim->loop_starts);
-  free(prim->loop_totals);
+  free(prim->loop_meta);
   free(prim->normals);
   free(prim->uvs);
   akb_shared_doc_release(prim->doc_owner);
@@ -269,25 +269,6 @@ akb_extract_material(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *out) {
   }
 }
 
-static uint32_t *
-akb_indices_copy(AkUIntArray *indices, size_t *count_out) {
-  uint32_t *copy;
-  size_t count;
-
-  *count_out = 0;
-  if (!indices || indices->count == 0)
-    return NULL;
-
-  count = indices->count;
-  copy = (uint32_t *)malloc(count * sizeof(uint32_t));
-  if (!copy)
-    return NULL;
-
-  memcpy(copy, indices->items, count * sizeof(uint32_t));
-  *count_out = count;
-  return copy;
-}
-
 static const uint32_t *
 akb_indices_data(AkUIntArray *indices, size_t *count_out) {
   *count_out = 0;
@@ -323,8 +304,10 @@ akb_accessor_float_borrow(AkAccessor *acc, uint32_t width, uint32_t *count_out) 
 
 static float *
 akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
-  float *tmp, *out;
-  size_t total, written;
+  float *out;
+  float *tmp;
+  size_t total;
+  size_t written;
   uint32_t comp_count, i, j;
 
   *count_out = 0;
@@ -332,20 +315,31 @@ akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
     return NULL;
 
   comp_count = acc->componentCount ? acc->componentCount : width;
-  total = (size_t)acc->count * comp_count;
-  tmp = (float *)calloc(total, sizeof(float));
-  if (!tmp)
+  total = (size_t)acc->count * width;
+  out = (float *)calloc(total, sizeof(float));
+  if (!out)
     return NULL;
 
-  written = ak_accessorAsFloat(acc, tmp, total);
-  if (written == 0) {
-    free(tmp);
+  if (comp_count == width) {
+    written = ak_accessorAsFloat(acc, out, total);
+    if (written == 0) {
+      free(out);
+      return NULL;
+    }
+    *count_out = acc->count;
+    return out;
+  }
+
+  tmp = (float *)calloc((size_t)acc->count * comp_count, sizeof(float));
+  if (!tmp) {
+    free(out);
     return NULL;
   }
 
-  out = (float *)calloc((size_t)acc->count * width, sizeof(float));
-  if (!out) {
+  written = ak_accessorAsFloat(acc, tmp, (size_t)acc->count * comp_count);
+  if (written == 0) {
     free(tmp);
+    free(out);
     return NULL;
   }
 
@@ -383,6 +377,15 @@ akb_loop_attribute_copy(AkMeshPrimitive *prim,
   if (!values || value_count == 0) {
     free(values);
     return NULL;
+  }
+
+  if (value_count == loop_count) {
+    if (flip_v && width >= 2) {
+      for (i = 0; i < loop_count; i++)
+        values[(size_t)i * width + 1] = 1.0f - values[(size_t)i * width + 1];
+    }
+    *has_attr = 1;
+    return values;
   }
 
   out = (float *)calloc((size_t)loop_count * width, sizeof(float));
@@ -496,11 +499,14 @@ akb_extract_primitive(AkbPrimitiveList *list,
 
   out.loop_count = (out.loop_count / 3) * 3;
   out.face_count = out.loop_count / 3;
-  out.loop_starts = (int32_t *)malloc((size_t)out.face_count * sizeof(int32_t));
-  out.loop_totals = (int32_t *)malloc((size_t)out.face_count * sizeof(int32_t));
-  if ((out.face_count && (!out.loop_starts || !out.loop_totals))) {
-    akb_primitive_free(&out);
-    return 0;
+  if (out.face_count) {
+    out.loop_meta = (int32_t *)malloc((size_t)out.face_count * 2 * sizeof(int32_t));
+    if (!out.loop_meta) {
+      akb_primitive_free(&out);
+      return 0;
+    }
+    out.loop_starts = out.loop_meta;
+    out.loop_totals = out.loop_meta + out.face_count;
   }
 
   for (i = 0; i < out.face_count; i++) {
@@ -568,12 +574,13 @@ akb_extract_mesh(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, Ak
 static int
 akb_extract_node(AkbPrimitiveList *list, AkDoc *doc, AkbSharedDoc *doc_owner, AkNode *node) {
   AkNode *child;
+  AkGeometry *geom;
 
   if (!node)
     return 1;
 
   if (node->geometry) {
-    AkGeometry *geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
+    geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
     if (!akb_extract_mesh(list, doc, doc_owner, node, geom))
       return 0;
   }
@@ -590,6 +597,7 @@ static int
 akb_extract_scene(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
   AkVisualScene *scene;
   AkInstanceBase *inst;
+  AkNode *node;
 
   if (!doc || !doc->scene.visualScene)
     return 1;
@@ -599,7 +607,7 @@ akb_extract_scene(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
     return 1;
 
   for (inst = scene->node->node ? &scene->node->node->base : NULL; inst; inst = inst->next) {
-    AkNode *node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
+    node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
     if (!akb_extract_node(list, doc, doc_owner, node))
       return 0;
   }
@@ -610,6 +618,7 @@ akb_extract_scene(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
 static int
 akb_extract_doc(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
   AkLibrary *lib;
+  AkGeometry *geom;
 
   if (!akb_extract_scene(doc, doc_owner, list))
     return 0;
@@ -618,8 +627,6 @@ akb_extract_doc(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
     return 1;
 
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
-    AkGeometry *geom;
-
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
       if (!akb_extract_mesh(list, doc, doc_owner, NULL, geom))
         return 0;
@@ -630,15 +637,15 @@ akb_extract_doc(AkDoc *doc, AkbSharedDoc *doc_owner, AkbPrimitiveList *list) {
 }
 
 static void
-akb_primitive_capsule_destructor(PyObject *capsule) {
-  AkbPrimitive *prim;
+akb_list_capsule_destructor(PyObject *capsule) {
+  AkbPrimitiveList *list;
 
-  prim = (AkbPrimitive *)PyCapsule_GetPointer(capsule, "assetkit_blender.AkbPrimitive");
-  if (!prim)
+  list = (AkbPrimitiveList *)PyCapsule_GetPointer(capsule, "assetkit_blender.AkbPrimitiveList");
+  if (!list)
     return;
 
-  akb_primitive_free(prim);
-  free(prim);
+  akb_list_free(list);
+  free(list);
 }
 
 static PyObject *
@@ -649,23 +656,13 @@ akb_memoryview_or_empty(const void *data, size_t size) {
 }
 
 static PyObject *
-akb_primitive_to_py(AkbPrimitive *prim) {
-  PyObject *dict, *owner, *value;
+akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
+  PyObject *dict;
+  PyObject *value;
 
   dict = PyDict_New();
-  if (!dict) {
-    akb_primitive_free(prim);
-    free(prim);
+  if (!dict)
     return NULL;
-  }
-
-  owner = PyCapsule_New(prim, "assetkit_blender.AkbPrimitive", akb_primitive_capsule_destructor);
-  if (!owner) {
-    Py_DECREF(dict);
-    akb_primitive_free(prim);
-    free(prim);
-    return NULL;
-  }
 
 #define AKB_SET_OBJ(KEY, OBJ) do {                 \
     value = (OBJ);                                 \
@@ -680,10 +677,8 @@ akb_primitive_to_py(AkbPrimitive *prim) {
 
   if (PyDict_SetItemString(dict, "_owner", owner) < 0) {
     Py_DECREF(dict);
-    Py_DECREF(owner);
     return NULL;
   }
-  Py_DECREF(owner);
 
   AKB_SET_OBJ("name", PyUnicode_FromString(prim->name));
   AKB_SET_OBJ("object_name", PyUnicode_FromString(prim->object_name));
@@ -732,7 +727,10 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   AkbSharedDoc *doc_owner;
   AkResult result;
   AkbPrimitiveList list = {0};
+  AkbPrimitiveList *owner_list;
   PyObject *out;
+  PyObject *owner;
+  PyObject *item;
   size_t i;
   int ok;
 
@@ -775,31 +773,40 @@ akb_load_meshes(PyObject *self, PyObject *args) {
     return NULL;
   }
 
-  for (i = 0; i < list.count; i++) {
-    AkbPrimitive *owner = (AkbPrimitive *)malloc(sizeof(*owner));
-    PyObject *item;
+  owner_list = (AkbPrimitiveList *)malloc(sizeof(*owner_list));
+  if (!owner_list) {
+    Py_DECREF(out);
+    akb_list_free(&list);
+    akb_shared_doc_release(doc_owner);
+    return PyErr_NoMemory();
+  }
 
-    if (!owner) {
-      Py_DECREF(out);
-      akb_list_free(&list);
-      akb_shared_doc_release(doc_owner);
-      return PyErr_NoMemory();
-    }
+  *owner_list = list;
+  memset(&list, 0, sizeof(list));
 
-    *owner = list.items[i];
-    memset(&list.items[i], 0, sizeof(list.items[i]));
+  owner = PyCapsule_New(owner_list,
+                        "assetkit_blender.AkbPrimitiveList",
+                        akb_list_capsule_destructor);
+  if (!owner) {
+    Py_DECREF(out);
+    akb_list_free(owner_list);
+    free(owner_list);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
 
-    item = akb_primitive_to_py(owner);
+  for (i = 0; i < owner_list->count; i++) {
+    item = akb_primitive_to_py(&owner_list->items[i], owner);
     if (!item) {
       Py_DECREF(out);
-      akb_list_free(&list);
+      Py_DECREF(owner);
       akb_shared_doc_release(doc_owner);
       return NULL;
     }
     PyList_SET_ITEM(out, (Py_ssize_t)i, item);
   }
 
-  akb_list_free(&list);
+  Py_DECREF(owner);
   akb_shared_doc_release(doc_owner);
   return out;
 }
