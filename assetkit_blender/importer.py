@@ -16,7 +16,7 @@ _ANIM_SCALE = 3
 _ANIM_MORPH_WEIGHTS = 4
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
-_PROGRESSIVE_BATCH_SIZE = 32
+_PROGRESSIVE_BATCH_SIZE = 64
 _PROGRESSIVE_TIME_BUDGET = 0.025
 _ACTIVE_IMPORT_JOBS: list["_ProgressiveImportJob"] = []
 
@@ -147,7 +147,7 @@ class _ProgressiveImportJob:
         self.load_started_at = time.perf_counter()
         _ACTIVE_IMPORT_JOBS.append(self)
         self._thread.start()
-        bpy.app.timers.register(self._timer, first_interval=0.05)
+        bpy.app.timers.register(self._timer, first_interval=0.001)
 
     def _load(self) -> None:
         try:
@@ -170,7 +170,7 @@ class _ProgressiveImportJob:
 
     def _step(self) -> float | None:
         if self._thread.is_alive():
-            return 0.05
+            return 0.01
 
         if self.error:
             print(self.error_traceback or str(self.error))

@@ -72,7 +72,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     progressive_batch_size: bpy.props.IntProperty(
         name="Batch Size",
         description="Maximum mesh objects to create per progressive import step",
-        default=32,
+        default=64,
         min=1,
         max=512,
     )
