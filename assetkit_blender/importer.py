@@ -142,6 +142,12 @@ def _create_mesh_object_bulk(
         if uvs is not None:
             uv_layer.data.foreach_set("uv", uvs)
 
+    if data.colors_f32:
+        colors = _buffer_view(data.colors_f32, "f")
+        if colors is not None:
+            color_attr = mesh.color_attributes.new(name="Color", type="FLOAT_COLOR", domain="CORNER")
+            color_attr.data.foreach_set("color", colors)
+
     mesh.update(calc_edges=True)
 
     if data.normals_f32:

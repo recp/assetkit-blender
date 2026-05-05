@@ -234,6 +234,7 @@ class MeshPrimitiveData:
     loop_totals_i32: object = b""
     normals_f32: object = b""
     uvs_f32: object = b""
+    colors_f32: object = b""
     skin_joints_u16: object = b""
     skin_weights_f32: object = b""
     skin_joint_nodes_i32: object = b""
@@ -611,6 +612,7 @@ def native_load_meshes(
                 loop_totals_i32=item.get("loop_totals_i32") or b"",
                 normals_f32=item.get("normals_f32") or b"",
                 uvs_f32=item.get("uvs_f32") or b"",
+                colors_f32=item.get("colors_f32") or b"",
                 skin_joints_u16=item.get("skin_joints_u16") or b"",
                 skin_weights_f32=item.get("skin_weights_f32") or b"",
                 skin_joint_nodes_i32=item.get("skin_joint_nodes_i32") or b"",

@@ -60,6 +60,7 @@ typedef struct AkbPrimitive {
   int32_t  *loop_totals;
   float   *normals;
   float   *uvs;
+  float   *colors;
   uint16_t *skin_joints;
   int32_t  *skin_joint_nodes;
   float   *skin_weights;
@@ -93,6 +94,7 @@ typedef struct AkbPrimitive {
   uint32_t skin_joint_width;
   uint8_t  has_normals;
   uint8_t  has_uvs;
+  uint8_t  has_colors;
   uint8_t  has_skin;
   uint8_t  double_sided;
   uint8_t  alpha_mode;
@@ -441,6 +443,7 @@ akb_primitive_free(AkbPrimitive *prim) {
   free(prim->loop_meta);
   free(prim->normals);
   free(prim->uvs);
+  free(prim->colors);
   free(prim->skin_joints);
   free(prim->skin_joint_nodes);
   free(prim->skin_weights);
@@ -1723,7 +1726,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
                       AkMeshPrimitive *prim,
                       uint32_t prim_index) {
   AkbPrimitive out = {0};
-  AkInput *pos_input, *normal_input, *uv_input;
+  AkInput *pos_input, *normal_input, *uv_input, *color_input;
   const uint32_t *raw_indices = NULL;
   size_t raw_count = 0;
   uint32_t pos_count = 0;
@@ -1830,6 +1833,17 @@ akb_extract_primitive(AkbPrimitiveList *list,
                                     2,
                                     1,
                                     &out.has_uvs);
+
+  color_input = akb_find_input(prim, AK_INPUT_COLOR, AK_INPUT_COLOR, "COLOR", NULL);
+  out.colors = akb_loop_attribute_copy(prim,
+                                       color_input,
+                                       raw_indices,
+                                       raw_count,
+                                       out.indices,
+                                       out.loop_count,
+                                       4,
+                                       0,
+                                       &out.has_colors);
 
   if (node && node->geometry && node->geometry->morpher) {
     if (!akb_extract_morph_targets(&out,
@@ -2299,6 +2313,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("loop_totals_i32", akb_memoryview_or_empty(prim->loop_totals, (size_t)prim->face_count * sizeof(int32_t)));
   AKB_SET_OBJ("normals_f32", akb_memoryview_or_empty(prim->normals, prim->has_normals ? (size_t)prim->loop_count * 3 * sizeof(float) : 0));
   AKB_SET_OBJ("uvs_f32", akb_memoryview_or_empty(prim->uvs, prim->has_uvs ? (size_t)prim->loop_count * 2 * sizeof(float) : 0));
+  AKB_SET_OBJ("colors_f32", akb_memoryview_or_empty(prim->colors, prim->has_colors ? (size_t)prim->loop_count * 4 * sizeof(float) : 0));
   AKB_SET_OBJ("skin_joints_u16",
               akb_memoryview_or_empty(prim->skin_joints,
                                       prim->has_skin
