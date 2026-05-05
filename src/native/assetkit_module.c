@@ -2099,6 +2099,28 @@ akb_memoryview_or_empty(const void *data, size_t size) {
 }
 
 static PyObject *
+akb_unicode_from_cstr(const char *value) {
+  PyObject *out;
+  size_t len;
+
+  if (!value)
+    return PyUnicode_FromString("");
+
+  len = strlen(value);
+  out = PyUnicode_DecodeUTF8(value, (Py_ssize_t)len, "strict");
+  if (out)
+    return out;
+
+  PyErr_Clear();
+  out = PyUnicode_DecodeLatin1(value, (Py_ssize_t)len, "strict");
+  if (out)
+    return out;
+
+  PyErr_Clear();
+  return PyUnicode_DecodeUTF8(value, (Py_ssize_t)len, "replace");
+}
+
+static PyObject *
 akb_anim_channels_to_py(AkbAnimation *animation) {
   PyObject *list;
   PyObject *dict;
@@ -2191,7 +2213,7 @@ akb_morph_targets_to_py(AkbPrimitive *prim) {
       return NULL;
     }
 
-    AKB_MT_SET_OBJ("name", PyUnicode_FromString(target->name));
+    AKB_MT_SET_OBJ("name", akb_unicode_from_cstr(target->name));
     AKB_MT_SET_OBJ("weight", PyFloat_FromDouble(target->weight));
     AKB_MT_SET_OBJ("vertex_count", PyLong_FromUnsignedLong(target->vertex_count));
     AKB_MT_SET_OBJ("positions_f32",
@@ -2233,12 +2255,12 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
     return NULL;
   }
 
-  AKB_SET_OBJ("name", PyUnicode_FromString(prim->name));
-  AKB_SET_OBJ("object_name", PyUnicode_FromString(prim->object_name));
+  AKB_SET_OBJ("name", akb_unicode_from_cstr(prim->name));
+  AKB_SET_OBJ("object_name", akb_unicode_from_cstr(prim->object_name));
   AKB_SET_OBJ("vertex_count", PyLong_FromUnsignedLong(prim->vertex_count));
   AKB_SET_OBJ("loop_count", PyLong_FromUnsignedLong(prim->loop_count));
   AKB_SET_OBJ("face_count", PyLong_FromUnsignedLong(prim->face_count));
-  AKB_SET_OBJ("material_name", PyUnicode_FromString(prim->material_name));
+  AKB_SET_OBJ("material_name", akb_unicode_from_cstr(prim->material_name));
   AKB_SET_OBJ("base_color", Py_BuildValue("(ffff)",
                                           prim->base_color[0],
                                           prim->base_color[1],
@@ -2294,19 +2316,19 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("coord_matrix_f32",
               akb_memoryview_or_empty(prim->coord_matrix,
                                       prim->has_coord_matrix ? 16 * sizeof(float) : 0));
-  AKB_SET_OBJ("base_color_texture", PyUnicode_FromString(prim->base_color_texture));
-  AKB_SET_OBJ("metallic_roughness_texture", PyUnicode_FromString(prim->metallic_roughness_texture));
-  AKB_SET_OBJ("occlusion_texture", PyUnicode_FromString(prim->occlusion_texture));
-  AKB_SET_OBJ("normal_texture", PyUnicode_FromString(prim->normal_texture));
-  AKB_SET_OBJ("emissive_texture", PyUnicode_FromString(prim->emissive_texture));
-  AKB_SET_OBJ("specular_texture", PyUnicode_FromString(prim->specular_texture));
-  AKB_SET_OBJ("specular_color_texture", PyUnicode_FromString(prim->specular_color_texture));
-  AKB_SET_OBJ("clearcoat_texture", PyUnicode_FromString(prim->clearcoat_texture));
-  AKB_SET_OBJ("clearcoat_roughness_texture", PyUnicode_FromString(prim->clearcoat_roughness_texture));
-  AKB_SET_OBJ("clearcoat_normal_texture", PyUnicode_FromString(prim->clearcoat_normal_texture));
-  AKB_SET_OBJ("transmission_texture", PyUnicode_FromString(prim->transmission_texture));
-  AKB_SET_OBJ("sheen_color_texture", PyUnicode_FromString(prim->sheen_color_texture));
-  AKB_SET_OBJ("sheen_roughness_texture", PyUnicode_FromString(prim->sheen_roughness_texture));
+  AKB_SET_OBJ("base_color_texture", akb_unicode_from_cstr(prim->base_color_texture));
+  AKB_SET_OBJ("metallic_roughness_texture", akb_unicode_from_cstr(prim->metallic_roughness_texture));
+  AKB_SET_OBJ("occlusion_texture", akb_unicode_from_cstr(prim->occlusion_texture));
+  AKB_SET_OBJ("normal_texture", akb_unicode_from_cstr(prim->normal_texture));
+  AKB_SET_OBJ("emissive_texture", akb_unicode_from_cstr(prim->emissive_texture));
+  AKB_SET_OBJ("specular_texture", akb_unicode_from_cstr(prim->specular_texture));
+  AKB_SET_OBJ("specular_color_texture", akb_unicode_from_cstr(prim->specular_color_texture));
+  AKB_SET_OBJ("clearcoat_texture", akb_unicode_from_cstr(prim->clearcoat_texture));
+  AKB_SET_OBJ("clearcoat_roughness_texture", akb_unicode_from_cstr(prim->clearcoat_roughness_texture));
+  AKB_SET_OBJ("clearcoat_normal_texture", akb_unicode_from_cstr(prim->clearcoat_normal_texture));
+  AKB_SET_OBJ("transmission_texture", akb_unicode_from_cstr(prim->transmission_texture));
+  AKB_SET_OBJ("sheen_color_texture", akb_unicode_from_cstr(prim->sheen_color_texture));
+  AKB_SET_OBJ("sheen_roughness_texture", akb_unicode_from_cstr(prim->sheen_roughness_texture));
   AKB_SET_OBJ("vertices_f32", akb_memoryview_or_empty(prim->vertices, (size_t)prim->vertex_count * 3 * sizeof(float)));
   AKB_SET_OBJ("indices_u32", akb_memoryview_or_empty(prim->indices, (size_t)prim->loop_count * sizeof(uint32_t)));
   AKB_SET_OBJ("loop_starts_i32", akb_memoryview_or_empty(prim->loop_starts, (size_t)prim->face_count * sizeof(int32_t)));
@@ -2372,10 +2394,10 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
     return NULL;
   }
 
-  AKB_NODE_SET_OBJ("name", PyUnicode_FromString(node->name));
+  AKB_NODE_SET_OBJ("name", akb_unicode_from_cstr(node->name));
   AKB_NODE_SET_OBJ("parent_index", PyLong_FromLong(node->parent_index));
   AKB_NODE_SET_OBJ("camera_type", PyLong_FromUnsignedLong(node->camera_type));
-  AKB_NODE_SET_OBJ("camera_name", PyUnicode_FromString(node->camera_name));
+  AKB_NODE_SET_OBJ("camera_name", akb_unicode_from_cstr(node->camera_name));
   AKB_NODE_SET_OBJ("camera_values", Py_BuildValue("(ffffff)",
                                                   node->camera_values[0],
                                                   node->camera_values[1],
@@ -2384,7 +2406,7 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
                                                   node->camera_values[4],
                                                   node->camera_values[5]));
   AKB_NODE_SET_OBJ("light_type", PyLong_FromUnsignedLong(node->light_type));
-  AKB_NODE_SET_OBJ("light_name", PyUnicode_FromString(node->light_name));
+  AKB_NODE_SET_OBJ("light_name", akb_unicode_from_cstr(node->light_name));
   AKB_NODE_SET_OBJ("light_color", Py_BuildValue("(fff)",
                                                 node->light_color[0],
                                                 node->light_color[1],
