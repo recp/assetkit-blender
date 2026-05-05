@@ -5,6 +5,6 @@ __pycache__/
 .vscode/
 .idea/
 build/
-assetio_blender/_assetkit_blender*.so
-assetio_blender/_assetkit_blender*.pyd
+assetkit_blender/_assetkit_blender*.so
+assetkit_blender/_assetkit_blender*.pyd
 build-blender/

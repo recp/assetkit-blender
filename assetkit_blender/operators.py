@@ -7,8 +7,8 @@ from .assetkit import AssetKitError
 from .importer import import_assetkit_file
 
 
-class ASSETIO_OT_import_assetkit(bpy.types.Operator, ImportHelper):
-    bl_idname = "assetio.import_assetkit"
+class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
+    bl_idname = "assetkit.import_assetkit"
     bl_label = "Import AssetKit"
     bl_options = {"REGISTER", "UNDO"}
 

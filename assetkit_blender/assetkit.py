@@ -453,11 +453,11 @@ def resolve_library_path(configured_path: str | os.PathLike[str] | None = None) 
     names = ("libassetkit.dylib", "libassetkit.so", "assetkit.dll")
     package_root = Path(__file__).resolve().parent.parent
     roots = []
-    for env_name in ("ASSETKIT_ROOT", "ASSETIO_ASSETKIT_ROOT"):
+    for env_name in ("ASSETKIT_ROOT", "ASSETKIT_BLENDER_ASSETKIT_ROOT"):
         env_root = os.environ.get(env_name)
         if env_root:
             roots.append(Path(env_root))
-    roots.extend((package_root.parent / "assetio", package_root / "deps" / "assetkit"))
+    roots.extend((package_root.parent / "assetkit", package_root / "deps" / "assetkit"))
     for root in roots:
         for base in (root / "build", root / "build" / "src", root / "build" / "Release", root / "lib"):
             candidates.extend(str(base / name) for name in names)

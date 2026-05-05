@@ -1,4 +1,4 @@
-# AssetIO Blender
+# AssetKit Blender
 
 Blender add-on for importing 3D assets through AssetKit.
 
@@ -16,9 +16,8 @@ AssetKit can be provided as a submodule or an external checkout. The build looks
 
 1. `-DASSETKIT_ROOT=/path/to/assetkit`
 2. `ASSETKIT_ROOT` environment variable
-3. `../assetio`
-4. `deps/assetkit`
-5. system install paths
+3. `deps/assetkit`
+4. system install paths
 
 For a fresh clone:
 
@@ -37,16 +36,16 @@ cmake -S . -B build -DASSETKIT_ROOT=deps/assetkit -DPython3_EXECUTABLE=/path/to/
 cmake --build build
 ```
 
-The bridge is written to `assetio_blender/` as `_assetkit_blender.*`. If it is not present, the add-on can still use the configured AssetKit shared library through `ctypes`.
+The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is not present, the add-on can still use the configured AssetKit shared library through `ctypes`.
 
 ## Install
 
-Install or symlink the `assetio_blender` package into Blender's add-ons directory, then enable `AssetIO Blender` in Preferences.
+Install or symlink the `assetkit_blender` package into Blender's add-ons directory, then enable `AssetKit Blender` in Preferences.
 
 If needed, set the AssetKit shared library path in:
 
 ```text
-Edit > Preferences > Add-ons > AssetIO Blender
+Edit > Preferences > Add-ons > AssetKit Blender
 ```
 
 ## Import

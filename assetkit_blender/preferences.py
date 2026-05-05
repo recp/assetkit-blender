@@ -1,8 +1,8 @@
 import bpy
 
 
-class AssetIOPreferences(bpy.types.AddonPreferences):
-    bl_idname = __package__ or "assetio_blender"
+class AssetKitPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__ or "assetkit_blender"
 
     assetkit_library: bpy.props.StringProperty(
         name="AssetKit Library",
