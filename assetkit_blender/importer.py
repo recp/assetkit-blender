@@ -9,6 +9,7 @@ import time
 import traceback
 
 import bpy
+from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Matrix, Vector
 
 from .assetkit import (
@@ -39,6 +40,7 @@ def import_assetkit_file(
     collection: bpy.types.Collection | None = None,
     focus_mode: str = "NEVER",
     scene_was_empty: bool = False,
+    focus_camera: bpy.types.Object | None = None,
 ) -> list[bpy.types.Object]:
     primitives, scene_nodes = _load_assetkit_scene(filepath, library_path, load_options)
     state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection)
@@ -48,7 +50,7 @@ def import_assetkit_file(
     ]
 
     _select_imported_objects(objects)
-    _focus_imported_objects(objects, focus_mode, scene_was_empty, collection or bpy.context.collection)
+    _focus_imported_objects(objects, focus_mode, scene_was_empty, collection or bpy.context.collection, focus_camera)
     return objects
 
 
@@ -60,6 +62,7 @@ def import_assetkit_file_progressive(
     batch_size: int = _PROGRESSIVE_BATCH_SIZE,
     focus_mode: str = "NEVER",
     scene_was_empty: bool = False,
+    focus_camera: bpy.types.Object | None = None,
 ) -> "_ProgressiveImportJob":
     job = _ProgressiveImportJob(
         filepath,
@@ -69,6 +72,7 @@ def import_assetkit_file_progressive(
         max(1, batch_size),
         focus_mode,
         scene_was_empty,
+        focus_camera,
     )
     job.start()
     return job
@@ -139,6 +143,7 @@ def _focus_imported_objects(
     focus_mode: str,
     scene_was_empty: bool,
     collection: bpy.types.Collection,
+    focus_camera: bpy.types.Object | None,
 ) -> None:
     if focus_mode == "NEVER":
         return
@@ -158,7 +163,7 @@ def _focus_imported_objects(
 
     _frame_viewports()
     if scene_was_empty:
-        _frame_camera(bounds, collection)
+        _frame_camera(bounds, collection, focus_camera)
 
 
 def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | None:
@@ -187,6 +192,16 @@ def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | N
     return minimum, maximum
 
 
+def _bounds_corners(bounds: tuple[Vector, Vector]) -> list[Vector]:
+    minimum, maximum = bounds
+    return [
+        Vector((x, y, z))
+        for x in (minimum.x, maximum.x)
+        for y in (minimum.y, maximum.y)
+        for z in (minimum.z, maximum.z)
+    ]
+
+
 def _frame_viewports() -> None:
     window_manager = bpy.context.window_manager
     for window in getattr(window_manager, "windows", []):
@@ -208,9 +223,9 @@ def _frame_viewports() -> None:
 def _frame_camera(
     bounds: tuple[Vector, Vector],
     collection: bpy.types.Collection,
+    camera_obj: bpy.types.Object | None,
 ) -> None:
     scene = bpy.context.scene
-    camera_obj = scene.camera or next((obj for obj in scene.objects if obj.type == "CAMERA"), None)
     if camera_obj is None:
         camera = bpy.data.cameras.new("AssetKit Camera")
         camera_obj = bpy.data.objects.new("AssetKit Camera", camera)
@@ -230,15 +245,85 @@ def _frame_camera(
         camera.ortho_scale = max(size.x, size.y, size.z, 1.0) * 1.35
         distance = radius * 3.0
     else:
-        fov = min(getattr(camera, "angle_x", camera.angle), getattr(camera, "angle_y", camera.angle))
-        if fov <= 0.0:
-            fov = math.radians(50.0)
-        distance = radius / max(math.sin(fov * 0.5), 0.1) * 1.35
+        distance = _camera_fit_distance(camera, direction, center, _bounds_corners(bounds)) * 1.25
 
     camera_obj.location = center + direction * distance
     camera_obj.rotation_euler = (center - camera_obj.location).to_track_quat("-Z", "Y").to_euler()
-    camera.clip_end = max(camera.clip_end, distance + radius * 6.0)
-    camera.clip_start = min(camera.clip_start, max(distance / 1000.0, 0.001))
+    _ensure_camera_contains_bounds(scene, camera_obj, bounds)
+    _set_camera_clip(camera_obj, bounds, radius)
+
+
+def _camera_fit_distance(
+    camera: bpy.types.Camera,
+    direction: Vector,
+    center: Vector,
+    corners: list[Vector],
+) -> float:
+    rotation = (-direction).to_track_quat("-Z", "Y").to_matrix().inverted()
+    half_angle_x = max(getattr(camera, "angle_x", camera.angle) * 0.5, math.radians(5.0))
+    half_angle_y = max(getattr(camera, "angle_y", camera.angle) * 0.5, math.radians(5.0))
+    tan_x = max(math.tan(half_angle_x), 0.01)
+    tan_y = max(math.tan(half_angle_y), 0.01)
+    distance = 0.5
+
+    for corner in corners:
+        local = rotation @ (corner - center)
+        distance = max(distance, local.z + abs(local.x) / tan_x, local.z + abs(local.y) / tan_y)
+
+    return max(distance, 0.5)
+
+
+def _ensure_camera_contains_bounds(
+    scene: bpy.types.Scene,
+    camera_obj: bpy.types.Object,
+    bounds: tuple[Vector, Vector],
+) -> None:
+    camera = camera_obj.data
+    corners = _bounds_corners(bounds)
+    margin = 0.06
+
+    for _ in range(8):
+        try:
+            bpy.context.view_layer.update()
+            projected = [world_to_camera_view(scene, camera_obj, corner) for corner in corners]
+        except Exception:
+            return
+
+        if all(margin <= point.x <= 1.0 - margin
+               and margin <= point.y <= 1.0 - margin
+               and point.z > 0.0
+               for point in projected):
+            return
+
+        if camera.type == "ORTHO":
+            camera.ortho_scale *= 1.2
+        else:
+            target = sum(corners, Vector()) / len(corners)
+            offset = camera_obj.location - target
+            if offset.length <= 0.0:
+                return
+            camera_obj.location = target + offset * 1.2
+            camera_obj.rotation_euler = (target - camera_obj.location).to_track_quat("-Z", "Y").to_euler()
+
+
+def _set_camera_clip(
+    camera_obj: bpy.types.Object,
+    bounds: tuple[Vector, Vector],
+    radius: float,
+) -> None:
+    camera = camera_obj.data
+    forward = camera_obj.matrix_world.to_quaternion() @ Vector((0.0, 0.0, -1.0))
+    depths = [(corner - camera_obj.location).dot(forward) for corner in _bounds_corners(bounds)]
+    positive_depths = [depth for depth in depths if depth > 0.0]
+    if not positive_depths:
+        camera.clip_start = 0.001
+        camera.clip_end = max(camera.clip_end, radius * 12.0)
+        return
+
+    near_depth = max(min(positive_depths) - radius * 2.0, 0.001)
+    far_depth = max(positive_depths) + radius * 4.0
+    camera.clip_start = min(camera.clip_start, near_depth)
+    camera.clip_end = max(camera.clip_end, far_depth, radius * 12.0)
 
 
 class _ProgressiveImportJob:
@@ -251,6 +336,7 @@ class _ProgressiveImportJob:
         batch_size: int,
         focus_mode: str,
         scene_was_empty: bool,
+        focus_camera: bpy.types.Object | None,
     ) -> None:
         self.filepath = filepath
         self.library_path = library_path
@@ -259,6 +345,7 @@ class _ProgressiveImportJob:
         self.batch_size = batch_size
         self.focus_mode = focus_mode
         self.scene_was_empty = scene_was_empty
+        self.focus_camera = focus_camera
         self.scene_nodes: list[SceneNodeData] = []
         self.mesh_count = 0
         self.pending_primitives: deque[MeshPrimitiveData] = deque()
@@ -366,7 +453,13 @@ class _ProgressiveImportJob:
 
     def _finish_success(self) -> None:
         _select_imported_objects(self.objects)
-        _focus_imported_objects(self.objects, self.focus_mode, self.scene_was_empty, self.collection)
+        _focus_imported_objects(
+            self.objects,
+            self.focus_mode,
+            self.scene_was_empty,
+            self.collection,
+            self.focus_camera,
+        )
         finished_at = time.perf_counter()
         load_seconds = self.build_started_at - self.load_started_at
         build_seconds = finished_at - self.build_started_at

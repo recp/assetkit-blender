@@ -86,11 +86,23 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         ),
         default="EMPTY_SCENE",
     )
+    replace_startup_cube: bpy.props.EnumProperty(
+        name="Replace",
+        description="Remove Blender's untouched startup cube before importing",
+        items=(
+            ("DEFAULT_CUBE", "Default Cube", "Remove the untouched startup cube before import"),
+            ("NEVER", "Never", "Keep all existing scene objects"),
+        ),
+        default="DEFAULT_CUBE",
+    )
 
     def execute(self, context):
         prefs = context.preferences.addons[__package__].preferences
         load_options = self._load_options()
+        if self.replace_startup_cube == "DEFAULT_CUBE":
+            _remove_default_cube(context.scene)
         scene_was_empty = _scene_has_no_content(context.scene)
+        focus_camera = context.scene.camera if scene_was_empty else None
 
         if self.build_mode == "PROGRESSIVE":
             import_assetkit_file_progressive(
@@ -101,6 +113,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 batch_size=self.progressive_batch_size,
                 focus_mode=self.focus_import,
                 scene_was_empty=scene_was_empty,
+                focus_camera=focus_camera,
             )
             self.report({"INFO"}, "AssetKit progressive import started")
             return {"FINISHED"}
@@ -113,6 +126,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 collection=context.collection,
                 focus_mode=self.focus_import,
                 scene_was_empty=scene_was_empty,
+                focus_camera=focus_camera,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
@@ -139,6 +153,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         coord_box.prop(self, "coordinate_system")
 
         mesh_box = layout.box()
+        mesh_box.use_property_split = False
         mesh_box.label(text="Mesh")
         mesh_box.prop(self, "triangulate")
         mesh_box.prop(self, "generate_normals")
@@ -154,6 +169,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         view_box = layout.box()
         view_box.label(text="View")
         view_box.prop(self, "focus_import")
+        view_box.prop(self, "replace_startup_cube")
 
     def _load_options(self) -> dict:
         return {
@@ -169,3 +185,34 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 def _scene_has_no_content(scene: bpy.types.Scene) -> bool:
     content_types = {"ARMATURE", "CURVE", "EMPTY", "FONT", "MESH", "META", "SURFACE"}
     return not any(obj.type in content_types for obj in scene.objects)
+
+
+def _remove_default_cube(scene: bpy.types.Scene) -> bool:
+    content_types = {"ARMATURE", "CURVE", "EMPTY", "FONT", "MESH", "META", "SURFACE"}
+    content = [obj for obj in scene.objects if obj.type in content_types]
+    if len(content) != 1:
+        return False
+
+    obj = content[0]
+    if not _is_startup_cube(obj):
+        return False
+
+    mesh = obj.data
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if mesh and mesh.users == 0:
+        bpy.data.meshes.remove(mesh)
+    return True
+
+
+def _is_startup_cube(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH" or obj.name != "Cube" or obj.data is None:
+        return False
+    if obj.location.length > 1e-6:
+        return False
+    if any(abs(value) > 1e-6 for value in obj.rotation_euler):
+        return False
+    if any(abs(value - 1.0) > 1e-6 for value in obj.scale):
+        return False
+    if obj.modifiers or obj.animation_data:
+        return False
+    return len(obj.data.vertices) == 8 and len(obj.data.polygons) == 6
