@@ -76,10 +76,21 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         min=1,
         max=512,
     )
+    focus_import: bpy.props.EnumProperty(
+        name="Focus Imported",
+        description="Frame the imported asset after import",
+        items=(
+            ("EMPTY_SCENE", "If Scene Empty", "Frame the asset when the scene had no content before import"),
+            ("ALWAYS", "Always", "Always frame the imported asset"),
+            ("NEVER", "Never", "Do not change the current view"),
+        ),
+        default="EMPTY_SCENE",
+    )
 
     def execute(self, context):
         prefs = context.preferences.addons[__package__].preferences
         load_options = self._load_options()
+        scene_was_empty = _scene_has_no_content(context.scene)
 
         if self.build_mode == "PROGRESSIVE":
             import_assetkit_file_progressive(
@@ -88,6 +99,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 load_options,
                 collection=context.collection,
                 batch_size=self.progressive_batch_size,
+                focus_mode=self.focus_import,
+                scene_was_empty=scene_was_empty,
             )
             self.report({"INFO"}, "AssetKit progressive import started")
             return {"FINISHED"}
@@ -98,6 +111,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 prefs.assetkit_library,
                 load_options,
                 collection=context.collection,
+                focus_mode=self.focus_import,
+                scene_was_empty=scene_was_empty,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
@@ -136,6 +151,10 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         if self.build_mode == "PROGRESSIVE":
             load_box.prop(self, "progressive_batch_size")
 
+        view_box = layout.box()
+        view_box.label(text="View")
+        view_box.prop(self, "focus_import")
+
     def _load_options(self) -> dict:
         return {
             "coordinate_conversion": self.coordinate_conversion,
@@ -145,3 +164,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             "convert_triangle_strip": self.convert_triangle_strip,
             "convert_triangle_fan": self.convert_triangle_fan,
         }
+
+
+def _scene_has_no_content(scene: bpy.types.Scene) -> bool:
+    content_types = {"ARMATURE", "CURVE", "EMPTY", "FONT", "MESH", "META", "SURFACE"}
+    return not any(obj.type in content_types for obj in scene.objects)

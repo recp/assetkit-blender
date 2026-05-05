@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from array import array
 from collections import deque
+import math
 import queue
 import threading
 import time
@@ -36,6 +37,8 @@ def import_assetkit_file(
     library_path: str = "",
     load_options: dict | None = None,
     collection: bpy.types.Collection | None = None,
+    focus_mode: str = "NEVER",
+    scene_was_empty: bool = False,
 ) -> list[bpy.types.Object]:
     primitives, scene_nodes = _load_assetkit_scene(filepath, library_path, load_options)
     state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection)
@@ -45,6 +48,7 @@ def import_assetkit_file(
     ]
 
     _select_imported_objects(objects)
+    _focus_imported_objects(objects, focus_mode, scene_was_empty, collection or bpy.context.collection)
     return objects
 
 
@@ -54,6 +58,8 @@ def import_assetkit_file_progressive(
     load_options: dict | None = None,
     collection: bpy.types.Collection | None = None,
     batch_size: int = _PROGRESSIVE_BATCH_SIZE,
+    focus_mode: str = "NEVER",
+    scene_was_empty: bool = False,
 ) -> "_ProgressiveImportJob":
     job = _ProgressiveImportJob(
         filepath,
@@ -61,6 +67,8 @@ def import_assetkit_file_progressive(
         load_options,
         collection or bpy.context.collection,
         max(1, batch_size),
+        focus_mode,
+        scene_was_empty,
     )
     job.start()
     return job
@@ -126,6 +134,113 @@ def _select_imported_objects(objects: list[bpy.types.Object]) -> None:
     bpy.context.view_layer.objects.active = objects[-1]
 
 
+def _focus_imported_objects(
+    objects: list[bpy.types.Object],
+    focus_mode: str,
+    scene_was_empty: bool,
+    collection: bpy.types.Collection,
+) -> None:
+    if focus_mode == "NEVER":
+        return
+    if focus_mode == "EMPTY_SCENE" and not scene_was_empty:
+        return
+    if not objects:
+        return
+
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
+
+    bounds = _object_bounds(objects)
+    if bounds is None:
+        return
+
+    _frame_viewports()
+    if scene_was_empty:
+        _frame_camera(bounds, collection)
+
+
+def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | None:
+    minimum: Vector | None = None
+    maximum: Vector | None = None
+
+    for obj in objects:
+        if obj.type != "MESH" or not obj.bound_box:
+            continue
+        matrix = obj.matrix_world
+        for corner in obj.bound_box:
+            point = matrix @ Vector(corner)
+            if minimum is None:
+                minimum = point.copy()
+                maximum = point.copy()
+            else:
+                minimum.x = min(minimum.x, point.x)
+                minimum.y = min(minimum.y, point.y)
+                minimum.z = min(minimum.z, point.z)
+                maximum.x = max(maximum.x, point.x)
+                maximum.y = max(maximum.y, point.y)
+                maximum.z = max(maximum.z, point.z)
+
+    if minimum is None or maximum is None:
+        return None
+    return minimum, maximum
+
+
+def _frame_viewports() -> None:
+    window_manager = bpy.context.window_manager
+    for window in getattr(window_manager, "windows", []):
+        screen = window.screen
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            region = next((item for item in area.regions if item.type == "WINDOW"), None)
+            space = next((item for item in area.spaces if item.type == "VIEW_3D"), None)
+            if region is None or space is None:
+                continue
+            try:
+                with bpy.context.temp_override(window=window, area=area, region=region, space_data=space):
+                    bpy.ops.view3d.view_selected(use_all_regions=False)
+            except Exception:
+                pass
+
+
+def _frame_camera(
+    bounds: tuple[Vector, Vector],
+    collection: bpy.types.Collection,
+) -> None:
+    scene = bpy.context.scene
+    camera_obj = scene.camera or next((obj for obj in scene.objects if obj.type == "CAMERA"), None)
+    if camera_obj is None:
+        camera = bpy.data.cameras.new("AssetKit Camera")
+        camera_obj = bpy.data.objects.new("AssetKit Camera", camera)
+        collection.objects.link(camera_obj)
+        scene.camera = camera_obj
+    elif scene.camera is None:
+        scene.camera = camera_obj
+
+    minimum, maximum = bounds
+    center = (minimum + maximum) * 0.5
+    size = maximum - minimum
+    radius = max(size.length * 0.5, 0.5)
+    direction = Vector((1.6, -2.2, 1.25)).normalized()
+
+    camera = camera_obj.data
+    if camera.type == "ORTHO":
+        camera.ortho_scale = max(size.x, size.y, size.z, 1.0) * 1.35
+        distance = radius * 3.0
+    else:
+        fov = min(getattr(camera, "angle_x", camera.angle), getattr(camera, "angle_y", camera.angle))
+        if fov <= 0.0:
+            fov = math.radians(50.0)
+        distance = radius / max(math.sin(fov * 0.5), 0.1) * 1.35
+
+    camera_obj.location = center + direction * distance
+    camera_obj.rotation_euler = (center - camera_obj.location).to_track_quat("-Z", "Y").to_euler()
+    camera.clip_end = max(camera.clip_end, distance + radius * 6.0)
+    camera.clip_start = min(camera.clip_start, max(distance / 1000.0, 0.001))
+
+
 class _ProgressiveImportJob:
     def __init__(
         self,
@@ -134,12 +249,16 @@ class _ProgressiveImportJob:
         load_options: dict | None,
         collection: bpy.types.Collection,
         batch_size: int,
+        focus_mode: str,
+        scene_was_empty: bool,
     ) -> None:
         self.filepath = filepath
         self.library_path = library_path
         self.load_options = load_options
         self.collection = collection
         self.batch_size = batch_size
+        self.focus_mode = focus_mode
+        self.scene_was_empty = scene_was_empty
         self.scene_nodes: list[SceneNodeData] = []
         self.mesh_count = 0
         self.pending_primitives: deque[MeshPrimitiveData] = deque()
@@ -247,6 +366,7 @@ class _ProgressiveImportJob:
 
     def _finish_success(self) -> None:
         _select_imported_objects(self.objects)
+        _focus_imported_objects(self.objects, self.focus_mode, self.scene_was_empty, self.collection)
         finished_at = time.perf_counter()
         load_seconds = self.build_started_at - self.load_started_at
         build_seconds = finished_at - self.build_started_at
