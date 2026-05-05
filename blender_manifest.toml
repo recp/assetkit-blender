@@ -1,0 +1,10 @@
+schema_version = "1.0.0"
+id = "assetio_blender"
+version = "0.1.0"
+name = "AssetIO Blender"
+tagline = "Import 3D assets through AssetKit"
+maintainer = "Recep Aslantas"
+type = "add-on"
+blender_version_min = "4.2.0"
+license = ["SPDX:Apache-2.0"]
+tags = ["Import-Export", "3D View"]

@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.zip
+.DS_Store
+.vscode/
+.idea/
+build/
+assetio_blender/_assetkit_blender*.so
+assetio_blender/_assetkit_blender*.pyd
+build-blender/

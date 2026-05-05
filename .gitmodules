@@ -1,0 +1,3 @@
+[submodule "deps/assetkit"]
+	path = deps/assetkit
+	url = https://github.com/recp/assetkit.git
