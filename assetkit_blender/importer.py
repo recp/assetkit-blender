@@ -30,6 +30,8 @@ _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_TIME_BUDGET = 0.025
+_AUTO_PROGRESSIVE_MESH_COUNT = 128
+_AUTO_PROGRESSIVE_NODE_COUNT = 512
 _ACTIVE_IMPORT_JOBS: list["_ProgressiveImportJob"] = []
 
 
@@ -76,6 +78,67 @@ def import_assetkit_file_progressive(
     )
     job.start()
     return job
+
+
+def import_assetkit_file_auto(
+    filepath: str,
+    library_path: str = "",
+    load_options: dict | None = None,
+    collection: bpy.types.Collection | None = None,
+    batch_size: int = _PROGRESSIVE_BATCH_SIZE,
+    focus_mode: str = "NEVER",
+    scene_was_empty: bool = False,
+    focus_camera: bpy.types.Object | None = None,
+) -> list[bpy.types.Object] | "_ProgressiveImportJob":
+    active_collection = collection or bpy.context.collection
+    if library_path:
+        return import_assetkit_file(
+            filepath,
+            library_path,
+            load_options,
+            active_collection,
+            focus_mode,
+            scene_was_empty,
+            focus_camera,
+        )
+
+    stream = native_open_scene_stream(filepath, load_options)
+    if stream is None:
+        return import_assetkit_file(
+            filepath,
+            library_path,
+            load_options,
+            active_collection,
+            focus_mode,
+            scene_was_empty,
+            focus_camera,
+        )
+
+    use_progressive = (
+        stream.mesh_count >= _AUTO_PROGRESSIVE_MESH_COUNT
+        or len(stream.nodes) >= _AUTO_PROGRESSIVE_NODE_COUNT
+    )
+    if use_progressive:
+        job = _ProgressiveImportJob(
+            filepath,
+            library_path,
+            load_options,
+            active_collection,
+            max(1, batch_size),
+            focus_mode,
+            scene_was_empty,
+            focus_camera,
+            stream=stream,
+        )
+        job.start()
+        return job
+
+    primitives = stream.read_mesh_batch(0, stream.mesh_count)
+    state = _begin_scene_build(primitives, stream.nodes, active_collection)
+    objects = [_create_import_object(primitive, state, active_collection) for primitive in primitives]
+    _select_imported_objects(objects)
+    _focus_imported_objects(objects, focus_mode, scene_was_empty, active_collection, focus_camera)
+    return objects
 
 
 def _load_assetkit_scene(
@@ -161,7 +224,7 @@ def _focus_imported_objects(
     if bounds is None:
         return
 
-    _frame_viewports()
+    _frame_viewports(bounds)
     if scene_was_empty:
         _frame_camera(bounds, collection, focus_camera)
 
@@ -202,8 +265,10 @@ def _bounds_corners(bounds: tuple[Vector, Vector]) -> list[Vector]:
     ]
 
 
-def _frame_viewports() -> None:
+def _frame_viewports(bounds: tuple[Vector, Vector]) -> None:
     window_manager = bpy.context.window_manager
+    minimum, maximum = bounds
+    radius = max((maximum - minimum).length * 0.5, 0.5)
     for window in getattr(window_manager, "windows", []):
         screen = window.screen
         for area in screen.areas:
@@ -213,11 +278,18 @@ def _frame_viewports() -> None:
             space = next((item for item in area.spaces if item.type == "VIEW_3D"), None)
             if region is None or space is None:
                 continue
+            _set_viewport_clip(space, radius)
             try:
                 with bpy.context.temp_override(window=window, area=area, region=region, space_data=space):
                     bpy.ops.view3d.view_selected(use_all_regions=False)
             except Exception:
                 pass
+
+
+def _set_viewport_clip(space: bpy.types.SpaceView3D, radius: float) -> None:
+    clip_end = max(space.clip_end, radius * 12.0, 1000.0)
+    space.clip_end = min(clip_end, 1_000_000.0)
+    space.clip_start = min(space.clip_start, max(radius / 100000.0, 0.001))
 
 
 def _frame_camera(
@@ -241,16 +313,38 @@ def _frame_camera(
     direction = Vector((1.6, -2.2, 1.25)).normalized()
 
     camera = camera_obj.data
+    camera_obj.rotation_euler = (center - (center + direction)).to_track_quat("-Z", "Y").to_euler()
     if camera.type == "ORTHO":
         camera.ortho_scale = max(size.x, size.y, size.z, 1.0) * 1.35
         distance = radius * 3.0
+        camera_obj.location = center + direction * distance
     else:
         distance = _camera_fit_distance(camera, direction, center, _bounds_corners(bounds)) * 1.25
-
-    camera_obj.location = center + direction * distance
-    camera_obj.rotation_euler = (center - camera_obj.location).to_track_quat("-Z", "Y").to_euler()
+        camera_obj.location = center + direction * distance
+    _fit_camera_with_blender(camera_obj, bounds)
     _ensure_camera_contains_bounds(scene, camera_obj, bounds)
     _set_camera_clip(camera_obj, bounds, radius)
+
+
+def _fit_camera_with_blender(
+    camera_obj: bpy.types.Object,
+    bounds: tuple[Vector, Vector],
+) -> None:
+    if not hasattr(camera_obj, "camera_fit_coords"):
+        return
+
+    coords: list[float] = []
+    for corner in _bounds_corners(bounds):
+        coords.extend((corner.x, corner.y, corner.z))
+
+    try:
+        location, scale = camera_obj.camera_fit_coords(bpy.context.evaluated_depsgraph_get(), coords)
+    except Exception:
+        return
+
+    camera_obj.location = location
+    if camera_obj.data.type == "ORTHO" and scale > 0.0:
+        camera_obj.data.ortho_scale = scale * 1.15
 
 
 def _camera_fit_distance(
@@ -337,6 +431,7 @@ class _ProgressiveImportJob:
         focus_mode: str,
         scene_was_empty: bool,
         focus_camera: bpy.types.Object | None,
+        stream: object | None = None,
     ) -> None:
         self.filepath = filepath
         self.library_path = library_path
@@ -346,6 +441,7 @@ class _ProgressiveImportJob:
         self.focus_mode = focus_mode
         self.scene_was_empty = scene_was_empty
         self.focus_camera = focus_camera
+        self.stream = stream
         self.scene_nodes: list[SceneNodeData] = []
         self.mesh_count = 0
         self.pending_primitives: deque[MeshPrimitiveData] = deque()
@@ -371,7 +467,7 @@ class _ProgressiveImportJob:
     def _produce(self) -> None:
         try:
             if not self.library_path:
-                stream = native_open_scene_stream(self.filepath, self.load_options)
+                stream = self.stream or native_open_scene_stream(self.filepath, self.load_options)
                 if stream is not None:
                     self.scene_nodes = stream.nodes
                     self.mesh_count = stream.mesh_count

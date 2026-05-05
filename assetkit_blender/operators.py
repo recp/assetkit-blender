@@ -4,7 +4,7 @@ import bpy
 from bpy_extras.io_utils import ImportHelper
 
 from .assetkit import AssetKitError
-from .importer import import_assetkit_file, import_assetkit_file_progressive
+from .importer import import_assetkit_file, import_assetkit_file_auto, import_assetkit_file_progressive
 
 
 class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
@@ -64,10 +64,11 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         name="Build Mode",
         description="How Blender objects are created after AssetKit reads the file",
         items=(
+            ("AUTO", "Auto", "Use progressive building for large object/node counts"),
             ("BLOCKING", "Blocking", "Build all Blender objects before the import operator returns"),
             ("PROGRESSIVE", "Progressive", "Load AssetKit in the background and build Blender objects in batches"),
         ),
-        default="BLOCKING",
+        default="AUTO",
     )
     progressive_batch_size: bpy.props.IntProperty(
         name="Batch Size",
@@ -87,22 +88,51 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         default="EMPTY_SCENE",
     )
     replace_startup_cube: bpy.props.EnumProperty(
-        name="Replace",
-        description="Remove Blender's untouched startup cube before importing",
+        name="Replace Startup",
+        description="Remove Blender startup objects before importing",
         items=(
             ("DEFAULT_CUBE", "Default Cube", "Remove the untouched startup cube before import"),
+            ("STARTUP_SCENE", "Startup Scene", "Remove the untouched startup cube, camera, and light before import"),
             ("NEVER", "Never", "Keep all existing scene objects"),
         ),
-        default="DEFAULT_CUBE",
+        default="STARTUP_SCENE",
     )
 
     def execute(self, context):
         prefs = context.preferences.addons[__package__].preferences
         load_options = self._load_options()
-        if self.replace_startup_cube == "DEFAULT_CUBE":
-            _remove_default_cube(context.scene)
+        if self.replace_startup_cube in {"DEFAULT_CUBE", "STARTUP_SCENE"}:
+            _remove_default_cube(context.scene, remove_startup_camera_light=self.replace_startup_cube == "STARTUP_SCENE")
         scene_was_empty = _scene_has_no_content(context.scene)
         focus_camera = context.scene.camera if scene_was_empty else None
+
+        if self.build_mode == "AUTO":
+            try:
+                result = import_assetkit_file_auto(
+                    self.filepath,
+                    prefs.assetkit_library,
+                    load_options,
+                    collection=context.collection,
+                    batch_size=self.progressive_batch_size,
+                    focus_mode=self.focus_import,
+                    scene_was_empty=scene_was_empty,
+                    focus_camera=focus_camera,
+                )
+            except AssetKitError as exc:
+                self.report({"ERROR"}, str(exc))
+                return {"CANCELLED"}
+            except OSError as exc:
+                self.report({"ERROR"}, f"Could not load AssetKit library: {exc}")
+                return {"CANCELLED"}
+
+            if isinstance(result, list):
+                if not result:
+                    self.report({"WARNING"}, "AssetKit loaded the file but no triangle meshes were imported")
+                else:
+                    self.report({"INFO"}, f"Imported {len(result)} mesh object(s) through AssetKit")
+            else:
+                self.report({"INFO"}, "AssetKit progressive import started")
+            return {"FINISHED"}
 
         if self.build_mode == "PROGRESSIVE":
             import_assetkit_file_progressive(
@@ -163,7 +193,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         load_box = layout.box()
         load_box.label(text="Loading")
         load_box.prop(self, "build_mode")
-        if self.build_mode == "PROGRESSIVE":
+        if self.build_mode in {"AUTO", "PROGRESSIVE"}:
             load_box.prop(self, "progressive_batch_size")
 
         view_box = layout.box()
@@ -187,7 +217,7 @@ def _scene_has_no_content(scene: bpy.types.Scene) -> bool:
     return not any(obj.type in content_types for obj in scene.objects)
 
 
-def _remove_default_cube(scene: bpy.types.Scene) -> bool:
+def _remove_default_cube(scene: bpy.types.Scene, remove_startup_camera_light: bool = True) -> bool:
     content_types = {"ARMATURE", "CURVE", "EMPTY", "FONT", "MESH", "META", "SURFACE"}
     content = [obj for obj in scene.objects if obj.type in content_types]
     if len(content) != 1:
@@ -201,6 +231,8 @@ def _remove_default_cube(scene: bpy.types.Scene) -> bool:
     bpy.data.objects.remove(obj, do_unlink=True)
     if mesh and mesh.users == 0:
         bpy.data.meshes.remove(mesh)
+    if remove_startup_camera_light:
+        _remove_startup_camera_light(scene)
     return True
 
 
@@ -216,3 +248,32 @@ def _is_startup_cube(obj: bpy.types.Object) -> bool:
     if obj.modifiers or obj.animation_data:
         return False
     return len(obj.data.vertices) == 8 and len(obj.data.polygons) == 6
+
+
+def _remove_startup_camera_light(scene: bpy.types.Scene) -> None:
+    for obj in list(scene.objects):
+        if _is_startup_camera(obj) or _is_startup_light(obj):
+            data = obj.data
+            obj_type = obj.type
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if data and data.users == 0:
+                if obj_type == "CAMERA":
+                    bpy.data.cameras.remove(data)
+                elif obj_type == "LIGHT":
+                    bpy.data.lights.remove(data)
+
+
+def _is_startup_camera(obj: bpy.types.Object) -> bool:
+    if obj.type != "CAMERA" or obj.name != "Camera" or obj.data is None:
+        return False
+    if obj.animation_data or obj.constraints:
+        return False
+    return abs(obj.data.lens - 50.0) < 1e-4
+
+
+def _is_startup_light(obj: bpy.types.Object) -> bool:
+    if obj.type != "LIGHT" or obj.name != "Light" or obj.data is None:
+        return False
+    if obj.animation_data or obj.constraints:
+        return False
+    return obj.data.type == "POINT"
