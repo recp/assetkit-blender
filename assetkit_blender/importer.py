@@ -439,16 +439,14 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
 def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
     min_frame: float | None = None
     max_frame: float | None = None
-    fcurves = getattr(action, "fcurves", None)
-    if fcurves:
-        for fcurve in fcurves:
-            for key in fcurve.keyframe_points:
-                frame = float(key.co.x)
-                min_frame = frame if min_frame is None else min(min_frame, frame)
-                max_frame = frame if max_frame is None else max(max_frame, frame)
+    for fcurve in _iter_action_fcurves(action):
+        for key in fcurve.keyframe_points:
+            frame = float(key.co.x)
+            min_frame = frame if min_frame is None else min(min_frame, frame)
+            max_frame = frame if max_frame is None else max(max_frame, frame)
 
-        if min_frame is not None and max_frame is not None:
-            return min_frame, max_frame
+    if min_frame is not None and max_frame is not None:
+        return min_frame, max_frame
 
     for attr in ("curve_frame_range", "frame_range"):
         value = getattr(action, attr, None)
@@ -463,6 +461,47 @@ def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
             return start, end
 
     return None
+
+
+def _iter_action_fcurves(action: bpy.types.Action):
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves:
+        yield from fcurves
+        return
+
+    for layer in getattr(action, "layers", []) or []:
+        for strip in getattr(layer, "strips", []) or []:
+            for slot in getattr(action, "slots", []) or []:
+                try:
+                    channelbag = strip.channelbag(slot)
+                except Exception:
+                    continue
+                yield from getattr(channelbag, "fcurves", []) or []
+
+
+def _channelbag_for_fcurve(action: bpy.types.Action, fcurve: bpy.types.FCurve):
+    for layer in getattr(action, "layers", []) or []:
+        for strip in getattr(layer, "strips", []) or []:
+            for slot in getattr(action, "slots", []) or []:
+                try:
+                    channelbag = strip.channelbag(slot)
+                except Exception:
+                    continue
+                for candidate in getattr(channelbag, "fcurves", []) or []:
+                    if candidate == fcurve:
+                        return channelbag
+    return None
+
+
+def _set_fcurve_group(fcurve: bpy.types.FCurve, channelbag, group_name: str) -> None:
+    if not group_name or not channelbag:
+        return
+    try:
+        if group_name not in channelbag.groups:
+            channelbag.groups.new(group_name)
+        fcurve.group = channelbag.groups[group_name]
+    except Exception:
+        pass
 
 
 def _focus_imported_objects(
@@ -1372,21 +1411,16 @@ def _set_node_visibility(obj: bpy.types.Object, visible: bool) -> None:
 
 
 def _hide_helper_object(obj: bpy.types.Object) -> None:
-    obj.hide_viewport = True
-    obj.hide_render = True
     obj.hide_select = True
     if obj.type == "EMPTY":
         obj.empty_display_size = 0.0
 
     action = obj.animation_data.action if obj.animation_data else None
-    if not action:
+    if action and any(fcurve.data_path in {"hide_viewport", "hide_render"} for fcurve in _iter_action_fcurves(action)):
         return
-    fcurves = getattr(action, "fcurves", None)
-    if not fcurves:
-        return
-    for fcurve in list(fcurves):
-        if fcurve.data_path in {"hide_viewport", "hide_render"}:
-            fcurves.remove(fcurve)
+
+    obj.hide_viewport = True
+    obj.hide_render = True
 
 
 def _create_coord_root(
@@ -1505,13 +1539,14 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
     if any(int(channel.get("target") or 0) == _ANIM_ROTATION_QUAT for channel in channels):
         obj.rotation_mode = "QUATERNION"
 
-    actions: dict[int, bpy.types.Action] = {}
+    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
 
     for channel in channels:
         target = int(channel.get("target") or 0)
         if target == _ANIM_VISIBILITY:
-            action = _animation_action_for(obj, obj, actions, "")
+            action = _animation_action_for(obj, obj, actions, "", channel)
             end_frame = max(end_frame, _apply_visibility_animation_channel(obj, action, channel, fps, start_frame))
             continue
 
@@ -1532,12 +1567,16 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
         if target_offset >= width:
             continue
 
-        action = _animation_action_for(obj, owner, actions, "" if owner == obj else "_Data")
+        action = _animation_action_for(obj, owner, actions, "" if owner == obj else "_Data", channel)
         component_count = 1 if is_partial else min(width - target_offset, value_width)
         for component in range(component_count):
             target_index = target_offset + component
             value_index = 0 if is_partial else component
             fcurve_index = None if width == 1 else target_index
+            write_key = _fcurve_write_key(owner, channel, path, fcurve_index)
+            if write_key in written_fcurves:
+                continue
+            written_fcurves.add(write_key)
             fcurve = _ensure_fcurve(action, owner, path, fcurve_index, group_name=group_name)
             coords = array("f", [0.0]) * (count * 2)
             for key_index in range(count):
@@ -1563,19 +1602,50 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
 def _animation_action_for(
     obj: bpy.types.Object,
     owner: bpy.types.ID,
-    actions: dict[int, bpy.types.Action],
+    actions: dict[tuple[int, int, str], bpy.types.Action],
     suffix: str,
+    channel: dict | None = None,
 ) -> bpy.types.Action:
-    key = owner.as_pointer()
+    clip_index = int((channel or {}).get("clip_index") or 0)
+    key = (owner.as_pointer(), clip_index, suffix)
     action = actions.get(key)
     if action:
         return action
 
     owner.animation_data_create()
-    action = bpy.data.actions.new(f"{obj.name}_AssetKit{suffix}")
+    action = bpy.data.actions.new(_animation_action_name(obj.name, suffix, channel))
     owner.animation_data.action = action
     actions[key] = action
     return action
+
+
+def _animation_action_name(base_name: str, suffix: str, channel: dict | None) -> str:
+    clip_index = int((channel or {}).get("clip_index") or 0)
+    clip_name = _safe_action_name(str((channel or {}).get("clip_name") or ""))
+    if clip_name:
+        return f"{base_name}_AssetKit_{clip_name}{suffix}"
+    if clip_index:
+        return f"{base_name}_AssetKit_Animation_{clip_index}{suffix}"
+    return f"{base_name}_AssetKit{suffix}"
+
+
+def _fcurve_write_key(
+    owner: bpy.types.ID,
+    channel: dict,
+    data_path: str,
+    index: int | None,
+) -> tuple[int, int, str, int]:
+    return (
+        owner.as_pointer(),
+        int(channel.get("clip_index") or 0),
+        data_path,
+        -1 if index is None else int(index),
+    )
+
+
+def _safe_action_name(name: str) -> str:
+    out = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in name.strip())
+    return out[:96]
 
 
 def _anim_channel_target(
@@ -1693,8 +1763,8 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
     end_frame = scene.frame_end
 
     shape_keys.animation_data_create()
-    action = bpy.data.actions.new(f"{obj.name}_AssetKit_Morph")
-    shape_keys.animation_data.action = action
+    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    written_fcurves: set[tuple[int, int, str, int]] = set()
 
     for channel in channels:
         if int(channel.get("target") or 0) != _ANIM_MORPH_WEIGHTS:
@@ -1711,6 +1781,7 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
 
         interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
         component_count = 1 if is_partial else value_width
+        action = _animation_action_for(obj, shape_keys, actions, "_Morph", channel)
         for component in range(component_count):
             key_index = target_offset + component + 1
             if key_index >= len(shape_keys.key_blocks):
@@ -1718,6 +1789,11 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
 
             key = shape_keys.key_blocks[key_index]
             value_index = 0 if is_partial else component
+            path = key.path_from_id("value")
+            write_key = _fcurve_write_key(shape_keys, channel, path, 0)
+            if write_key in written_fcurves:
+                continue
+            written_fcurves.add(write_key)
             fcurve = _ensure_fcurve(action, shape_keys, key.path_from_id("value"), 0, group_name="Shape Keys")
             coords = array("f", [0.0]) * (count * 2)
             for frame_index in range(count):
@@ -2119,14 +2195,32 @@ def _ensure_fcurve(
     index: int | None,
     group_name: str = "Transform",
 ):
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is not None:
+        if index is None:
+            return fcurves.new(data_path=data_path, action_group=group_name)
+        return fcurves.new(data_path=data_path, index=index, action_group=group_name)
+
     ensure = getattr(action, "fcurve_ensure_for_datablock", None)
+    if not ensure:
+        raise RuntimeError("Blender Action API does not expose fcurve creation")
+
     if index is None:
-        if ensure:
-            return ensure(obj, data_path, group_name=group_name)
-        return action.fcurves.new(data_path=data_path, action_group=group_name)
-    if ensure:
-        return ensure(obj, data_path, index=index, group_name=group_name)
-    return action.fcurves.new(data_path=data_path, index=index, action_group=group_name)
+        fcurve = ensure(obj, data_path, group_name=group_name)
+    else:
+        fcurve = ensure(obj, data_path, index=index, group_name=group_name)
+    if len(fcurve.keyframe_points) == 0:
+        return fcurve
+
+    channelbag = _channelbag_for_fcurve(action, fcurve)
+    if not channelbag:
+        return fcurve
+    if index is None:
+        fcurve = channelbag.fcurves.new(data_path=data_path)
+    else:
+        fcurve = channelbag.fcurves.new(data_path=data_path, index=index)
+    _set_fcurve_group(fcurve, channelbag, group_name)
+    return fcurve
 
 
 def _anim_target_path(target: int) -> tuple[str, int]:
@@ -2607,7 +2701,8 @@ def _apply_material_animation(
 
     scene = bpy.context.scene
     fps = scene.render.fps / scene.render.fps_base
-    actions: dict[int, bpy.types.Action] = {}
+    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
 
     for channel in channels:
@@ -2645,7 +2740,11 @@ def _apply_material_animation(
             if not owner or not path:
                 continue
 
-            action = _animation_action_for(mat, owner, actions, "" if owner == mat else "_Nodes")
+            action = _animation_action_for(mat, owner, actions, "" if owner == mat else "_Nodes", channel)
+            write_key = _fcurve_write_key(owner, channel, path, fcurve_index)
+            if write_key in written_fcurves:
+                continue
+            written_fcurves.add(write_key)
             fcurve = _ensure_fcurve(action, owner, path, fcurve_index, group_name=group_name)
             coords = array("f", [0.0]) * (count * 2)
             for key_index in range(count):

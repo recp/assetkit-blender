@@ -369,10 +369,12 @@ typedef struct AkbSharedDoc {
 typedef struct AkbAnimChannel {
   float    *times;
   float    *values;
+  const char *clip_name;
   uint32_t  count;
   uint32_t  value_width;
   uint32_t  target;
   uint32_t  target_offset;
+  uint32_t  clip_index;
   uint8_t   interpolation;
   uint8_t   is_partial;
   uint8_t   borrowed_times;
@@ -2398,7 +2400,9 @@ akb_animation_add_channel(AkbAnimation *animation,
                           AkChannel *channel,
                           AkResolvedTarget *target,
                           const AkbAnimBinding *binding,
-                          const AkbCoordContext *coord) {
+                          const AkbCoordContext *coord,
+                          uint32_t clip_index,
+                          const char *clip_name) {
   AkbAnimChannel out = {0};
   AkAnimSampler *sampler;
   AkInput *time_input;
@@ -2422,6 +2426,8 @@ akb_animation_add_channel(AkbAnimation *animation,
   out.target = binding->kind;
   if (!out.target)
     return 1;
+  out.clip_index = clip_index;
+  out.clip_name = clip_name;
 
   out.value_width = value_input->accessor->componentCount
                     ? value_input->accessor->componentCount
@@ -2516,14 +2522,22 @@ akb_animation_collect_walk(AkbAnimation *animation,
                            const AkbAnimBinding *bindings,
                            int binding_count,
                            const AkbCoordContext *coord) {
-  AkAnimation *stack[256];
+  struct AkbAnimationStackItem {
+    AkAnimation *source;
+    uint32_t index;
+    const char *name;
+  } stack[256];
   AkAnimation *next;
   AkChannel *channel;
   AkResolvedTarget resolved;
+  const char *clip_name;
+  uint32_t clip_index;
   int top;
   int i;
 
   top = 0;
+  clip_index = 0;
+  clip_name = source ? source->name : NULL;
   while (source) {
     for (channel = source->channel; channel; channel = channel->next) {
       resolved = ak_channelTarget(context, channel);
@@ -2536,7 +2550,9 @@ akb_animation_collect_walk(AkbAnimation *animation,
                                          channel,
                                          &resolved,
                                          &bindings[i],
-                                         coord))
+                                         coord,
+                                         clip_index,
+                                         clip_name))
             return 0;
           break;
         }
@@ -2545,13 +2561,22 @@ akb_animation_collect_walk(AkbAnimation *animation,
 
     if (source->animation) {
       next = (AkAnimation *)source->base.next;
-      if (next && top < 256)
-        stack[top++] = next;
+      if (next && top < 256) {
+        stack[top].source = next;
+        stack[top].index = clip_index + 1;
+        stack[top].name = next->name;
+        top++;
+      }
       source = source->animation;
     } else if (source->base.next) {
       source = (AkAnimation *)source->base.next;
+      clip_index++;
+      clip_name = source->name;
     } else if (top > 0) {
-      source = stack[--top];
+      top--;
+      source = stack[top].source;
+      clip_index = stack[top].index;
+      clip_name = stack[top].name;
     } else {
       source = NULL;
     }
@@ -4270,6 +4295,8 @@ akb_anim_channels_to_py(AkbAnimation *animation) {
 
     AKB_CH_SET_OBJ("target", PyLong_FromUnsignedLong(channel->target));
     AKB_CH_SET_OBJ("target_offset", PyLong_FromUnsignedLong(channel->target_offset));
+    AKB_CH_SET_OBJ("clip_index", PyLong_FromUnsignedLong(channel->clip_index));
+    AKB_CH_SET_OBJ("clip_name", akb_unicode_from_cstr(channel->clip_name));
     AKB_CH_SET_OBJ("value_width", PyLong_FromUnsignedLong(channel->value_width));
     AKB_CH_SET_OBJ("count", PyLong_FromUnsignedLong(channel->count));
     AKB_CH_SET_OBJ("interpolation", PyLong_FromUnsignedLong(channel->interpolation));
