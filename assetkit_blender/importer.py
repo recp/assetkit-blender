@@ -2316,7 +2316,7 @@ def _create_material(
     material_name = data.material_name or f"{data.name}_Material"
     if data.material_name and color_attr:
         material_name = f"{material_name}_{color_attr}"
-    mat = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
+    mat = bpy.data.materials.new(material_name)
     mat.diffuse_color = data.base_color
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
@@ -2935,10 +2935,10 @@ def _has_emission(data: MeshPrimitiveData) -> bool:
 
 def _material_cache_key(data: MeshPrimitiveData) -> object:
     color_attr = _color_attribute_name(data)
-    if data.material_name:
-        return ("name", data.material_name, color_attr)
     return (
         "props",
+        data.material_name,
+        color_attr,
         _round_tuple(data.base_color),
         _round_tuple(data.emissive_color),
         _round_tuple(data.specular_color),
@@ -2995,13 +2995,17 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         data.anisotropy_texture,
         data.diffuse_transmission_texture,
         data.diffuse_transmission_color_texture,
-        color_attr,
+        _texture_infos_cache_key(data.texture_infos),
+        _json_cache_key(data.material_extra),
+        _json_cache_key(data.effect_extra),
     )
 
 
 def _default_material_cache_key() -> object:
     return (
         "props",
+        "",
+        "",
         (1.0, 1.0, 1.0, 1.0),
         (0.0, 0.0, 0.0),
         (1.0, 1.0, 1.0),
@@ -3039,12 +3043,52 @@ def _default_material_cache_key() -> object:
         0,
         0,
         *(("",) * 20),
+        (),
+        "",
         "",
     )
 
 
 def _round_tuple(values: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(round(float(value), 6) for value in values)
+
+
+def _texture_infos_cache_key(texture_infos: dict[str, TextureRefData] | None) -> tuple:
+    if not texture_infos:
+        return ()
+
+    items = []
+    for role, info in sorted(texture_infos.items()):
+        items.append(
+            (
+                role,
+                info.path,
+                info.texcoord,
+                info.coord_input_name,
+                int(info.slot),
+                int(info.wrap_s),
+                int(info.wrap_t),
+                int(info.wrap_p),
+                int(info.min_filter),
+                int(info.mag_filter),
+                int(info.mip_filter),
+                bool(info.has_transform),
+                _round_tuple(info.transform_offset),
+                _round_tuple(info.transform_scale),
+                round(float(info.transform_rotation), 6),
+                int(info.transform_slot),
+            )
+        )
+    return tuple(items)
+
+
+def _json_cache_key(value: object | None) -> str:
+    if not value:
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(value)
 
 
 def _color_attribute_name(data: MeshPrimitiveData) -> str:
