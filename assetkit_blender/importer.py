@@ -28,6 +28,7 @@ _ANIM_SCALE = 3
 _ANIM_MORPH_WEIGHTS = 4
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
+_AK_MATERIAL_CONSTANT = 4
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_TIME_BUDGET = 0.025
 _AUTO_PROGRESSIVE_MESH_COUNT = 128
@@ -1719,30 +1720,42 @@ def _create_material(
             material_cache[cache_key] = mat
         return mat
 
-    _set_input(bsdf, "Base Color", data.base_color)
-    _set_input(bsdf, "Metallic", data.metallic)
-    _set_input(bsdf, "Roughness", data.roughness)
-    _set_input(bsdf, "Alpha", data.opacity)
-    _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
-    _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
-    _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
-    _set_first_input(bsdf, ("IOR",), data.ior)
-    _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
-    _set_first_input(bsdf, ("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
-    _set_first_input(bsdf, ("Transmission Weight", "Transmission"), data.transmission)
-    _set_first_input(bsdf, ("Sheen Weight", "Sheen"), max(data.sheen_color))
-    _set_first_input(bsdf, ("Sheen Tint",), (*data.sheen_color, 1.0))
-    _set_first_input(bsdf, ("Sheen Roughness",), data.sheen_roughness)
-    _set_first_input(bsdf, ("Anisotropic",), data.anisotropy)
-    _set_first_input(bsdf, ("Anisotropic Rotation",), data.anisotropy_rotation)
-    _set_first_input(bsdf, ("Thin Film IOR",), data.iridescence_ior)
-    if data.iridescence or data.iridescence_thickness_texture:
-        _set_first_input(bsdf, ("Thin Film Thickness",), data.iridescence_thickness_maximum)
+    color_target = bsdf
+    color_input = "Base Color"
+    alpha_socket = bsdf.inputs.get("Alpha")
+    if _is_unlit_material(data):
+        color_target, alpha_socket = _configure_unlit_shader(mat, data.alpha_mode)
+        color_input = "Color"
+    else:
+        _set_input(bsdf, "Metallic", data.metallic)
+        _set_input(bsdf, "Roughness", data.roughness)
+        _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
+        _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
+        _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
+        _set_first_input(bsdf, ("IOR",), data.ior)
+        _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
+        _set_first_input(bsdf, ("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
+        _set_first_input(bsdf, ("Transmission Weight", "Transmission"), data.transmission)
+        _set_first_input(bsdf, ("Sheen Weight", "Sheen"), max(data.sheen_color))
+        _set_first_input(bsdf, ("Sheen Tint",), (*data.sheen_color, 1.0))
+        _set_first_input(bsdf, ("Sheen Roughness",), data.sheen_roughness)
+        _set_first_input(bsdf, ("Anisotropic",), data.anisotropy)
+        _set_first_input(bsdf, ("Anisotropic Rotation",), data.anisotropy_rotation)
+        _set_first_input(bsdf, ("Thin Film IOR",), data.iridescence_ior)
+        if data.iridescence or data.iridescence_thickness_texture:
+            _set_first_input(bsdf, ("Thin Film Thickness",), data.iridescence_thickness_maximum)
+
+    _set_input(color_target, color_input, data.base_color)
+    if alpha_socket:
+        try:
+            alpha_socket.default_value = data.opacity
+        except TypeError:
+            pass
 
     _set_assetkit_material_props(mat, data)
 
     if data.base_color_texture or color_attr:
-        _link_base_color(mat, bsdf, data, color_attr)
+        _link_base_color(mat, color_target, data, color_attr, color_input, alpha_socket)
     if data.metallic_roughness_texture:
         _link_metallic_roughness_texture(
             mat,
@@ -1876,6 +1889,10 @@ def _has_material_data(data: MeshPrimitiveData) -> bool:
     return _material_cache_key(data) != _default_material_cache_key()
 
 
+def _is_unlit_material(data: MeshPrimitiveData) -> bool:
+    return int(data.material_type) == _AK_MATERIAL_CONSTANT
+
+
 def _material_cache_key(data: MeshPrimitiveData) -> object:
     color_attr = _color_attribute_name(data)
     if data.material_name:
@@ -1915,6 +1932,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         round(float(data.dispersion), 6),
         int(data.alpha_mode),
         bool(data.double_sided),
+        int(data.material_type),
         data.base_color_texture,
         data.metallic_roughness_texture,
         data.occlusion_texture,
@@ -1974,6 +1992,7 @@ def _default_material_cache_key() -> object:
         0.0,
         0,
         False,
+        0,
         *(("",) * 19),
         "",
     )
@@ -1989,6 +2008,37 @@ def _color_attribute_name(data: MeshPrimitiveData) -> str:
     if data.colors_f32:
         return "Color"
     return ""
+
+
+def _configure_unlit_shader(
+    mat: bpy.types.Material,
+    alpha_mode: int,
+):
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    output = nodes.get("Material Output")
+    if output is None:
+        output = nodes.new("ShaderNodeOutputMaterial")
+
+    surface = output.inputs.get("Surface")
+    if surface:
+        for link in list(surface.links):
+            links.remove(link)
+
+    emission = nodes.new("ShaderNodeEmission")
+    if not surface:
+        return emission, None
+
+    if alpha_mode:
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        mix = nodes.new("ShaderNodeMixShader")
+        links.new(transparent.outputs.get("BSDF"), mix.inputs[1])
+        links.new(emission.outputs.get("Emission"), mix.inputs[2])
+        links.new(mix.outputs.get("Shader"), surface)
+        return emission, mix.inputs.get("Fac")
+
+    links.new(emission.outputs.get("Emission"), surface)
+    return emission, None
 
 
 def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
@@ -2008,6 +2058,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_transparent_color": data.transparent_color,
         "assetkit_transparent_amount": data.transparent_amount,
         "assetkit_opacity": data.opacity,
+        "assetkit_material_type": data.material_type,
         "assetkit_iridescence_texture": data.iridescence_texture,
         "assetkit_iridescence_thickness_texture": data.iridescence_thickness_texture,
         "assetkit_volume_thickness_texture": data.volume_thickness_texture,
@@ -2099,9 +2150,11 @@ def _link_image_first(
 
 def _link_base_color(
     mat: bpy.types.Material,
-    bsdf,
+    target,
     data: MeshPrimitiveData,
     color_attr: str,
+    color_input: str = "Base Color",
+    alpha_socket=None,
 ) -> None:
     color_output = None
     alpha_output = None
@@ -2134,12 +2187,11 @@ def _link_base_color(
     if data.alpha_mode and alpha_output:
         alpha_output = _multiply_value_factor(mat, alpha_output, data.opacity, "Base Alpha Factor")
 
-    base_color = bsdf.inputs.get("Base Color")
-    alpha = bsdf.inputs.get("Alpha")
+    base_color = target.inputs.get(color_input)
     if base_color and color_output:
         mat.node_tree.links.new(color_output, base_color)
-    if data.alpha_mode and alpha and alpha_output:
-        mat.node_tree.links.new(alpha_output, alpha)
+    if data.alpha_mode and alpha_socket and alpha_output:
+        mat.node_tree.links.new(alpha_output, alpha_socket)
 
 
 def _vertex_color_node(mat: bpy.types.Material, name: str):

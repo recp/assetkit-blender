@@ -156,6 +156,7 @@ typedef struct AkbPrimitive {
   uint32_t texture_info_count;
   uint32_t morph_target_count;
   uint32_t material_variant_count;
+  uint32_t material_type;
   uint32_t skin_vertex_count;
   uint32_t skin_joint_count;
   uint32_t skin_joint_width;
@@ -858,6 +859,8 @@ akb_extract_material(AkDoc *doc,
   cmn = effect ? ak_getProfileTechniqueCommon(effect) : NULL;
   if (!cmn)
     return;
+
+  out->material_type = (uint32_t)cmn->type;
 
 #define AKB_COPY_TEX(ROLE, TEXREF, DEST) \
   akb_copy_texture_info(doc, (TEXREF), inst_mat, (ROLE), (DEST), sizeof(DEST), out)
@@ -3244,6 +3247,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("dispersion", PyFloat_FromDouble(prim->dispersion));
   AKB_SET_OBJ("alpha_mode", PyLong_FromUnsignedLong(prim->alpha_mode));
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
+  AKB_SET_OBJ("material_type", PyLong_FromUnsignedLong(prim->material_type));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
   AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
   AKB_SET_OBJ("has_skin", PyBool_FromLong(prim->has_skin));
