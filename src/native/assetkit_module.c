@@ -280,6 +280,7 @@ typedef struct AkbPrimitive {
   uint8_t  has_colors;
   uint8_t  has_tangents;
   uint8_t  has_skin;
+  uint8_t  has_sheen;
   uint8_t  double_sided;
   uint8_t  alpha_mode;
   uint8_t  has_node;
@@ -1147,6 +1148,7 @@ akb_extract_material(AkDoc *doc,
   }
 
   if (cmn->sheen) {
+    out->has_sheen = 1;
     out->sheen_roughness = cmn->sheen->roughness;
     if (cmn->sheen->color) {
       if (cmn->sheen->color->color) {
@@ -4426,6 +4428,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
   AKB_SET_OBJ("instance_count", PyLong_FromUnsignedLong(prim->instance_count));
   AKB_SET_OBJ("has_skin", PyBool_FromLong(prim->has_skin));
+  AKB_SET_OBJ("has_sheen", PyBool_FromLong(prim->has_sheen));
   AKB_SET_OBJ("skin_vertex_count", PyLong_FromUnsignedLong(prim->skin_vertex_count));
   AKB_SET_OBJ("skin_joint_count", PyLong_FromUnsignedLong(prim->skin_joint_count));
   AKB_SET_OBJ("skin_joint_width", PyLong_FromUnsignedLong(prim->skin_joint_width));

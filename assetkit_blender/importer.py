@@ -2169,11 +2169,11 @@ def _create_material(
         _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
         _set_first_input(bsdf, ("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
         _set_first_input(bsdf, ("Transmission Weight", "Transmission"), data.transmission)
-        _set_first_input(bsdf, ("Sheen Weight", "Sheen"), max(data.sheen_color))
+        _set_first_input(bsdf, ("Sheen Weight", "Sheen"), 1.0 if data.has_sheen else 0.0)
         _set_first_input(bsdf, ("Sheen Tint",), (*data.sheen_color, 1.0))
         _set_first_input(bsdf, ("Sheen Roughness",), data.sheen_roughness)
         _set_first_input(bsdf, ("Anisotropic",), data.anisotropy)
-        _set_first_input(bsdf, ("Anisotropic Rotation",), data.anisotropy_rotation)
+        _set_first_input(bsdf, ("Anisotropic Rotation",), _blender_anisotropy_rotation(data.anisotropy_rotation))
         _set_first_input(bsdf, ("Thin Film IOR",), data.iridescence_ior)
         if data.iridescence or data.iridescence_thickness_texture:
             _set_first_input(bsdf, ("Thin Film Thickness",), data.iridescence_thickness_maximum)
@@ -2573,6 +2573,8 @@ def _material_anim_channel_target(
 def _material_anim_output_value(data: MeshPrimitiveData, target: int, value: float) -> float:
     if target == _ANIM_MATERIAL_SPECULAR and _uses_pbr_specular_level(data):
         return float(value) * 0.5
+    if target == _ANIM_MATERIAL_ANISOTROPY_ROTATION:
+        return _blender_anisotropy_rotation(value)
     return float(value)
 
 
@@ -2673,6 +2675,10 @@ def _pbr_specular_level(data: MeshPrimitiveData) -> float:
     return 0.5 * max(0.0, float(data.specular_strength))
 
 
+def _blender_anisotropy_rotation(rotation: float) -> float:
+    return float(rotation) / (2.0 * math.pi)
+
+
 def _material_ior(data: MeshPrimitiveData) -> float:
     if _is_specular_glossiness_material(data):
         return 1000.0
@@ -2733,6 +2739,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         round(float(data.dispersion), 6),
         int(data.alpha_mode),
         _is_double_sided_material(data),
+        bool(data.has_sheen),
         int(data.material_type),
         int(data.file_type),
         data.base_color_texture,
@@ -2794,6 +2801,7 @@ def _default_material_cache_key() -> object:
         0.0,
         0.0,
         0,
+        False,
         False,
         0,
         0,
