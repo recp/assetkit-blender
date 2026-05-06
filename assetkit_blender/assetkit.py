@@ -227,6 +227,7 @@ class LoopFloatAttributeData:
 
 @dataclass
 class TextureRefData:
+    role: str = ""
     path: str = ""
     texcoord: str = ""
     coord_input_name: str = ""
@@ -763,6 +764,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         texture_infos = {}
         for role, info in (item.get("texture_infos") or {}).items():
             texture_infos[str(role)] = TextureRefData(
+                role=str(role),
                 path=info.get("path") or "",
                 texcoord=info.get("texcoord") or "",
                 coord_input_name=info.get("coord_input_name") or "",

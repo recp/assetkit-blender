@@ -63,12 +63,40 @@
 #define AKB_ANIM_MATERIAL_DISPERSION 58
 #define AKB_ANIM_MATERIAL_DIFFUSE_TRANSMISSION 59
 #define AKB_ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR 60
+#define AKB_ANIM_TEXTURE_TRANSFORM_BASE 1000
+#define AKB_ANIM_TEXTURE_TRANSFORM_STRIDE 4
+#define AKB_ANIM_TEXTURE_TRANSFORM_OFFSET 0
+#define AKB_ANIM_TEXTURE_TRANSFORM_SCALE 1
+#define AKB_ANIM_TEXTURE_TRANSFORM_ROTATION 2
 #define AKB_MATERIAL_SPECULAR_GLOSSINESS 6
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
 #define AKB_SKIN_JOINTS_PER_VERTEX 4
 #define AKB_TEXTURE_INFO_MAX 24
+
+typedef enum AkbTextureRoleId {
+  AKB_TEX_ROLE_BASE_COLOR = 0,
+  AKB_TEX_ROLE_METALLIC_ROUGHNESS = 1,
+  AKB_TEX_ROLE_OCCLUSION = 2,
+  AKB_TEX_ROLE_NORMAL = 3,
+  AKB_TEX_ROLE_EMISSIVE = 4,
+  AKB_TEX_ROLE_TRANSPARENT = 5,
+  AKB_TEX_ROLE_SPECULAR = 6,
+  AKB_TEX_ROLE_SPECULAR_COLOR = 7,
+  AKB_TEX_ROLE_CLEARCOAT = 8,
+  AKB_TEX_ROLE_CLEARCOAT_ROUGHNESS = 9,
+  AKB_TEX_ROLE_CLEARCOAT_NORMAL = 10,
+  AKB_TEX_ROLE_TRANSMISSION = 11,
+  AKB_TEX_ROLE_SHEEN_COLOR = 12,
+  AKB_TEX_ROLE_SHEEN_ROUGHNESS = 13,
+  AKB_TEX_ROLE_IRIDESCENCE = 14,
+  AKB_TEX_ROLE_IRIDESCENCE_THICKNESS = 15,
+  AKB_TEX_ROLE_VOLUME_THICKNESS = 16,
+  AKB_TEX_ROLE_ANISOTROPY = 17,
+  AKB_TEX_ROLE_DIFFUSE_TRANSMISSION = 18,
+  AKB_TEX_ROLE_DIFFUSE_TRANSMISSION_COLOR = 19
+} AkbTextureRoleId;
 
 typedef struct AkbMorphTarget {
   char     name[512];
@@ -2494,6 +2522,42 @@ akb_node_scene_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity) {
 }
 
 static int
+akb_texture_transform_binding_push(AkbAnimBinding *bindings,
+                                   int capacity,
+                                   int count,
+                                   AkTextureRef *texref,
+                                   uint32_t role_id) {
+  AkTextureTransform *transform;
+  uint32_t base;
+
+  if (!texref || !(transform = texref->transform))
+    return count;
+
+  base = AKB_ANIM_TEXTURE_TRANSFORM_BASE
+         + role_id * AKB_ANIM_TEXTURE_TRANSFORM_STRIDE;
+  count = akb_anim_binding_push(bindings,
+                                capacity,
+                                count,
+                                transform->offset,
+                                base + AKB_ANIM_TEXTURE_TRANSFORM_OFFSET,
+                                2);
+  count = akb_anim_binding_push(bindings,
+                                capacity,
+                                count,
+                                transform->scale,
+                                base + AKB_ANIM_TEXTURE_TRANSFORM_SCALE,
+                                2);
+  count = akb_anim_binding_push(bindings,
+                                capacity,
+                                count,
+                                &transform->rotation,
+                                base + AKB_ANIM_TEXTURE_TRANSFORM_ROTATION,
+                                1);
+
+  return count;
+}
+
+static int
 akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int capacity) {
   int count;
 
@@ -2501,34 +2565,62 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
   if (!cmn)
     return 0;
 
-  if (cmn->albedo && cmn->albedo->color)
-    count = akb_anim_binding_push(bindings,
-                                  capacity,
-                                  count,
-                                  cmn->albedo->color->vec,
-                                  AKB_ANIM_MATERIAL_BASE_COLOR,
-                                  4);
-  if (cmn->metalness)
+  if (cmn->albedo) {
+    if (cmn->albedo->color)
+      count = akb_anim_binding_push(bindings,
+                                    capacity,
+                                    count,
+                                    cmn->albedo->color->vec,
+                                    AKB_ANIM_MATERIAL_BASE_COLOR,
+                                    4);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->albedo->texture,
+                                               AKB_TEX_ROLE_BASE_COLOR);
+  }
+  if (cmn->metalness) {
     count = akb_anim_binding_push(bindings,
                                   capacity,
                                   count,
                                   &cmn->metalness->intensity,
                                   AKB_ANIM_MATERIAL_METALLIC,
                                   1);
-  if (cmn->roughness)
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->metalness->tex,
+                                               AKB_TEX_ROLE_METALLIC_ROUGHNESS);
+  }
+  if (cmn->roughness) {
     count = akb_anim_binding_push(bindings,
                                   capacity,
                                   count,
                                   &cmn->roughness->intensity,
                                   AKB_ANIM_MATERIAL_ROUGHNESS,
                                   1);
-  if (cmn->transparent)
+    if (!cmn->metalness || cmn->roughness->tex != cmn->metalness->tex)
+      count = akb_texture_transform_binding_push(bindings,
+                                                 capacity,
+                                                 count,
+                                                 cmn->roughness->tex,
+                                                 AKB_TEX_ROLE_METALLIC_ROUGHNESS);
+  }
+  if (cmn->transparent) {
     count = akb_anim_binding_push(bindings,
                                   capacity,
                                   count,
                                   &cmn->transparent->cutoff,
                                   AKB_ANIM_MATERIAL_ALPHA_CUTOFF,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->transparent->color
+                                               ? cmn->transparent->color->texture
+                                               : NULL,
+                                               AKB_TEX_ROLE_TRANSPARENT);
+  }
   if (cmn->emission) {
     if (cmn->emission->color.color)
       count = akb_anim_binding_push(bindings,
@@ -2543,21 +2635,38 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                   &cmn->emission->strength,
                                   AKB_ANIM_MATERIAL_EMISSIVE_STRENGTH,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->emission->color.texture,
+                                               AKB_TEX_ROLE_EMISSIVE);
   }
-  if (cmn->normal)
+  if (cmn->normal) {
     count = akb_anim_binding_push(bindings,
                                   capacity,
                                   count,
                                   &cmn->normal->scale,
                                   AKB_ANIM_MATERIAL_NORMAL_SCALE,
                                   1);
-  if (cmn->occlusion)
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->normal->tex,
+                                               AKB_TEX_ROLE_NORMAL);
+  }
+  if (cmn->occlusion) {
     count = akb_anim_binding_push(bindings,
                                   capacity,
                                   count,
                                   &cmn->occlusion->strength,
                                   AKB_ANIM_MATERIAL_OCCLUSION_STRENGTH,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->occlusion->tex,
+                                               AKB_TEX_ROLE_OCCLUSION);
+  }
   if (cmn->specular) {
     count = akb_anim_binding_push(bindings,
                                   capacity,
@@ -2565,6 +2674,11 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                   &cmn->specular->strength,
                                   AKB_ANIM_MATERIAL_SPECULAR,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->specular->specularTex,
+                                               AKB_TEX_ROLE_SPECULAR);
     if (cmn->specular->color && cmn->specular->color->color)
       count = akb_anim_binding_push(bindings,
                                     capacity,
@@ -2572,6 +2686,12 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                     cmn->specular->color->color->vec,
                                     AKB_ANIM_MATERIAL_SPECULAR_COLOR,
                                     3);
+    if (cmn->specular->color)
+      count = akb_texture_transform_binding_push(bindings,
+                                                 capacity,
+                                                 count,
+                                                 cmn->specular->color->texture,
+                                                 AKB_TEX_ROLE_SPECULAR_COLOR);
   }
   if (cmn->ior > 0.0f)
     count = akb_anim_binding_push(bindings,
@@ -2599,14 +2719,35 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                   &cmn->clearcoat->normalScale,
                                   AKB_ANIM_MATERIAL_CLEARCOAT_NORMAL_SCALE,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->clearcoat->texture,
+                                               AKB_TEX_ROLE_CLEARCOAT);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->clearcoat->roughnessTexture,
+                                               AKB_TEX_ROLE_CLEARCOAT_ROUGHNESS);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->clearcoat->normalTexture,
+                                               AKB_TEX_ROLE_CLEARCOAT_NORMAL);
   }
-  if (cmn->transmission)
+  if (cmn->transmission) {
     count = akb_anim_binding_push(bindings,
                                   capacity,
                                   count,
                                   &cmn->transmission->factor,
                                   AKB_ANIM_MATERIAL_TRANSMISSION,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->transmission->texture,
+                                               AKB_TEX_ROLE_TRANSMISSION);
+  }
   if (cmn->sheen) {
     if (cmn->sheen->color && cmn->sheen->color->color)
       count = akb_anim_binding_push(bindings,
@@ -2615,12 +2756,23 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                     cmn->sheen->color->color->vec,
                                     AKB_ANIM_MATERIAL_SHEEN_COLOR,
                                     3);
+    if (cmn->sheen->color)
+      count = akb_texture_transform_binding_push(bindings,
+                                                 capacity,
+                                                 count,
+                                                 cmn->sheen->color->texture,
+                                                 AKB_TEX_ROLE_SHEEN_COLOR);
     count = akb_anim_binding_push(bindings,
                                   capacity,
                                   count,
                                   &cmn->sheen->roughness,
                                   AKB_ANIM_MATERIAL_SHEEN_ROUGHNESS,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->sheen->roughnessTexture,
+                                               AKB_TEX_ROLE_SHEEN_ROUGHNESS);
   }
   if (cmn->iridescence) {
     count = akb_anim_binding_push(bindings,
@@ -2647,6 +2799,16 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                   &cmn->iridescence->thicknessMaximum,
                                   AKB_ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MAXIMUM,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->iridescence->texture,
+                                               AKB_TEX_ROLE_IRIDESCENCE);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->iridescence->thicknessTexture,
+                                               AKB_TEX_ROLE_IRIDESCENCE_THICKNESS);
   }
   if (cmn->volume) {
     count = akb_anim_binding_push(bindings,
@@ -2667,6 +2829,11 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                   cmn->volume->attenuationColor.vec,
                                   AKB_ANIM_MATERIAL_VOLUME_ATTENUATION_COLOR,
                                   3);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->volume->thicknessTexture,
+                                               AKB_TEX_ROLE_VOLUME_THICKNESS);
   }
   if (cmn->anisotropy) {
     count = akb_anim_binding_push(bindings,
@@ -2681,6 +2848,11 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                   &cmn->anisotropy->rotation,
                                   AKB_ANIM_MATERIAL_ANISOTROPY_ROTATION,
                                   1);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->anisotropy->texture,
+                                               AKB_TEX_ROLE_ANISOTROPY);
   }
   if (cmn->dispersion)
     count = akb_anim_binding_push(bindings,
@@ -2703,6 +2875,17 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
                                     cmn->diffuseTransmission->color->color->vec,
                                     AKB_ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR,
                                     3);
+    count = akb_texture_transform_binding_push(bindings,
+                                               capacity,
+                                               count,
+                                               cmn->diffuseTransmission->texture,
+                                               AKB_TEX_ROLE_DIFFUSE_TRANSMISSION);
+    if (cmn->diffuseTransmission->color)
+      count = akb_texture_transform_binding_push(bindings,
+                                                 capacity,
+                                                 count,
+                                                 cmn->diffuseTransmission->color->texture,
+                                                 AKB_TEX_ROLE_DIFFUSE_TRANSMISSION_COLOR);
   }
 
   return count;

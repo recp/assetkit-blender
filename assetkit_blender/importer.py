@@ -68,6 +68,33 @@ _ANIM_MATERIAL_ANISOTROPY_ROTATION = 57
 _ANIM_MATERIAL_DISPERSION = 58
 _ANIM_MATERIAL_DIFFUSE_TRANSMISSION = 59
 _ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR = 60
+_ANIM_TEXTURE_TRANSFORM_BASE = 1000
+_ANIM_TEXTURE_TRANSFORM_STRIDE = 4
+_ANIM_TEXTURE_TRANSFORM_OFFSET = 0
+_ANIM_TEXTURE_TRANSFORM_SCALE = 1
+_ANIM_TEXTURE_TRANSFORM_ROTATION = 2
+_ANIM_TEXTURE_TRANSFORM_ROLES = (
+    "base_color",
+    "metallic_roughness",
+    "occlusion",
+    "normal",
+    "emissive",
+    "transparent",
+    "specular",
+    "specular_color",
+    "clearcoat",
+    "clearcoat_roughness",
+    "clearcoat_normal",
+    "transmission",
+    "sheen_color",
+    "sheen_roughness",
+    "iridescence",
+    "iridescence_thickness",
+    "volume_thickness",
+    "anisotropy",
+    "diffuse_transmission",
+    "diffuse_transmission_color",
+)
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_CONSTANT = 4
@@ -2191,6 +2218,12 @@ def _apply_material_animation(
 
 
 def _material_anim_width(target: int) -> int:
+    tex_prop = _texture_anim_prop(target)
+    if tex_prop in {_ANIM_TEXTURE_TRANSFORM_OFFSET, _ANIM_TEXTURE_TRANSFORM_SCALE}:
+        return 2
+    if tex_prop == _ANIM_TEXTURE_TRANSFORM_ROTATION:
+        return 1
+
     if target in {
         _ANIM_MATERIAL_BASE_COLOR,
     }:
@@ -2241,6 +2274,24 @@ def _material_anim_channel_target(
     target: int,
     target_index: int,
 ) -> tuple[bpy.types.ID | None, str, int | None, str]:
+    tex_role = _texture_anim_role(target)
+    tex_prop = _texture_anim_prop(target)
+    if tex_role:
+        mapping = _texture_mapping_node(mat, tex_role)
+        if mapping:
+            if tex_prop == _ANIM_TEXTURE_TRANSFORM_OFFSET:
+                socket = mapping.inputs.get("Location")
+                if socket:
+                    return mat.node_tree, socket.path_from_id("default_value"), target_index, "Texture Transform"
+            if tex_prop == _ANIM_TEXTURE_TRANSFORM_SCALE:
+                socket = mapping.inputs.get("Scale")
+                if socket:
+                    return mat.node_tree, socket.path_from_id("default_value"), target_index, "Texture Transform"
+            if tex_prop == _ANIM_TEXTURE_TRANSFORM_ROTATION:
+                socket = mapping.inputs.get("Rotation")
+                if socket:
+                    return mat.node_tree, socket.path_from_id("default_value"), 2, "Texture Transform"
+
     if target == _ANIM_MATERIAL_BASE_COLOR:
         socket = alpha_socket if target_index == 3 and alpha_socket else _first_input(color_target, (color_input,))
         if not socket:
@@ -2297,6 +2348,32 @@ def _first_input(node, names: tuple[str, ...]):
         socket = node.inputs.get(name)
         if socket:
             return socket
+    return None
+
+
+def _texture_anim_role(target: int) -> str:
+    if target < _ANIM_TEXTURE_TRANSFORM_BASE:
+        return ""
+    offset = target - _ANIM_TEXTURE_TRANSFORM_BASE
+    role_index = offset // _ANIM_TEXTURE_TRANSFORM_STRIDE
+    if role_index < 0 or role_index >= len(_ANIM_TEXTURE_TRANSFORM_ROLES):
+        return ""
+    return _ANIM_TEXTURE_TRANSFORM_ROLES[role_index]
+
+
+def _texture_anim_prop(target: int) -> int:
+    if target < _ANIM_TEXTURE_TRANSFORM_BASE:
+        return -1
+    return (target - _ANIM_TEXTURE_TRANSFORM_BASE) % _ANIM_TEXTURE_TRANSFORM_STRIDE
+
+
+def _texture_mapping_node(mat: bpy.types.Material, role: str):
+    node_tree = mat.node_tree
+    if not node_tree or not role:
+        return None
+    for node in node_tree.nodes:
+        if node.bl_idname == "ShaderNodeMapping" and node.get("assetkit_texture_role") == role:
+            return node
     return None
 
 
@@ -3150,6 +3227,8 @@ def _configure_texture_node(mat: bpy.types.Material, tex, tex_info: TextureRefDa
 
     if tex_info.has_transform:
         mapping = nodes.new("ShaderNodeMapping")
+        mapping.label = f"AssetKit {tex_info.role} Transform"
+        mapping["assetkit_texture_role"] = tex_info.role
         mapping.inputs["Location"].default_value[0] = tex_info.transform_offset[0]
         mapping.inputs["Location"].default_value[1] = tex_info.transform_offset[1]
         mapping.inputs["Rotation"].default_value[2] = tex_info.transform_rotation
