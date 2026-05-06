@@ -237,6 +237,7 @@ typedef struct AkbPrimitive {
   uint32_t morph_target_count;
   uint32_t material_variant_count;
   uint32_t material_type;
+  uint32_t file_type;
   uint32_t skin_vertex_count;
   uint32_t skin_joint_count;
   uint32_t skin_joint_width;
@@ -3358,6 +3359,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
     return 1;
 
   out.node_index = node_index;
+  out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
   out.primitive_extra = ak_extra(prim);
   out.mesh_extra = ak_extra(mesh);
   out.geometry_extra = ak_extra(geom);
@@ -4273,6 +4275,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("alpha_mode", PyLong_FromUnsignedLong(prim->alpha_mode));
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("material_type", PyLong_FromUnsignedLong(prim->material_type));
+  AKB_SET_OBJ("file_type", PyLong_FromUnsignedLong(prim->file_type));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
   AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
   AKB_SET_OBJ("instance_count", PyLong_FromUnsignedLong(prim->instance_count));

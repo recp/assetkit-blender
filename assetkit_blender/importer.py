@@ -99,6 +99,7 @@ _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_CONSTANT = 4
 _AK_MATERIAL_SPECULAR_GLOSSINESS = 6
+_AK_FILE_TYPE_COLLADA = 1
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_TIME_BUDGET = 0.025
 _AUTO_PROGRESSIVE_MESH_COUNT = 128
@@ -2000,7 +2001,7 @@ def _create_material(
     mat = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
     mat.diffuse_color = data.base_color
     mat.use_nodes = True
-    mat.use_backface_culling = not data.double_sided
+    mat.use_backface_culling = not _is_double_sided_material(data)
     if data.alpha_mode == 1:
         mat.blend_method = "BLEND"
     elif data.alpha_mode == 2:
@@ -2451,6 +2452,10 @@ def _is_unlit_material(data: MeshPrimitiveData) -> bool:
     return int(data.material_type) == _AK_MATERIAL_CONSTANT
 
 
+def _is_double_sided_material(data: MeshPrimitiveData) -> bool:
+    return bool(data.double_sided) or int(data.file_type) == _AK_FILE_TYPE_COLLADA
+
+
 def _has_emission(data: MeshPrimitiveData) -> bool:
     if data.emissive_texture:
         return True
@@ -2495,8 +2500,9 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         round(float(data.diffuse_transmission), 6),
         round(float(data.dispersion), 6),
         int(data.alpha_mode),
-        bool(data.double_sided),
+        _is_double_sided_material(data),
         int(data.material_type),
+        int(data.file_type),
         data.base_color_texture,
         data.metallic_roughness_texture,
         data.occlusion_texture,
@@ -2556,6 +2562,7 @@ def _default_material_cache_key() -> object:
         0.0,
         0,
         False,
+        0,
         0,
         *(("",) * 19),
         "",
@@ -2626,6 +2633,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_occlusion_strength": data.occlusion_strength,
         "assetkit_clearcoat_normal_scale": data.clearcoat_normal_scale,
         "assetkit_material_type": data.material_type,
+        "assetkit_file_type": data.file_type,
         "assetkit_iridescence_texture": data.iridescence_texture,
         "assetkit_iridescence_thickness_texture": data.iridescence_thickness_texture,
         "assetkit_volume_thickness_texture": data.volume_thickness_texture,

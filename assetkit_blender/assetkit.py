@@ -336,6 +336,7 @@ class MeshPrimitiveData:
     alpha_mode: int = 0
     double_sided: bool = False
     material_type: int = 0
+    file_type: int = 0
     zero_copy_flags: int = 0
     base_color_texture: str = ""
     metallic_roughness_texture: str = ""
@@ -905,6 +906,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 alpha_mode=int(item.get("alpha_mode") or 0),
                 double_sided=bool(item.get("double_sided")),
                 material_type=int(item.get("material_type") or 0),
+                file_type=int(item.get("file_type") or 0),
                 zero_copy_flags=int(item.get("zero_copy_flags") or 0),
                 base_color_texture=item.get("base_color_texture") or "",
                 metallic_roughness_texture=item.get("metallic_roughness_texture") or "",
