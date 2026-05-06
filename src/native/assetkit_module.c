@@ -1781,14 +1781,23 @@ akb_raw_semantic_starts_with(AkInput *input, const char *prefix) {
 }
 
 static int
-akb_point_attr_candidate(AkInput *input) {
+akb_point_attr_candidate(AkInput *input, uint32_t primitive_type) {
   if (!input || !input->accessor || input->accessor->count == 0)
     return 0;
   if (input->semantic == AK_INPUT_POSITION)
     return 0;
+  if (!input->semanticRaw)
+    return 0;
+
+  if (akb_raw_semantic_starts_with(input, "_")
+      || akb_raw_semantic_starts_with(input, "KHR_"))
+    return 1;
+
+  if (primitive_type != AKB_PRIMITIVE_POINTS)
+    return 0;
   if (input->semantic == AK_INPUT_COLOR)
     return 1;
-  if (input->semantic != AK_INPUT_OTHER || !input->semanticRaw)
+  if (input->semantic != AK_INPUT_OTHER)
     return 0;
 
   return akb_raw_semantic_is(input, "OPACITY")
@@ -1832,6 +1841,8 @@ akb_point_attr_name(AkbLoopFloatAttribute *attr, AkInput *input, uint32_t fallba
     snprintf(attr->name, sizeof(attr->name), "assetkit_scale");
   } else if (raw && strcmp(raw, "ROTATION") == 0) {
     snprintf(attr->name, sizeof(attr->name), "assetkit_rotation");
+  } else if (raw && (raw[0] == '_' || strncmp(raw, "KHR_", 4) == 0)) {
+    snprintf(attr->name, sizeof(attr->name), "%s", raw);
   } else if (raw && raw[0]) {
     snprintf(attr->name, sizeof(attr->name), "assetkit_%s", raw);
   } else {
@@ -1849,12 +1860,12 @@ akb_extract_point_float_attrs(AkbPrimitive *out,
   uint32_t max_count, count, value_count, width;
   uint8_t borrowed;
 
-  if (!out || !prim || out->primitive_type != AKB_PRIMITIVE_POINTS || !out->vertex_count)
+  if (!out || !prim || !out->vertex_count)
     return 1;
 
   max_count = 0;
   for (input = prim->input; input; input = input->next) {
-    if (akb_point_attr_candidate(input))
+    if (akb_point_attr_candidate(input, out->primitive_type))
       max_count++;
   }
 
@@ -1867,7 +1878,7 @@ akb_extract_point_float_attrs(AkbPrimitive *out,
 
   count = 0;
   for (input = prim->input; input; input = input->next) {
-    if (!akb_point_attr_candidate(input))
+    if (!akb_point_attr_candidate(input, out->primitive_type))
       continue;
 
     width = akb_point_attr_width(input);

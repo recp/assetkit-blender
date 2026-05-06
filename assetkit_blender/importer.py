@@ -1022,6 +1022,7 @@ def _create_mesh_object_bulk(
     mesh.loops.foreach_set("vertex_index", indices)
     mesh.polygons.foreach_set("loop_start", loop_starts)
     mesh.polygons.foreach_set("loop_total", loop_totals)
+    _apply_point_attributes(mesh, data)
 
     if data.uv_sets:
         for index, attr in enumerate(data.uv_sets):
@@ -1102,6 +1103,7 @@ def _create_line_mesh_object_bulk(
     mesh.vertices.foreach_set("co", vertices)
     if edge_count:
         mesh.edges.foreach_set("vertices", indices)
+    _apply_point_attributes(mesh, data)
     mesh.update(calc_edges=False)
 
     return _finish_mesh_object(
