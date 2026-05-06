@@ -28,6 +28,17 @@ _ANIM_ROTATION_QUAT = 2
 _ANIM_SCALE = 3
 _ANIM_MORPH_WEIGHTS = 4
 _ANIM_VISIBILITY = 5
+_ANIM_CAMERA_XFOV = 6
+_ANIM_CAMERA_YFOV = 7
+_ANIM_CAMERA_ZNEAR = 8
+_ANIM_CAMERA_ZFAR = 9
+_ANIM_CAMERA_ORTHO_XMAG = 10
+_ANIM_CAMERA_ORTHO_YMAG = 11
+_ANIM_LIGHT_COLOR = 12
+_ANIM_LIGHT_INTENSITY = 13
+_ANIM_LIGHT_RANGE = 14
+_ANIM_LIGHT_SPOT_INNER = 15
+_ANIM_LIGHT_SPOT_OUTER = 16
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_CONSTANT = 4
@@ -1231,19 +1242,18 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
     if any(int(channel.get("target") or 0) == _ANIM_ROTATION_QUAT for channel in channels):
         obj.rotation_mode = "QUATERNION"
 
-    obj.animation_data_create()
-    action = bpy.data.actions.new(f"{obj.name}_AssetKit")
-    obj.animation_data.action = action
+    actions: dict[int, bpy.types.Action] = {}
     end_frame = scene.frame_end
 
     for channel in channels:
         target = int(channel.get("target") or 0)
         if target == _ANIM_VISIBILITY:
+            action = _animation_action_for(obj, obj, actions, "")
             end_frame = max(end_frame, _apply_visibility_animation_channel(obj, action, channel, fps, start_frame))
             continue
 
-        path, width = _anim_target_path(target)
-        if not path:
+        owner, path, width, group_name = _anim_channel_target(obj, target)
+        if not owner or not path:
             continue
 
         count = int(channel.get("count") or 0)
@@ -1256,15 +1266,24 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
             continue
 
         interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        if target_offset >= width:
+            continue
+
+        action = _animation_action_for(obj, owner, actions, "" if owner == obj else "_Data")
         component_count = 1 if is_partial else min(width - target_offset, value_width)
         for component in range(component_count):
             target_index = target_offset + component
             value_index = 0 if is_partial else component
-            fcurve = _ensure_fcurve(action, obj, path, target_index)
+            fcurve_index = None if width == 1 else target_index
+            fcurve = _ensure_fcurve(action, owner, path, fcurve_index, group_name=group_name)
             coords = array("f", [0.0]) * (count * 2)
             for key_index in range(count):
                 coords[key_index * 2] = start_frame + times[key_index] * fps
-                coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
+                coords[key_index * 2 + 1] = _anim_channel_value(
+                    obj,
+                    target,
+                    values[key_index * value_width + value_index],
+                )
 
             fcurve.keyframe_points.add(count)
             fcurve.keyframe_points.foreach_set("co", coords)
@@ -1276,6 +1295,74 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
 
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
+
+
+def _animation_action_for(
+    obj: bpy.types.Object,
+    owner: bpy.types.ID,
+    actions: dict[int, bpy.types.Action],
+    suffix: str,
+) -> bpy.types.Action:
+    key = owner.as_pointer()
+    action = actions.get(key)
+    if action:
+        return action
+
+    owner.animation_data_create()
+    action = bpy.data.actions.new(f"{obj.name}_AssetKit{suffix}")
+    owner.animation_data.action = action
+    actions[key] = action
+    return action
+
+
+def _anim_channel_target(
+    obj: bpy.types.Object,
+    target: int,
+) -> tuple[bpy.types.ID | None, str, int, str]:
+    path, width = _anim_target_path(target)
+    if path:
+        return obj, path, width, "Transform"
+
+    data = getattr(obj, "data", None)
+    if obj.type == "CAMERA" and data:
+        if target == _ANIM_CAMERA_XFOV:
+            return data, "angle_x", 1, "Camera"
+        if target == _ANIM_CAMERA_YFOV:
+            return data, "angle_y", 1, "Camera"
+        if target == _ANIM_CAMERA_ZNEAR:
+            return data, "clip_start", 1, "Camera"
+        if target == _ANIM_CAMERA_ZFAR:
+            return data, "clip_end", 1, "Camera"
+        if target in {_ANIM_CAMERA_ORTHO_XMAG, _ANIM_CAMERA_ORTHO_YMAG}:
+            return data, "ortho_scale", 1, "Camera"
+
+    if obj.type == "LIGHT" and data:
+        if target == _ANIM_LIGHT_COLOR:
+            return data, "color", 3, "Light"
+        if target == _ANIM_LIGHT_INTENSITY:
+            return data, "energy", 1, "Light"
+        if target == _ANIM_LIGHT_RANGE and hasattr(data, "cutoff_distance"):
+            return data, "cutoff_distance", 1, "Light"
+        if target == _ANIM_LIGHT_SPOT_OUTER and hasattr(data, "spot_size"):
+            return data, "spot_size", 1, "Light"
+        if target == _ANIM_LIGHT_SPOT_INNER and hasattr(data, "spot_blend"):
+            return data, "spot_blend", 1, "Light"
+
+    return None, "", 0, ""
+
+
+def _anim_channel_value(obj: bpy.types.Object, target: int, value: float) -> float:
+    if target in {_ANIM_CAMERA_ORTHO_XMAG, _ANIM_CAMERA_ORTHO_YMAG, _ANIM_LIGHT_SPOT_OUTER}:
+        return value * 2.0
+
+    if target == _ANIM_LIGHT_SPOT_INNER:
+        data = getattr(obj, "data", None)
+        outer = getattr(data, "spot_size", 0.0) * 0.5 if data else 0.0
+        if outer <= 1.0e-6:
+            return 0.0
+        return max(0.0, min(1.0, 1.0 - value / outer))
+
+    return value
 
 
 def _apply_visibility_animation_channel(

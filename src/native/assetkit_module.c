@@ -23,6 +23,17 @@
 #define AKB_ANIM_SCALE 3
 #define AKB_ANIM_MORPH_WEIGHTS 4
 #define AKB_ANIM_VISIBILITY 5
+#define AKB_ANIM_CAMERA_XFOV 6
+#define AKB_ANIM_CAMERA_YFOV 7
+#define AKB_ANIM_CAMERA_ZNEAR 8
+#define AKB_ANIM_CAMERA_ZFAR 9
+#define AKB_ANIM_CAMERA_ORTHO_XMAG 10
+#define AKB_ANIM_CAMERA_ORTHO_YMAG 11
+#define AKB_ANIM_LIGHT_COLOR 12
+#define AKB_ANIM_LIGHT_INTENSITY 13
+#define AKB_ANIM_LIGHT_RANGE 14
+#define AKB_ANIM_LIGHT_SPOT_INNER 15
+#define AKB_ANIM_LIGHT_SPOT_OUTER 16
 #define AKB_MATERIAL_SPECULAR_GLOSSINESS 6
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
@@ -2232,6 +2243,148 @@ akb_node_transform_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity
 }
 
 static int
+akb_node_camera_bindings(AkNode *node,
+                         AkbAnimBinding *bindings,
+                         int capacity,
+                         int count) {
+  AkCamera *camera;
+  AkProjection *projection;
+
+  if (!node || !node->camera)
+    return count;
+
+  camera = (AkCamera *)ak_instanceObject(node->camera);
+  if (!camera || !camera->optics || !(projection = camera->optics->tcommon))
+    return count;
+
+  if (projection->type == AK_PROJECTION_PERSPECTIVE) {
+    AkPerspective *persp;
+
+    persp = (AkPerspective *)projection;
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &persp->xfov,
+                                  AKB_ANIM_CAMERA_XFOV,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &persp->yfov,
+                                  AKB_ANIM_CAMERA_YFOV,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &persp->znear,
+                                  AKB_ANIM_CAMERA_ZNEAR,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &persp->zfar,
+                                  AKB_ANIM_CAMERA_ZFAR,
+                                  1);
+  } else if (projection->type == AK_PROJECTION_ORTHOGRAPHIC) {
+    AkOrthographic *ortho;
+
+    ortho = (AkOrthographic *)projection;
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &ortho->xmag,
+                                  AKB_ANIM_CAMERA_ORTHO_XMAG,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &ortho->ymag,
+                                  AKB_ANIM_CAMERA_ORTHO_YMAG,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &ortho->znear,
+                                  AKB_ANIM_CAMERA_ZNEAR,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &ortho->zfar,
+                                  AKB_ANIM_CAMERA_ZFAR,
+                                  1);
+  }
+
+  return count;
+}
+
+static int
+akb_node_light_bindings(AkNode *node,
+                        AkbAnimBinding *bindings,
+                        int capacity,
+                        int count) {
+  AkLight *light;
+  AkLightBase *base;
+
+  if (!node || !node->light)
+    return count;
+
+  light = (AkLight *)ak_instanceObject(node->light);
+  if (!light || !(base = light->tcommon))
+    return count;
+
+  count = akb_anim_binding_push(bindings,
+                                capacity,
+                                count,
+                                base->color.vec,
+                                AKB_ANIM_LIGHT_COLOR,
+                                3);
+  count = akb_anim_binding_push(bindings,
+                                capacity,
+                                count,
+                                &base->intensity,
+                                AKB_ANIM_LIGHT_INTENSITY,
+                                1);
+  count = akb_anim_binding_push(bindings,
+                                capacity,
+                                count,
+                                &base->range,
+                                AKB_ANIM_LIGHT_RANGE,
+                                1);
+
+  if (base->type == AK_LIGHT_TYPE_SPOT) {
+    AkSpotLight *spot;
+
+    spot = (AkSpotLight *)base;
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &spot->innerConeAngle,
+                                  AKB_ANIM_LIGHT_SPOT_INNER,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &spot->outerConeAngle,
+                                  AKB_ANIM_LIGHT_SPOT_OUTER,
+                                  1);
+  }
+
+  return count;
+}
+
+static int
+akb_node_scene_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity) {
+  int count;
+
+  count = akb_node_transform_bindings(node, bindings, capacity);
+  count = akb_node_camera_bindings(node, bindings, capacity, count);
+  count = akb_node_light_bindings(node, bindings, capacity, count);
+
+  return count;
+}
+
+static int
 akb_node_has_rotate(AkNode *node) {
   AkObject *object;
 
@@ -2412,8 +2565,10 @@ akb_animation_new(AkDoc *doc,
     if (!animation || !*ok)
       return animation;
     binding_count = akb_node_visibility_bindings(node, bindings, 64);
+    binding_count = akb_node_camera_bindings(node, bindings, 64, binding_count);
+    binding_count = akb_node_light_bindings(node, bindings, 64, binding_count);
   } else {
-    binding_count = akb_node_transform_bindings(node, bindings, 64);
+    binding_count = akb_node_scene_bindings(node, bindings, 64);
   }
 
   if (!binding_count) {
