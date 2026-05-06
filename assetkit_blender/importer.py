@@ -2320,7 +2320,9 @@ def _create_material(
     mat.diffuse_color = data.base_color
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
-    if data.alpha_mode == 1:
+    if data.alpha_mode == 0:
+        mat.blend_method = "OPAQUE"
+    elif data.alpha_mode == 1:
         mat.blend_method = "BLEND"
     elif data.alpha_mode == 2:
         mat.blend_method = "CLIP"
