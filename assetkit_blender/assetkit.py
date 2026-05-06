@@ -268,6 +268,7 @@ class MeshPrimitiveData:
     skin_weights_f32: object = b""
     skin_joint_nodes_i32: object = b""
     skin_inverse_bind_matrices_f32: object = b""
+    skin_bind_shape_matrix_f32: object = b""
     anim_channels: list[dict] | None = None
     uv_sets: list[LoopFloatAttributeData] | None = None
     color_sets: list[LoopFloatAttributeData] | None = None
@@ -820,6 +821,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 skin_weights_f32=item.get("skin_weights_f32") or b"",
                 skin_joint_nodes_i32=item.get("skin_joint_nodes_i32") or b"",
                 skin_inverse_bind_matrices_f32=item.get("skin_inverse_bind_matrices_f32") or b"",
+                skin_bind_shape_matrix_f32=item.get("skin_bind_shape_matrix_f32") or b"",
                 anim_channels=item.get("anim_channels") or [],
                 uv_sets=uv_sets,
                 color_sets=color_sets,

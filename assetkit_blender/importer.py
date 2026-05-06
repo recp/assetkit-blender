@@ -931,6 +931,7 @@ def _create_mesh_object(
             uv_layer.data[loop_index].uv = (uv[0], 1.0 - uv[1])
 
     _apply_shading(mesh, shading_mode, data.normals[: len(mesh.loops)] if data.normals else None)
+    _apply_skin_bind_shape(mesh, data)
 
     active_collection = collection or bpy.context.collection
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
@@ -1025,6 +1026,7 @@ def _create_mesh_object_bulk(
     mesh.update(calc_edges=True)
 
     _apply_shading(mesh, shading_mode, _buffer_view(data.normals_f32, "f") if data.normals_f32 else None)
+    _apply_skin_bind_shape(mesh, data)
 
     active_collection = collection or bpy.context.collection
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
@@ -1108,6 +1110,8 @@ def _create_scene_nodes(
         _set_parent(obj, parent)
         _apply_matrix_buffer(obj, node.matrix_f32)
         _apply_animation(obj, node)
+        if obj.type == "EMPTY":
+            _hide_helper_object(obj)
 
     return objects
 
@@ -1183,6 +1187,24 @@ def _set_node_visibility(obj: bpy.types.Object, visible: bool) -> None:
     obj.hide_render = hidden
 
 
+def _hide_helper_object(obj: bpy.types.Object) -> None:
+    obj.hide_viewport = True
+    obj.hide_render = True
+    obj.hide_select = True
+    if obj.type == "EMPTY":
+        obj.empty_display_size = 0.0
+
+    action = obj.animation_data.action if obj.animation_data else None
+    if not action:
+        return
+    fcurves = getattr(action, "fcurves", None)
+    if not fcurves:
+        return
+    for fcurve in list(fcurves):
+        if fcurve.data_path in {"hide_viewport", "hide_render"}:
+            fcurves.remove(fcurve)
+
+
 def _create_coord_root(
     primitives: list[MeshPrimitiveData],
     collection: bpy.types.Collection,
@@ -1197,6 +1219,7 @@ def _create_coord_root(
         root.empty_display_size = 0.5
         root.matrix_local = matrix
         collection.objects.link(root)
+        _hide_helper_object(root)
         return root
 
     return None
@@ -1563,6 +1586,27 @@ def _apply_skin(
     modifier.use_vertex_groups = True
 
 
+def _apply_skin_bind_shape(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> None:
+    if not data.has_skin:
+        return
+
+    matrix = _matrix_from_buffer(data.skin_bind_shape_matrix_f32)
+    if matrix is None or _matrix_is_identity(matrix):
+        return
+
+    mesh.transform(matrix)
+    mesh.update(calc_edges=True)
+
+
+def _matrix_is_identity(matrix: Matrix, epsilon: float = 1.0e-6) -> bool:
+    identity = Matrix.Identity(4)
+    for row in range(4):
+        for col in range(4):
+            if abs(matrix[row][col] - identity[row][col]) > epsilon:
+                return False
+    return True
+
+
 def _skin_cache_key(
     data: MeshPrimitiveData,
     joint_nodes: memoryview,
@@ -1679,6 +1723,7 @@ def _create_skin_armature(
     if not _bind_pose_bones_to_nodes(armature, joint_names, joint_nodes, node_objects):
         _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
     _match_object_space(armature, obj)
+    _hide_helper_object(armature)
 
     bpy.ops.object.select_all(action="DESELECT")
     for selected in previous_selection:
@@ -1953,6 +1998,7 @@ def _create_material(
     if data.material_name and color_attr:
         material_name = f"{material_name}_{color_attr}"
     mat = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
+    mat.diffuse_color = data.base_color
     mat.use_nodes = True
     mat.use_backface_culling = not data.double_sided
     if data.alpha_mode == 1:

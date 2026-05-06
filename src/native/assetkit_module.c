@@ -72,7 +72,8 @@
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
-#define AKB_SKIN_JOINTS_PER_VERTEX 4
+#define AKB_SKIN_DEFAULT_JOINTS_PER_VERTEX 4
+#define AKB_SKIN_MAX_JOINTS_PER_VERTEX 64
 #define AKB_TEXTURE_INFO_MAX 24
 
 typedef enum AkbTextureRoleId {
@@ -190,6 +191,7 @@ typedef struct AkbPrimitive {
   int32_t  *skin_joint_nodes;
   float   *skin_weights;
   float   *skin_inverse_bind_matrices;
+  float    skin_bind_shape_matrix[16];
   float    base_color[4];
   float    transparent_color[4];
   float    emissive_color[3];
@@ -1869,6 +1871,18 @@ akb_scene_node_index_for(AkbSceneNodeList *nodes, AkNode *node) {
   return -1;
 }
 
+static uint32_t
+akb_skin_joint_width(AkSkin *skin) {
+  uint32_t width;
+
+  width = skin && skin->nMaxJoints
+          ? skin->nMaxJoints
+          : AKB_SKIN_DEFAULT_JOINTS_PER_VERTEX;
+  if (width > AKB_SKIN_MAX_JOINTS_PER_VERTEX)
+    return AKB_SKIN_MAX_JOINTS_PER_VERTEX;
+  return width;
+}
+
 static int
 akb_extract_skin(AkbPrimitive *out,
                  AkbSceneNodeList *nodes,
@@ -1883,17 +1897,19 @@ akb_extract_skin(AkbPrimitive *out,
   float *weights;
   float *inverse_bind_matrices;
   size_t filled_count;
+  uint32_t joint_width;
   size_t i;
 
   if (!out || !prim || !skinner || !(skin = skinner->skin)
       || !skin->nJoints || !out->vertex_count)
     return 1;
 
+  joint_width = akb_skin_joint_width(skin);
   joint_indices = (uint16_t *)calloc((size_t)out->vertex_count
-                                     * AKB_SKIN_JOINTS_PER_VERTEX,
+                                     * joint_width,
                                      sizeof(*joint_indices));
   weights = (float *)calloc((size_t)out->vertex_count
-                            * AKB_SKIN_JOINTS_PER_VERTEX,
+                            * joint_width,
                             sizeof(*weights));
   if (!joint_indices || !weights) {
     free(joint_indices);
@@ -1904,7 +1920,7 @@ akb_extract_skin(AkbPrimitive *out,
   filled_count = ak_skinFillWeights(skin,
                                     prim,
                                     prim_index,
-                                    AKB_SKIN_JOINTS_PER_VERTEX,
+                                    joint_width,
                                     joint_indices,
                                     weights);
   if (!filled_count) {
@@ -1953,11 +1969,14 @@ akb_extract_skin(AkbPrimitive *out,
   out->skin_joint_nodes = joint_nodes;
   out->skin_joint_sources = joint_sources;
   out->skin_inverse_bind_matrices = inverse_bind_matrices;
+  memcpy(out->skin_bind_shape_matrix,
+         skin->bindShapeMatrix,
+         sizeof(out->skin_bind_shape_matrix));
   out->skin_root_source = skin->skeleton;
   out->skin_root_node_index = akb_scene_node_index_for(nodes, skin->skeleton);
   out->skin_vertex_count = (uint32_t)filled_count;
   out->skin_joint_count = (uint32_t)skin->nJoints;
-  out->skin_joint_width = AKB_SKIN_JOINTS_PER_VERTEX;
+  out->skin_joint_width = joint_width;
   out->has_skin = 1;
   return 1;
 }
@@ -4371,6 +4390,9 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                         * 16
                                         * sizeof(float)
                                       : 0));
+  AKB_SET_OBJ("skin_bind_shape_matrix_f32",
+              akb_memoryview_or_empty(prim->skin_bind_shape_matrix,
+                                      prim->has_skin ? 16 * sizeof(float) : 0));
 
 #undef AKB_SET_OBJ
 
