@@ -142,6 +142,7 @@ typedef struct AkbLoopFloatAttribute {
   float   *values;
   uint32_t width;
   uint32_t set;
+  uint8_t  borrowed;
 } AkbLoopFloatAttribute;
 
 typedef struct AkbTextureInfo {
@@ -183,6 +184,7 @@ typedef struct AkbPrimitive {
   AkbMorphTarget *morph_targets;
   AkbLoopFloatAttribute *uv_sets;
   AkbLoopFloatAttribute *color_sets;
+  AkbLoopFloatAttribute *point_attrs;
   AkbMaterialVariantMap *material_variants;
   AkbTextureInfo texture_infos[AKB_TEXTURE_INFO_MAX];
   AkNode   **skin_joint_sources;
@@ -268,6 +270,7 @@ typedef struct AkbPrimitive {
   uint32_t primitive_mode;
   uint32_t uv_set_count;
   uint32_t color_set_count;
+  uint32_t point_attr_count;
   uint32_t texture_info_count;
   uint32_t morph_target_count;
   uint32_t material_variant_count;
@@ -687,11 +690,17 @@ akb_primitive_free(AkbPrimitive *prim) {
   free(prim->loop_meta);
   free(prim->normals);
   for (i = 0; i < prim->uv_set_count; i++)
-    free(prim->uv_sets[i].values);
+    if (!prim->uv_sets[i].borrowed)
+      free(prim->uv_sets[i].values);
   free(prim->uv_sets);
   for (i = 0; i < prim->color_set_count; i++)
-    free(prim->color_sets[i].values);
+    if (!prim->color_sets[i].borrowed)
+      free(prim->color_sets[i].values);
   free(prim->color_sets);
+  for (i = 0; i < prim->point_attr_count; i++)
+    if (!prim->point_attrs[i].borrowed)
+      free(prim->point_attrs[i].values);
+  free(prim->point_attrs);
   if (!prim->uv_set_count)
     free(prim->uvs);
   if (!prim->color_set_count)
@@ -1757,6 +1766,153 @@ akb_extract_loop_float_attrs(AkbPrimitive *out,
 
   *attrs_out = attrs;
   *count_out = count;
+  return 1;
+}
+
+static int
+akb_raw_semantic_starts_with(AkInput *input, const char *prefix) {
+  size_t len;
+
+  if (!input || !input->semanticRaw || !prefix)
+    return 0;
+
+  len = strlen(prefix);
+  return strncmp(input->semanticRaw, prefix, len) == 0;
+}
+
+static int
+akb_point_attr_candidate(AkInput *input) {
+  if (!input || !input->accessor || input->accessor->count == 0)
+    return 0;
+  if (input->semantic == AK_INPUT_POSITION)
+    return 0;
+  if (input->semantic == AK_INPUT_COLOR)
+    return 1;
+  if (input->semantic != AK_INPUT_OTHER || !input->semanticRaw)
+    return 0;
+
+  return akb_raw_semantic_is(input, "OPACITY")
+         || akb_raw_semantic_is(input, "SCALE")
+         || akb_raw_semantic_is(input, "ROTATION")
+         || akb_raw_semantic_starts_with(input, "COLOR");
+}
+
+static uint32_t
+akb_point_attr_width(AkInput *input) {
+  uint32_t width;
+
+  if (!input || !input->accessor)
+    return 0;
+
+  if (input->semantic == AK_INPUT_COLOR || akb_raw_semantic_starts_with(input, "COLOR"))
+    return 4;
+
+  width = input->accessor->componentCount ? input->accessor->componentCount : 1;
+  return width > 4 ? 4 : width;
+}
+
+static void
+akb_point_attr_name(AkbLoopFloatAttribute *attr, AkInput *input, uint32_t fallback_index) {
+  const char *raw;
+
+  if (!attr || !input)
+    return;
+
+  raw = input->semanticRaw;
+  attr->set = input->set;
+
+  if (input->semantic == AK_INPUT_COLOR || akb_raw_semantic_starts_with(input, "COLOR")) {
+    if (input->set == 0)
+      snprintf(attr->name, sizeof(attr->name), "Color");
+    else
+      snprintf(attr->name, sizeof(attr->name), "Color.%03u", input->set);
+  } else if (raw && strcmp(raw, "OPACITY") == 0) {
+    snprintf(attr->name, sizeof(attr->name), "assetkit_opacity");
+  } else if (raw && strcmp(raw, "SCALE") == 0) {
+    snprintf(attr->name, sizeof(attr->name), "assetkit_scale");
+  } else if (raw && strcmp(raw, "ROTATION") == 0) {
+    snprintf(attr->name, sizeof(attr->name), "assetkit_rotation");
+  } else if (raw && raw[0]) {
+    snprintf(attr->name, sizeof(attr->name), "assetkit_%s", raw);
+  } else {
+    snprintf(attr->name, sizeof(attr->name), "assetkit_point_attr.%03u", fallback_index);
+  }
+}
+
+static int
+akb_extract_point_float_attrs(AkbPrimitive *out,
+                              AkMeshPrimitive *prim,
+                              AkbSharedDoc *doc_owner) {
+  AkbLoopFloatAttribute *attrs;
+  AkInput *input;
+  float *values;
+  uint32_t max_count, count, value_count, width;
+  uint8_t borrowed;
+
+  if (!out || !prim || out->primitive_type != AKB_PRIMITIVE_POINTS || !out->vertex_count)
+    return 1;
+
+  max_count = 0;
+  for (input = prim->input; input; input = input->next) {
+    if (akb_point_attr_candidate(input))
+      max_count++;
+  }
+
+  if (!max_count)
+    return 1;
+
+  attrs = (AkbLoopFloatAttribute *)calloc(max_count, sizeof(*attrs));
+  if (!attrs)
+    return 0;
+
+  count = 0;
+  for (input = prim->input; input; input = input->next) {
+    if (!akb_point_attr_candidate(input))
+      continue;
+
+    width = akb_point_attr_width(input);
+    if (!width)
+      continue;
+
+    borrowed = 0;
+    values = akb_accessor_float_borrow(input->accessor, width, &value_count);
+    if (values) {
+      borrowed = 1;
+    } else {
+      values = akb_accessor_float_copy(input->accessor, width, &value_count);
+      borrowed = 0;
+    }
+
+    if (!values || value_count != out->vertex_count) {
+      if (values && !borrowed)
+        free(values);
+      continue;
+    }
+
+    attrs[count].values = values;
+    attrs[count].width = width;
+    attrs[count].borrowed = borrowed;
+    akb_fill_missing_components(attrs[count].values,
+                                out->vertex_count,
+                                width,
+                                input->accessor->componentCount,
+                                input->semantic == AK_INPUT_COLOR
+                                || akb_raw_semantic_starts_with(input, "COLOR")
+                                ? 1.0f
+                                : 0.0f);
+    akb_point_attr_name(&attrs[count], input, count);
+    if (borrowed)
+      akb_primitive_retain_doc(out, doc_owner);
+    count++;
+  }
+
+  if (!count) {
+    free(attrs);
+    return 1;
+  }
+
+  out->point_attrs = attrs;
+  out->point_attr_count = count;
   return 1;
 }
 
@@ -3604,6 +3760,11 @@ akb_extract_primitive(AkbPrimitiveList *list,
     out.loop_totals[i] = 3;
   }
 
+  if (!akb_extract_point_float_attrs(&out, prim, doc_owner)) {
+    akb_primitive_free(&out);
+    return 0;
+  }
+
   if (out.primitive_type == AKB_PRIMITIVE_TRIANGLES) {
     normal_input = akb_find_input(prim, AK_INPUT_NORMAL, AK_INPUT_NORMAL, "NORMAL", NULL);
     out.normals = akb_loop_attribute_copy(prim,
@@ -4454,6 +4615,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
   AKB_SET_OBJ("uv_set_count", PyLong_FromUnsignedLong(prim->uv_set_count));
   AKB_SET_OBJ("color_set_count", PyLong_FromUnsignedLong(prim->color_set_count));
+  AKB_SET_OBJ("point_attr_count", PyLong_FromUnsignedLong(prim->point_attr_count));
   AKB_SET_OBJ("anim_count",
               PyLong_FromUnsignedLong(prim->animation
                                       ? (unsigned long)prim->animation->count
@@ -4477,6 +4639,9 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("color_sets", akb_loop_float_attrs_to_py(prim->color_sets,
                                                        prim->color_set_count,
                                                        prim->loop_count));
+  AKB_SET_OBJ("point_attrs", akb_loop_float_attrs_to_py(prim->point_attrs,
+                                                        prim->point_attr_count,
+                                                        prim->vertex_count));
   AKB_SET_OBJ("texture_infos", akb_texture_infos_to_py(prim->texture_infos,
                                                        prim->texture_info_count));
   AKB_SET_OBJ("primitive_extra", akb_tree_to_py(prim->primitive_extra));

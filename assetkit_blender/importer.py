@@ -1138,6 +1138,7 @@ def _create_point_mesh_object_bulk(
         raise RuntimeError("AssetKit native bridge returned incomplete point buffers")
 
     mesh.vertices.foreach_set("co", vertices)
+    _apply_point_attributes(mesh, data)
     mesh.update(calc_edges=False)
 
     return _finish_mesh_object(
@@ -1185,6 +1186,47 @@ def _finish_mesh_object(
         _apply_animation(obj, data)
 
     return _apply_instancing(obj, data, active_collection)
+
+
+def _apply_point_attributes(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> None:
+    if not data.point_attrs:
+        return
+
+    for attr in data.point_attrs:
+        values = _buffer_view(attr.values_f32, "f")
+        if values is None:
+            continue
+
+        name = attr.name or "assetkit_point_attr"
+        width = int(attr.width or 0)
+        if width == 1:
+            blender_attr = mesh.attributes.new(name=name, type="FLOAT", domain="POINT")
+            blender_attr.data.foreach_set("value", values)
+        elif width == 2:
+            _apply_split_point_attribute(mesh, name, values, ("x", "y"))
+        elif width == 3:
+            blender_attr = mesh.attributes.new(name=name, type="FLOAT_VECTOR", domain="POINT")
+            blender_attr.data.foreach_set("vector", values)
+        elif width == 4:
+            blender_attr = mesh.color_attributes.new(name=name, type="FLOAT_COLOR", domain="POINT")
+            blender_attr.data.foreach_set("color", values)
+            if name == "Color":
+                _set_render_color_index(mesh)
+
+
+def _apply_split_point_attribute(
+    mesh: bpy.types.Mesh,
+    name: str,
+    values,
+    suffixes: tuple[str, ...],
+) -> None:
+    count = len(mesh.vertices)
+    for component, suffix in enumerate(suffixes):
+        out = array("f", [0.0]) * count
+        for index in range(count):
+            out[index] = values[index * len(suffixes) + component]
+        blender_attr = mesh.attributes.new(name=f"{name}_{suffix}", type="FLOAT", domain="POINT")
+        blender_attr.data.foreach_set("value", out)
 
 
 def _apply_shading(

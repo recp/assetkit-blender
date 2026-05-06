@@ -276,6 +276,7 @@ class MeshPrimitiveData:
     anim_channels: list[dict] | None = None
     uv_sets: list[LoopFloatAttributeData] | None = None
     color_sets: list[LoopFloatAttributeData] | None = None
+    point_attrs: list[LoopFloatAttributeData] | None = None
     texture_infos: dict[str, TextureRefData] | None = None
     morph_targets: list[MorphTargetData] | None = None
     material_variants: list[dict] | None = None
@@ -304,6 +305,7 @@ class MeshPrimitiveData:
     skin_joint_width: int = 0
     uv_set_count: int = 0
     color_set_count: int = 0
+    point_attr_count: int = 0
     skin_root_node_index: int = -1
     material_name: str = ""
     base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
@@ -769,6 +771,17 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 )
             )
 
+        point_attrs = []
+        for attr in item.get("point_attrs") or []:
+            point_attrs.append(
+                LoopFloatAttributeData(
+                    name=attr.get("name") or "assetkit_point_attr",
+                    set=int(attr.get("set") or 0),
+                    width=int(attr.get("width") or 0),
+                    values_f32=attr.get("values_f32") or b"",
+                )
+            )
+
         texture_infos = {}
         for role, info in (item.get("texture_infos") or {}).items():
             texture_infos[str(role)] = TextureRefData(
@@ -834,6 +847,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 anim_channels=item.get("anim_channels") or [],
                 uv_sets=uv_sets,
                 color_sets=color_sets,
+                point_attrs=point_attrs,
                 texture_infos=texture_infos,
                 morph_targets=morph_targets,
                 material_variants=item.get("material_variants") or [],
@@ -862,6 +876,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 skin_joint_width=int(item.get("skin_joint_width") or 0),
                 uv_set_count=int(item.get("uv_set_count") or 0),
                 color_set_count=int(item.get("color_set_count") or 0),
+                point_attr_count=int(item.get("point_attr_count") or 0),
                 skin_root_node_index=int(item.get("skin_root_node_index") if item.get("skin_root_node_index") is not None else -1),
                 material_name=item.get("material_name") or "",
                 base_color=tuple(item.get("base_color") or (1.0, 1.0, 1.0, 1.0)),
