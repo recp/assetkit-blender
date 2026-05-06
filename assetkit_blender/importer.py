@@ -15,6 +15,8 @@ from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Matrix, Vector
 
 from .assetkit import (
+    AK_PRIMITIVE_LINES,
+    AK_PRIMITIVE_POINTS,
     AssetKit,
     AssetKitSceneData,
     MeshPrimitiveData,
@@ -98,6 +100,9 @@ _ANIM_TEXTURE_TRANSFORM_ROLES = (
 )
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
+_AK_MATERIAL_PHONG = 1
+_AK_MATERIAL_BLINN = 2
+_AK_MATERIAL_LAMBERT = 3
 _AK_MATERIAL_CONSTANT = 4
 _AK_MATERIAL_SPECULAR_GLOSSINESS = 6
 _AK_FILE_TYPE_COLLADA = 1
@@ -933,25 +938,18 @@ def _create_mesh_object(
             uv_layer.data[loop_index].uv = (uv[0], 1.0 - uv[1])
 
     _apply_shading(mesh, shading_mode, data.normals[: len(mesh.loops)] if data.normals else None)
-    _apply_skin_bind_shape(mesh, data)
-
-    active_collection = collection or bpy.context.collection
-    obj = bpy.data.objects.new(data.object_name or data.name, mesh)
-    _set_parent(obj, parent)
-    if apply_transform:
-        _apply_matrix(obj, data)
-    active_collection.objects.link(obj)
-    material = _create_material(data, material_cache)
-    if material:
-        mesh.materials.append(material)
-    _apply_assetkit_extra_props(obj, data)
-    _apply_material_variants(obj, data)
-    _apply_shape_keys(obj, data)
-    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection, skin_cache)
-    if apply_animation:
-        _apply_animation(obj, data)
-
-    return _apply_instancing(obj, data, active_collection)
+    return _finish_mesh_object(
+        mesh,
+        data,
+        parent,
+        node_objects=node_objects,
+        node_data=node_data,
+        material_cache=material_cache,
+        skin_cache=skin_cache,
+        apply_transform=apply_transform,
+        apply_animation=apply_animation,
+        collection=collection,
+    )
 
 
 def _create_mesh_object_bulk(
@@ -967,6 +965,31 @@ def _create_mesh_object_bulk(
     shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
+    if data.primitive_type == AK_PRIMITIVE_LINES:
+        return _create_line_mesh_object_bulk(
+            data,
+            parent,
+            node_objects=node_objects,
+            node_data=node_data,
+            material_cache=material_cache,
+            skin_cache=skin_cache,
+            apply_transform=apply_transform,
+            apply_animation=apply_animation,
+            collection=collection,
+        )
+    if data.primitive_type == AK_PRIMITIVE_POINTS:
+        return _create_point_mesh_object_bulk(
+            data,
+            parent,
+            node_objects=node_objects,
+            node_data=node_data,
+            material_cache=material_cache,
+            skin_cache=skin_cache,
+            apply_transform=apply_transform,
+            apply_animation=apply_animation,
+            collection=collection,
+        )
+
     mesh = bpy.data.meshes.new(data.name)
 
     mesh.vertices.add(data.vertex_count)
@@ -1028,8 +1051,112 @@ def _create_mesh_object_bulk(
     mesh.update(calc_edges=True)
 
     _apply_shading(mesh, shading_mode, _buffer_view(data.normals_f32, "f") if data.normals_f32 else None)
-    _apply_skin_bind_shape(mesh, data)
+    return _finish_mesh_object(
+        mesh,
+        data,
+        parent,
+        node_objects=node_objects,
+        node_data=node_data,
+        material_cache=material_cache,
+        skin_cache=skin_cache,
+        apply_transform=apply_transform,
+        apply_animation=apply_animation,
+        collection=collection,
+    )
 
+
+def _create_line_mesh_object_bulk(
+    data: MeshPrimitiveData,
+    parent: bpy.types.Object | None = None,
+    *,
+    node_objects: dict[int, bpy.types.Object] | None = None,
+    node_data: dict[int, SceneNodeData] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+    skin_cache: dict[object, bpy.types.Object] | None = None,
+    apply_transform: bool = True,
+    apply_animation: bool = True,
+    collection: bpy.types.Collection | None = None,
+) -> list[bpy.types.Object]:
+    mesh = bpy.data.meshes.new(data.name)
+    edge_count = data.loop_count // 2
+
+    mesh.vertices.add(data.vertex_count)
+    mesh.edges.add(edge_count)
+
+    vertices = _buffer_view(data.vertices_f32, "f")
+    indices = _buffer_view(data.indices_u32, "i")
+    if vertices is None or indices is None:
+        raise RuntimeError("AssetKit native bridge returned incomplete line buffers")
+
+    mesh.vertices.foreach_set("co", vertices)
+    if edge_count:
+        mesh.edges.foreach_set("vertices", indices)
+    mesh.update(calc_edges=False)
+
+    return _finish_mesh_object(
+        mesh,
+        data,
+        parent,
+        node_objects=node_objects,
+        node_data=node_data,
+        material_cache=material_cache,
+        skin_cache=skin_cache,
+        apply_transform=apply_transform,
+        apply_animation=apply_animation,
+        collection=collection,
+    )
+
+
+def _create_point_mesh_object_bulk(
+    data: MeshPrimitiveData,
+    parent: bpy.types.Object | None = None,
+    *,
+    node_objects: dict[int, bpy.types.Object] | None = None,
+    node_data: dict[int, SceneNodeData] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+    skin_cache: dict[object, bpy.types.Object] | None = None,
+    apply_transform: bool = True,
+    apply_animation: bool = True,
+    collection: bpy.types.Collection | None = None,
+) -> list[bpy.types.Object]:
+    mesh = bpy.data.meshes.new(data.name)
+
+    mesh.vertices.add(data.vertex_count)
+    vertices = _buffer_view(data.vertices_f32, "f")
+    if vertices is None:
+        raise RuntimeError("AssetKit native bridge returned incomplete point buffers")
+
+    mesh.vertices.foreach_set("co", vertices)
+    mesh.update(calc_edges=False)
+
+    return _finish_mesh_object(
+        mesh,
+        data,
+        parent,
+        node_objects=node_objects,
+        node_data=node_data,
+        material_cache=material_cache,
+        skin_cache=skin_cache,
+        apply_transform=apply_transform,
+        apply_animation=apply_animation,
+        collection=collection,
+    )
+
+
+def _finish_mesh_object(
+    mesh: bpy.types.Mesh,
+    data: MeshPrimitiveData,
+    parent: bpy.types.Object | None = None,
+    *,
+    node_objects: dict[int, bpy.types.Object] | None = None,
+    node_data: dict[int, SceneNodeData] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+    skin_cache: dict[object, bpy.types.Object] | None = None,
+    apply_transform: bool = True,
+    apply_animation: bool = True,
+    collection: bpy.types.Collection | None = None,
+) -> list[bpy.types.Object]:
+    _apply_skin_bind_shape(mesh, data)
     active_collection = collection or bpy.context.collection
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
@@ -2022,11 +2149,16 @@ def _create_material(
         color_target, alpha_socket = _configure_unlit_shader(mat, data.alpha_mode)
         color_input = "Color"
     else:
-        _set_input(bsdf, "Metallic", data.metallic)
-        _set_input(bsdf, "Roughness", data.roughness)
+        if _is_legacy_lit_material(data):
+            _set_input(bsdf, "Metallic", 0.0)
+            _set_input(bsdf, "Roughness", _legacy_roughness(data.specular_strength))
+            _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _legacy_specular(data))
+        else:
+            _set_input(bsdf, "Metallic", data.metallic)
+            _set_input(bsdf, "Roughness", data.roughness)
+            _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
         _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
         _set_first_input(bsdf, ("Emission Strength",), 1.0 if _has_emission(data) else 0.0)
-        _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
         _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
         _set_first_input(bsdf, ("IOR",), data.ior)
         _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
@@ -2494,6 +2626,27 @@ def _has_material_data(data: MeshPrimitiveData) -> bool:
 
 def _is_unlit_material(data: MeshPrimitiveData) -> bool:
     return int(data.material_type) == _AK_MATERIAL_CONSTANT
+
+
+def _is_legacy_lit_material(data: MeshPrimitiveData) -> bool:
+    return int(data.material_type) in {
+        _AK_MATERIAL_PHONG,
+        _AK_MATERIAL_BLINN,
+        _AK_MATERIAL_LAMBERT,
+    }
+
+
+def _legacy_roughness(shininess: float) -> float:
+    value = max(float(shininess), 0.0)
+    if value <= 0.0:
+        return 1.0
+    return max(0.0, min(1.0, math.sqrt(2.0 / (value + 2.0))))
+
+
+def _legacy_specular(data: MeshPrimitiveData) -> float:
+    if int(data.material_type) == _AK_MATERIAL_LAMBERT:
+        return 0.0
+    return max(0.0, min(1.0, max(float(v) for v in data.specular_color)))
 
 
 def _is_double_sided_material(data: MeshPrimitiveData) -> bool:

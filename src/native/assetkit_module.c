@@ -17,7 +17,9 @@
 #include "ak/options.h"
 
 #define AKB_GEOMETRY_MESH 1
+#define AKB_PRIMITIVE_LINES 1
 #define AKB_PRIMITIVE_TRIANGLES 3
+#define AKB_PRIMITIVE_POINTS 4
 #define AKB_INPUT_NORMAL 13
 #define AKB_INPUT_POSITION 16
 #define AKB_INPUT_TANGENT 17
@@ -261,6 +263,8 @@ typedef struct AkbPrimitive {
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
+  uint32_t primitive_type;
+  uint32_t primitive_mode;
   uint32_t uv_set_count;
   uint32_t color_set_count;
   uint32_t texture_info_count;
@@ -334,6 +338,8 @@ typedef struct AkbLoadOptions {
   uint8_t     gen_normals;
   uint8_t     cvt_triangle_strip;
   uint8_t     cvt_triangle_fan;
+  uint8_t     cvt_line_loop;
+  uint8_t     cvt_line_strip;
   uint8_t     use_mmap;
 } AkbLoadOptions;
 
@@ -344,6 +350,8 @@ typedef struct AkbSavedOptions {
   uintptr_t gen_normals;
   uintptr_t cvt_triangle_strip;
   uintptr_t cvt_triangle_fan;
+  uintptr_t cvt_line_loop;
+  uintptr_t cvt_line_strip;
   uintptr_t use_mmap;
 } AkbSavedOptions;
 
@@ -485,9 +493,11 @@ akb_load_options_default(AkbLoadOptions *options) {
   options->target_coord = AK_ZUP;
   options->coord_conversion = AKB_COORD_TRANSFORM;
   options->triangulate = 1;
-  options->gen_normals = 1;
+  options->gen_normals = 0;
   options->cvt_triangle_strip = 1;
   options->cvt_triangle_fan = 1;
+  options->cvt_line_loop = 1;
+  options->cvt_line_strip = 1;
   options->use_mmap = 0;
 }
 
@@ -527,6 +537,14 @@ akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
   if (value)
     options->cvt_triangle_fan = PyObject_IsTrue(value) ? 1 : 0;
 
+  value = PyDict_GetItemString(dict, "convert_line_loop");
+  if (value)
+    options->cvt_line_loop = PyObject_IsTrue(value) ? 1 : 0;
+
+  value = PyDict_GetItemString(dict, "convert_line_strip");
+  if (value)
+    options->cvt_line_strip = PyObject_IsTrue(value) ? 1 : 0;
+
   value = PyDict_GetItemString(dict, "use_mmap");
   if (value)
     options->use_mmap = PyObject_IsTrue(value) ? 1 : 0;
@@ -551,6 +569,8 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   saved->gen_normals = ak_opt_get(AK_OPT_GEN_NORMALS_IF_NEEDED);
   saved->cvt_triangle_strip = ak_opt_get(AK_OPT_CVT_TRIANGLESTRIP);
   saved->cvt_triangle_fan = ak_opt_get(AK_OPT_CVT_TRIANGLEFAN);
+  saved->cvt_line_loop = ak_opt_get(AK_OPT_CVT_LINELOOP);
+  saved->cvt_line_strip = ak_opt_get(AK_OPT_CVT_LINESTRIP);
   saved->use_mmap = ak_opt_get(AK_OPT_USE_MMAP);
 
   ak_opt_set(AK_OPT_COORD, (uintptr_t)options->target_coord);
@@ -560,6 +580,8 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_GEN_NORMALS_IF_NEEDED, options->gen_normals);
   ak_opt_set(AK_OPT_CVT_TRIANGLESTRIP, options->cvt_triangle_strip);
   ak_opt_set(AK_OPT_CVT_TRIANGLEFAN, options->cvt_triangle_fan);
+  ak_opt_set(AK_OPT_CVT_LINELOOP, options->cvt_line_loop);
+  ak_opt_set(AK_OPT_CVT_LINESTRIP, options->cvt_line_strip);
   ak_opt_set(AK_OPT_USE_MMAP, options->use_mmap);
 }
 
@@ -571,6 +593,8 @@ akb_options_restore(const AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_GEN_NORMALS_IF_NEEDED, saved->gen_normals);
   ak_opt_set(AK_OPT_CVT_TRIANGLESTRIP, saved->cvt_triangle_strip);
   ak_opt_set(AK_OPT_CVT_TRIANGLEFAN, saved->cvt_triangle_fan);
+  ak_opt_set(AK_OPT_CVT_LINELOOP, saved->cvt_line_loop);
+  ak_opt_set(AK_OPT_CVT_LINESTRIP, saved->cvt_line_strip);
   ak_opt_set(AK_OPT_USE_MMAP, saved->use_mmap);
 }
 
@@ -616,6 +640,27 @@ akb_find_input(AkMeshPrimitive *prim,
   AkInput *input;
 
   for (input = prim ? prim->input : NULL; input; input = input->next) {
+    if (input->semantic == semantic_a || input->semantic == semantic_b)
+      return input;
+    if ((raw_a && akb_raw_semantic_is(input, raw_a))
+        || (raw_b && akb_raw_semantic_is(input, raw_b)))
+      return input;
+  }
+
+  return NULL;
+}
+
+static AkInput *
+akb_find_input_with_accessor(AkMeshPrimitive *prim,
+                             AkInputSemantic semantic_a,
+                             AkInputSemantic semantic_b,
+                             const char *raw_a,
+                             const char *raw_b) {
+  AkInput *input;
+
+  for (input = prim ? prim->input : NULL; input; input = input->next) {
+    if (!input->accessor || input->accessor->count == 0)
+      continue;
     if (input->semantic == semantic_a || input->semantic == semantic_b)
       return input;
     if ((raw_a && akb_raw_semantic_is(input, raw_a))
@@ -3361,6 +3406,59 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
 }
 
 static int
+akb_primitive_supported(AkMeshPrimitive *prim) {
+  if (!prim)
+    return 0;
+
+  switch (prim->type) {
+    case AKB_PRIMITIVE_TRIANGLES:
+    case AKB_PRIMITIVE_LINES:
+    case AKB_PRIMITIVE_POINTS:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static uint32_t
+akb_primitive_mode(AkMeshPrimitive *prim) {
+  if (!prim)
+    return 0;
+
+  switch (prim->type) {
+    case AKB_PRIMITIVE_TRIANGLES:
+      return (uint32_t)((AkTriangles *)prim)->mode;
+    case AKB_PRIMITIVE_LINES:
+      return (uint32_t)((AkLines *)prim)->mode;
+    default:
+      return 0;
+  }
+}
+
+static uint32_t
+akb_primitive_index_width(AkMeshPrimitive *prim) {
+  if (!prim)
+    return 0;
+
+  switch (prim->type) {
+    case AKB_PRIMITIVE_TRIANGLES:
+      return ((AkTriangles *)prim)->mode == 0
+             || ((AkTriangles *)prim)->mode == AK_TRIANGLES
+             ? 3
+             : 0;
+    case AKB_PRIMITIVE_LINES:
+      return ((AkLines *)prim)->mode == 0
+             || ((AkLines *)prim)->mode == AK_LINES
+             ? 2
+             : 0;
+    case AKB_PRIMITIVE_POINTS:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int
 akb_extract_primitive(AkbPrimitiveList *list,
                       AkbSceneNodeList *nodes,
                       AkDoc *doc,
@@ -3380,16 +3478,28 @@ akb_extract_primitive(AkbPrimitiveList *list,
   uint32_t pos_count = 0;
   uint32_t stride, pos_offset;
   uint32_t i;
+  uint32_t index_width;
   int ok;
   const char *base_name;
 
-  pos_input = prim->pos ? prim->pos
-                        : akb_find_input(prim, AK_INPUT_POSITION, AK_INPUT_POSITION, "POSITION", NULL);
-  if (!pos_input || !pos_input->accessor)
+  index_width = akb_primitive_index_width(prim);
+  if (!index_width)
+    return 1;
+
+  pos_input = prim->pos && prim->pos->accessor && prim->pos->accessor->count > 0
+              ? prim->pos
+              : akb_find_input_with_accessor(prim,
+                                             AK_INPUT_POSITION,
+                                             AK_INPUT_POSITION,
+                                             "POSITION",
+                                             NULL);
+  if (!pos_input || !pos_input->accessor || pos_input->accessor->count == 0)
     return 1;
 
   out.node_index = node_index;
   out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
+  out.primitive_type = (uint32_t)prim->type;
+  out.primitive_mode = akb_primitive_mode(prim);
   out.primitive_extra = ak_extra(prim);
   out.mesh_extra = ak_extra(mesh);
   out.geometry_extra = ak_extra(geom);
@@ -3471,8 +3581,10 @@ akb_extract_primitive(AkbPrimitiveList *list,
       out.indices[i] = i;
   }
 
-  out.loop_count = (out.loop_count / 3) * 3;
-  out.face_count = out.loop_count / 3;
+  out.loop_count = (out.loop_count / index_width) * index_width;
+  out.face_count = out.primitive_type == AKB_PRIMITIVE_TRIANGLES
+                   ? out.loop_count / index_width
+                   : 0;
   if (out.face_count) {
     out.loop_meta = (int32_t *)malloc((size_t)out.face_count * 2 * sizeof(int32_t));
     if (!out.loop_meta) {
@@ -3488,106 +3600,108 @@ akb_extract_primitive(AkbPrimitiveList *list,
     out.loop_totals[i] = 3;
   }
 
-  normal_input = akb_find_input(prim, AK_INPUT_NORMAL, AK_INPUT_NORMAL, "NORMAL", NULL);
-  out.normals = akb_loop_attribute_copy(prim,
-                                        normal_input,
-                                        raw_indices,
-                                        raw_count,
-                                        out.indices,
-                                        out.loop_count,
-                                        3,
-                                        0,
-                                        &out.has_normals);
+  if (out.primitive_type == AKB_PRIMITIVE_TRIANGLES) {
+    normal_input = akb_find_input(prim, AK_INPUT_NORMAL, AK_INPUT_NORMAL, "NORMAL", NULL);
+    out.normals = akb_loop_attribute_copy(prim,
+                                          normal_input,
+                                          raw_indices,
+                                          raw_count,
+                                          out.indices,
+                                          out.loop_count,
+                                          3,
+                                          0,
+                                          &out.has_normals);
 
-  if (!akb_extract_loop_float_attrs(&out,
-                                    prim,
-                                    raw_indices,
-                                    raw_count,
-                                    out.indices,
-                                    out.loop_count,
-                                    AK_INPUT_TEXCOORD,
-                                    AK_INPUT_UV,
-                                    "TEXCOORD",
-                                    "UV",
-                                    2,
-                                    1,
-                                    0.0f,
-                                    "UVMap",
-                                    &out.uv_sets,
-                                    &out.uv_set_count)) {
-    akb_primitive_free(&out);
-    return 0;
-  }
-  if (out.uv_set_count) {
-    out.uvs = out.uv_sets[0].values;
-    out.has_uvs = 1;
-  }
-
-  if (!akb_extract_loop_float_attrs(&out,
-                                    prim,
-                                    raw_indices,
-                                    raw_count,
-                                    out.indices,
-                                    out.loop_count,
-                                    AK_INPUT_COLOR,
-                                    AK_INPUT_COLOR,
-                                    "COLOR",
-                                    NULL,
-                                    4,
-                                    0,
-                                    1.0f,
-                                    "Color",
-                                    &out.color_sets,
-                                    &out.color_set_count)) {
-    akb_primitive_free(&out);
-    return 0;
-  }
-  if (out.color_set_count) {
-    out.colors = out.color_sets[0].values;
-    out.has_colors = 1;
-  }
-
-  tangent_input = akb_find_input(prim,
-                                 AK_INPUT_TANGENT,
-                                 AK_INPUT_TEXTANGENT,
-                                 "TANGENT",
-                                 "TEXTANGENT");
-  out.tangents = akb_loop_attribute_copy(prim,
-                                         tangent_input,
-                                         raw_indices,
-                                         raw_count,
-                                         out.indices,
-                                         out.loop_count,
-                                         4,
-                                         0,
-                                         &out.has_tangents);
-  if (out.tangents && tangent_input && tangent_input->accessor)
-    akb_fill_missing_components(out.tangents,
-                                out.loop_count,
-                                4,
-                                tangent_input->accessor->componentCount,
-                                1.0f);
-
-  if (node && node->geometry && node->geometry->morpher) {
-    if (!akb_extract_morph_targets(&out,
-                                   geom,
-                                   mesh,
-                                   prim,
-                                   prim_index,
-                                   node->geometry->morpher)) {
+    if (!akb_extract_loop_float_attrs(&out,
+                                      prim,
+                                      raw_indices,
+                                      raw_count,
+                                      out.indices,
+                                      out.loop_count,
+                                      AK_INPUT_TEXCOORD,
+                                      AK_INPUT_UV,
+                                      "TEXCOORD",
+                                      "UV",
+                                      2,
+                                      1,
+                                      0.0f,
+                                      "UVMap",
+                                      &out.uv_sets,
+                                      &out.uv_set_count)) {
       akb_primitive_free(&out);
       return 0;
     }
-  }
+    if (out.uv_set_count) {
+      out.uvs = out.uv_sets[0].values;
+      out.has_uvs = 1;
+    }
 
-  if (node && node->geometry && node->geometry->skinner) {
-    if (!akb_extract_skin(&out,
-                          nodes,
-                          prim,
-                          prim_index,
-                          node->geometry->skinner)) {
+    if (!akb_extract_loop_float_attrs(&out,
+                                      prim,
+                                      raw_indices,
+                                      raw_count,
+                                      out.indices,
+                                      out.loop_count,
+                                      AK_INPUT_COLOR,
+                                      AK_INPUT_COLOR,
+                                      "COLOR",
+                                      NULL,
+                                      4,
+                                      0,
+                                      1.0f,
+                                      "Color",
+                                      &out.color_sets,
+                                      &out.color_set_count)) {
       akb_primitive_free(&out);
       return 0;
+    }
+    if (out.color_set_count) {
+      out.colors = out.color_sets[0].values;
+      out.has_colors = 1;
+    }
+
+    tangent_input = akb_find_input(prim,
+                                   AK_INPUT_TANGENT,
+                                   AK_INPUT_TEXTANGENT,
+                                   "TANGENT",
+                                   "TEXTANGENT");
+    out.tangents = akb_loop_attribute_copy(prim,
+                                           tangent_input,
+                                           raw_indices,
+                                           raw_count,
+                                           out.indices,
+                                           out.loop_count,
+                                           4,
+                                           0,
+                                           &out.has_tangents);
+    if (out.tangents && tangent_input && tangent_input->accessor)
+      akb_fill_missing_components(out.tangents,
+                                  out.loop_count,
+                                  4,
+                                  tangent_input->accessor->componentCount,
+                                  1.0f);
+
+    if (node && node->geometry && node->geometry->morpher) {
+      if (!akb_extract_morph_targets(&out,
+                                     geom,
+                                     mesh,
+                                     prim,
+                                     prim_index,
+                                     node->geometry->morpher)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
+    }
+
+    if (node && node->geometry && node->geometry->skinner) {
+      if (!akb_extract_skin(&out,
+                            nodes,
+                            prim,
+                            prim_index,
+                            node->geometry->skinner)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
     }
   }
 
@@ -3625,7 +3739,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
 
   mesh = (AkMesh *)ak_objGet(gdata);
   for (prim = mesh->primitive; prim; prim = prim->next, prim_index++) {
-    if (prim->type != AKB_PRIMITIVE_TRIANGLES)
+    if (!akb_primitive_supported(prim))
       continue;
     if (!akb_extract_primitive(list,
                                nodes,
@@ -4244,6 +4358,8 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("vertex_count", PyLong_FromUnsignedLong(prim->vertex_count));
   AKB_SET_OBJ("loop_count", PyLong_FromUnsignedLong(prim->loop_count));
   AKB_SET_OBJ("face_count", PyLong_FromUnsignedLong(prim->face_count));
+  AKB_SET_OBJ("primitive_type", PyLong_FromUnsignedLong(prim->primitive_type));
+  AKB_SET_OBJ("primitive_mode", PyLong_FromUnsignedLong(prim->primitive_mode));
   AKB_SET_OBJ("material_name", akb_unicode_from_cstr(prim->material_name));
   AKB_SET_OBJ("base_color", Py_BuildValue("(ffff)",
                                           prim->base_color[0],

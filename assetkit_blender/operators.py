@@ -47,8 +47,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     )
     generate_normals: bpy.props.BoolProperty(
         name="Generate Normals",
-        description="Generate normals when the source mesh does not provide them",
-        default=True,
+        description="Ask AssetKit to generate missing normals before Blender creates the mesh",
+        default=False,
     )
     mesh_shading: bpy.props.EnumProperty(
         name="Shading",
@@ -68,6 +68,16 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     convert_triangle_fan: bpy.props.BoolProperty(
         name="Convert Triangle Fans",
         description="Convert triangle fan primitives to triangles",
+        default=True,
+    )
+    convert_line_loop: bpy.props.BoolProperty(
+        name="Convert Line Loops",
+        description="Convert line loop primitives to Blender line edges",
+        default=True,
+    )
+    convert_line_strip: bpy.props.BoolProperty(
+        name="Convert Line Strips",
+        description="Convert line strip primitives to Blender line edges",
         default=True,
     )
     build_mode: bpy.props.EnumProperty(
@@ -156,7 +166,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 
             if isinstance(result, list):
                 if not result:
-                    self.report({"WARNING"}, "AssetKit loaded the file but no triangle meshes were imported")
+                    self.report({"WARNING"}, "AssetKit loaded the file but no importable mesh primitives were found")
                 else:
                     self.report({"INFO"}, f"Imported {len(result)} mesh object(s) through AssetKit")
             else:
@@ -203,7 +213,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
 
         if not objects:
-            self.report({"WARNING"}, "AssetKit loaded the file but no triangle meshes were imported")
+            self.report({"WARNING"}, "AssetKit loaded the file but no importable mesh primitives were found")
             return {"FINISHED"}
 
         self.report({"INFO"}, f"Imported {len(objects)} mesh object(s) through AssetKit")
@@ -226,6 +236,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         mesh_box.prop(self, "generate_normals")
         mesh_box.prop(self, "convert_triangle_strip")
         mesh_box.prop(self, "convert_triangle_fan")
+        mesh_box.prop(self, "convert_line_loop")
+        mesh_box.prop(self, "convert_line_strip")
 
         load_box = layout.box()
         load_box.label(text="Loading")
@@ -252,6 +264,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             "generate_normals": self.generate_normals,
             "convert_triangle_strip": self.convert_triangle_strip,
             "convert_triangle_fan": self.convert_triangle_fan,
+            "convert_line_loop": self.convert_line_loop,
+            "convert_line_strip": self.convert_line_strip,
         }
 
 

@@ -10,7 +10,9 @@ from typing import Iterable, Iterator, Optional
 AK_OK = 0
 AK_FILE_TYPE_AUTO = 0
 AK_GEOMETRY_MESH = 1
+AK_PRIMITIVE_LINES = 1
 AK_PRIMITIVE_TRIANGLES = 3
+AK_PRIMITIVE_POINTS = 4
 AK_INPUT_NORMAL = 13
 AK_INPUT_POSITION = 16
 AK_INPUT_TEXCOORD = 19
@@ -256,6 +258,8 @@ class MeshPrimitiveData:
     vertex_count: int = 0
     loop_count: int = 0
     face_count: int = 0
+    primitive_type: int = AK_PRIMITIVE_TRIANGLES
+    primitive_mode: int = 0
     vertices_f32: object = b""
     indices_u32: object = b""
     loop_starts_i32: object = b""
@@ -811,6 +815,8 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 vertex_count=int(item.get("vertex_count") or 0),
                 loop_count=int(item.get("loop_count") or 0),
                 face_count=int(item.get("face_count") or 0),
+                primitive_type=int(item.get("primitive_type") or AK_PRIMITIVE_TRIANGLES),
+                primitive_mode=int(item.get("primitive_mode") or 0),
                 vertices_f32=item.get("vertices_f32") or b"",
                 indices_u32=item.get("indices_u32") or b"",
                 loop_starts_i32=item.get("loop_starts_i32") or b"",
