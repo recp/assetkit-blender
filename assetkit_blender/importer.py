@@ -2206,6 +2206,7 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
         "opacity": _raw_float(raw, "opacity", data.opacity),
         "normal_scale": _raw_float(raw, "normal_scale", data.normal_scale),
         "occlusion_strength": _raw_float(raw, "occlusion_strength", data.occlusion_strength),
+        "emissive_strength": _raw_float(raw, "emissive_strength", data.emissive_strength),
         "specular_strength": _raw_float(raw, "specular_strength", data.specular_strength),
         "ior": _raw_float(raw, "ior", data.ior),
         "clearcoat": _raw_float(raw, "clearcoat", data.clearcoat),
@@ -2354,7 +2355,7 @@ def _create_material(
             _set_input(bsdf, "Roughness", data.roughness)
             _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _pbr_specular_level(data))
         _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
-        _set_first_input(bsdf, ("Emission Strength",), 1.0 if _has_emission(data) else 0.0)
+        _set_first_input(bsdf, ("Emission Strength",), _emission_strength(data))
         _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
         _set_first_input(bsdf, ("IOR",), _material_ior(data))
         _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
@@ -2933,6 +2934,10 @@ def _has_emission(data: MeshPrimitiveData) -> bool:
     return any(abs(float(value)) > 1e-6 for value in data.emissive_color)
 
 
+def _emission_strength(data: MeshPrimitiveData) -> float:
+    return float(data.emissive_strength) if _has_emission(data) else 0.0
+
+
 def _material_cache_key(data: MeshPrimitiveData) -> object:
     color_attr = _color_attribute_name(data)
     return (
@@ -2953,6 +2958,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         round(float(data.transparent_amount), 6),
         round(float(data.normal_scale), 6),
         round(float(data.occlusion_strength), 6),
+        round(float(data.emissive_strength), 6),
         round(float(data.specular_strength), 6),
         round(float(data.ior), 6),
         round(float(data.clearcoat), 6),
@@ -3017,6 +3023,7 @@ def _default_material_cache_key() -> object:
         1.0,
         1.0,
         0.5,
+        1.0,
         1.0,
         1.0,
         1.0,
@@ -3149,6 +3156,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_opacity": data.opacity,
         "assetkit_normal_scale": data.normal_scale,
         "assetkit_occlusion_strength": data.occlusion_strength,
+        "assetkit_emissive_strength": data.emissive_strength,
         "assetkit_clearcoat_normal_scale": data.clearcoat_normal_scale,
         "assetkit_material_type": data.material_type,
         "assetkit_file_type": data.file_type,

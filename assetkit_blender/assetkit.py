@@ -322,6 +322,7 @@ class MeshPrimitiveData:
     opacity: float = 1.0
     normal_scale: float = 1.0
     occlusion_strength: float = 1.0
+    emissive_strength: float = 1.0
     specular_strength: float = 1.0
     ior: float = 1.5
     clearcoat: float = 0.0
@@ -893,6 +894,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 opacity=float(item.get("opacity") if item.get("opacity") is not None else 1.0),
                 normal_scale=float(item.get("normal_scale") if item.get("normal_scale") is not None else 1.0),
                 occlusion_strength=float(item.get("occlusion_strength") if item.get("occlusion_strength") is not None else 1.0),
+                emissive_strength=float(item.get("emissive_strength") if item.get("emissive_strength") is not None else 1.0),
                 specular_strength=float(item.get("specular_strength") if item.get("specular_strength") is not None else 1.0),
                 ior=float(item.get("ior") if item.get("ior") is not None else 1.5),
                 clearcoat=float(item.get("clearcoat") if item.get("clearcoat") is not None else 0.0),

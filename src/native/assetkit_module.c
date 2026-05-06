@@ -241,6 +241,7 @@ typedef struct AkbPrimitive {
   float    opacity;
   float    normal_scale;
   float    occlusion_strength;
+  float    emissive_strength;
   float    specular_strength;
   float    ior;
   float    clearcoat;
@@ -1038,6 +1039,7 @@ akb_extract_material(AkDoc *doc,
   out->opacity = 1.0f;
   out->normal_scale = 1.0f;
   out->occlusion_strength = 1.0f;
+  out->emissive_strength = 1.0f;
   out->specular_strength = 1.0f;
   out->ior = 1.5f;
   out->clearcoat_normal_scale = 1.0f;
@@ -1222,10 +1224,11 @@ akb_extract_material(AkDoc *doc,
     out->dispersion = cmn->dispersion->dispersion;
 
   if (cmn->emission) {
+    out->emissive_strength = cmn->emission->strength;
     if (cmn->emission->color.color) {
-      out->emissive_color[0] = cmn->emission->color.color->vec[0] * cmn->emission->strength;
-      out->emissive_color[1] = cmn->emission->color.color->vec[1] * cmn->emission->strength;
-      out->emissive_color[2] = cmn->emission->color.color->vec[2] * cmn->emission->strength;
+      out->emissive_color[0] = cmn->emission->color.color->vec[0];
+      out->emissive_color[1] = cmn->emission->color.color->vec[1];
+      out->emissive_color[2] = cmn->emission->color.color->vec[2];
     }
     AKB_COPY_TEX("emissive", cmn->emission->color.texture, out->emissive_texture);
   }
@@ -4590,6 +4593,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("opacity", PyFloat_FromDouble(prim->opacity));
   AKB_SET_OBJ("normal_scale", PyFloat_FromDouble(prim->normal_scale));
   AKB_SET_OBJ("occlusion_strength", PyFloat_FromDouble(prim->occlusion_strength));
+  AKB_SET_OBJ("emissive_strength", PyFloat_FromDouble(prim->emissive_strength));
   AKB_SET_OBJ("specular_strength", PyFloat_FromDouble(prim->specular_strength));
   AKB_SET_OBJ("ior", PyFloat_FromDouble(prim->ior));
   AKB_SET_OBJ("clearcoat", PyFloat_FromDouble(prim->clearcoat));
