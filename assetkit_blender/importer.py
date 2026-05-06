@@ -214,6 +214,7 @@ def _begin_scene_build(
         "node_objects": node_objects,
         "node_data": {index: node for index, node in enumerate(scene_nodes)},
         "material_cache": {},
+        "skin_cache": {},
     }
 
 
@@ -233,6 +234,7 @@ def _create_import_object(
         node_objects=node_objects,
         node_data=state["node_data"],
         material_cache=state["material_cache"],
+        skin_cache=state["skin_cache"],
         apply_transform=not use_node_parent,
         apply_animation=not use_node_parent,
         shading_mode=shading_mode,
@@ -817,7 +819,8 @@ def _create_mesh_object(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
-    material_cache: dict[str, bpy.types.Material] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+    skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
     shading_mode: str = "AUTO",
@@ -830,6 +833,7 @@ def _create_mesh_object(
             node_objects=node_objects,
             node_data=node_data,
             material_cache=material_cache,
+            skin_cache=skin_cache,
             apply_transform=apply_transform,
             apply_animation=apply_animation,
             shading_mode=shading_mode,
@@ -858,7 +862,7 @@ def _create_mesh_object(
         mesh.materials.append(material)
     _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
-    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection)
+    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection, skin_cache)
     if apply_animation:
         _apply_animation(obj, data)
 
@@ -871,7 +875,8 @@ def _create_mesh_object_bulk(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
-    material_cache: dict[str, bpy.types.Material] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+    skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
     shading_mode: str = "AUTO",
@@ -948,7 +953,7 @@ def _create_mesh_object_bulk(
         mesh.materials.append(material)
     _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
-    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection)
+    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection, skin_cache)
     if apply_animation:
         _apply_animation(obj, data)
 
@@ -1119,12 +1124,16 @@ def _matrix_from_buffer(buffer: object) -> Matrix | None:
     if values is None or len(values) != 16:
         return None
 
+    return _matrix_from_values(values, 0)
+
+
+def _matrix_from_values(values: memoryview, offset: int) -> Matrix:
     return Matrix(
         (
-            (values[0], values[4], values[8], values[12]),
-            (values[1], values[5], values[9], values[13]),
-            (values[2], values[6], values[10], values[14]),
-            (values[3], values[7], values[11], values[15]),
+            (values[offset], values[offset + 4], values[offset + 8], values[offset + 12]),
+            (values[offset + 1], values[offset + 5], values[offset + 9], values[offset + 13]),
+            (values[offset + 2], values[offset + 6], values[offset + 10], values[offset + 14]),
+            (values[offset + 3], values[offset + 7], values[offset + 11], values[offset + 15]),
         )
     )
 
@@ -1279,6 +1288,7 @@ def _apply_skin(
     node_objects: dict[int, bpy.types.Object],
     node_data: dict[int, SceneNodeData],
     collection: bpy.types.Collection,
+    skin_cache: dict[object, bpy.types.Object] | None = None,
 ) -> None:
     if not data.has_skin or data.skin_vertex_count <= 0 or data.skin_joint_count <= 0:
         return
@@ -1292,13 +1302,31 @@ def _apply_skin(
     width = max(1, int(data.skin_joint_width or 4))
     vertex_count = min(data.skin_vertex_count, len(obj.data.vertices))
     joint_names = _create_skin_vertex_groups(obj, data, joints, weights, vertex_count, width, joint_nodes, node_objects)
-    armature = _create_skin_armature(obj, joint_names, joint_nodes, node_objects, node_data, collection)
+    cache_key = _skin_cache_key(data, joint_nodes, obj)
+    armature = skin_cache.get(cache_key) if skin_cache is not None else None
+    if armature is None:
+        armature = _create_skin_armature(obj, data, joint_names, joint_nodes, node_objects, node_data, collection)
+        if armature and skin_cache is not None:
+            skin_cache[cache_key] = armature
     if not armature:
         return
 
     modifier = obj.modifiers.new("AssetKit Skin", "ARMATURE")
     modifier.object = armature
     modifier.use_vertex_groups = True
+
+
+def _skin_cache_key(
+    data: MeshPrimitiveData,
+    joint_nodes: memoryview,
+    obj: bpy.types.Object,
+) -> object:
+    count = min(len(joint_nodes), int(data.skin_joint_count))
+    return (
+        id(obj.parent),
+        int(data.skin_root_node_index),
+        tuple(int(joint_nodes[index]) for index in range(count)),
+    )
 
 
 def _create_skin_vertex_groups(
@@ -1334,6 +1362,7 @@ def _create_skin_vertex_groups(
 
 def _create_skin_armature(
     obj: bpy.types.Object,
+    data: MeshPrimitiveData,
     joint_names: list[str],
     joint_nodes: memoryview,
     node_objects: dict[int, bpy.types.Object],
@@ -1359,7 +1388,12 @@ def _create_skin_armature(
     bpy.ops.object.mode_set(mode="EDIT")
 
     edit_bones = armature_data.edit_bones
-    positions = _joint_positions(joint_nodes, node_objects, armature.parent)
+    rest_matrices = _joint_rest_matrices(data, joint_nodes, armature)
+    positions = (
+        [matrix.to_translation() for matrix in rest_matrices]
+        if rest_matrices
+        else _joint_positions(joint_nodes, node_objects, armature)
+    )
     node_to_joint = {
         int(joint_nodes[index]): index
         for index in range(min(len(joint_nodes), len(joint_names)))
@@ -1368,10 +1402,17 @@ def _create_skin_armature(
 
     for index, name in enumerate(joint_names):
         bone = edit_bones.new(name)
-        head = positions[index]
-        tail = _joint_tail(index, joint_nodes, node_objects, node_to_joint, positions)
-        bone.head = head
-        bone.tail = tail
+        if rest_matrices:
+            _set_bone_from_rest_matrix(
+                bone,
+                rest_matrices[index],
+                _joint_length(index, joint_nodes, node_objects, node_to_joint, positions),
+            )
+        else:
+            head = positions[index]
+            tail = _joint_tail(index, joint_nodes, node_objects, node_to_joint, positions)
+            bone.head = head
+            bone.tail = tail
 
     for index, name in enumerate(joint_names):
         node_index = int(joint_nodes[index]) if index < len(joint_nodes) else -1
@@ -1397,6 +1438,45 @@ def _create_skin_armature(
         selected.select_set(True)
     bpy.context.view_layer.objects.active = previous_active
     return armature
+
+
+def _joint_rest_matrices(
+    data: MeshPrimitiveData,
+    joint_nodes: memoryview,
+    armature: bpy.types.Object,
+) -> list[Matrix]:
+    values = _buffer_view(data.skin_inverse_bind_matrices_f32, "f")
+    if values is None or len(values) < len(joint_nodes) * 16:
+        return []
+
+    coord_matrix = _matrix_from_buffer(data.coord_matrix_f32) or Matrix.Identity(4)
+    world_to_armature = armature.matrix_world.inverted_safe()
+    matrices = []
+    for index in range(len(joint_nodes)):
+        inverse_bind = _matrix_from_values(values, index * 16)
+        bind_world = coord_matrix @ inverse_bind.inverted_safe()
+        matrices.append(world_to_armature @ bind_world)
+    return matrices
+
+
+def _set_bone_from_rest_matrix(
+    bone: bpy.types.EditBone,
+    matrix: Matrix,
+    length: float,
+) -> None:
+    head = matrix.to_translation()
+    basis = matrix.to_3x3()
+    direction = basis @ Vector((0.0, 1.0, 0.0))
+    roll_axis = basis @ Vector((0.0, 0.0, 1.0))
+    if direction.length <= 1.0e-5:
+        direction = Vector((0.0, 1.0, 0.0))
+    bone.head = head
+    bone.tail = head + direction.normalized() * max(length, 0.004)
+    if roll_axis.length > 1.0e-5:
+        try:
+            bone.align_roll(roll_axis.normalized())
+        except Exception:
+            pass
 
 
 def _bind_pose_bones_to_nodes(
@@ -1433,17 +1513,39 @@ def _match_object_space(target: bpy.types.Object, source: bpy.types.Object) -> N
 def _joint_positions(
     joint_nodes: memoryview,
     node_objects: dict[int, bpy.types.Object],
-    parent: bpy.types.Object | None,
+    armature: bpy.types.Object,
 ) -> list[Vector]:
     positions = []
-    world_to_parent = parent.matrix_world.inverted_safe() if parent else Matrix.Identity(4)
+    world_to_armature = armature.matrix_world.inverted_safe()
     for index in range(len(joint_nodes)):
         node = node_objects.get(int(joint_nodes[index]))
         if node:
-            positions.append(world_to_parent @ node.matrix_world.to_translation())
+            positions.append(world_to_armature @ node.matrix_world.to_translation())
         else:
             positions.append(Vector((0.0, float(index) * 0.05, 0.0)))
     return positions
+
+
+def _joint_length(
+    joint_index: int,
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    node_to_joint: dict[int, int],
+    positions: list[Vector],
+) -> float:
+    head = positions[joint_index]
+    node = node_objects.get(int(joint_nodes[joint_index])) if joint_index < len(joint_nodes) else None
+    if node:
+        length: float | None = None
+        for child_node_index, child_joint_index in node_to_joint.items():
+            child = node_objects.get(child_node_index)
+            if child and child.parent == node and child_joint_index < len(positions):
+                child_length = (positions[child_joint_index] - head).length
+                if child_length > 1.0e-5:
+                    length = child_length if length is None else min(length, child_length)
+        if length is not None:
+            return length
+    return 0.05
 
 
 def _joint_tail(
@@ -1580,15 +1682,17 @@ def _apply_material_variants(obj: bpy.types.Object, data: MeshPrimitiveData) -> 
 
 def _create_material(
     data: MeshPrimitiveData,
-    material_cache: dict[str, bpy.types.Material] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
 ) -> bpy.types.Material | None:
-    if not data.material_name:
+    if not _has_material_data(data):
         return None
 
-    if material_cache is not None and data.material_name in material_cache:
-        return material_cache[data.material_name]
+    cache_key = _material_cache_key(data)
+    if material_cache is not None and cache_key in material_cache:
+        return material_cache[cache_key]
 
-    mat = bpy.data.materials.get(data.material_name) or bpy.data.materials.new(data.material_name)
+    material_name = data.material_name or f"{data.name}_Material"
+    mat = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
     mat.use_nodes = True
     mat.use_backface_culling = not data.double_sided
     if data.alpha_mode == 1:
@@ -1600,7 +1704,7 @@ def _create_material(
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     if not bsdf:
         if material_cache is not None:
-            material_cache[data.material_name] = mat
+            material_cache[cache_key] = mat
         return mat
 
     _set_input(bsdf, "Base Color", data.base_color)
@@ -1748,8 +1852,118 @@ def _create_material(
         )
 
     if material_cache is not None:
-        material_cache[data.material_name] = mat
+        material_cache[cache_key] = mat
     return mat
+
+
+def _has_material_data(data: MeshPrimitiveData) -> bool:
+    if data.material_name:
+        return True
+    return _material_cache_key(data) != _default_material_cache_key()
+
+
+def _material_cache_key(data: MeshPrimitiveData) -> object:
+    if data.material_name:
+        return ("name", data.material_name)
+    return (
+        "props",
+        _round_tuple(data.base_color),
+        _round_tuple(data.emissive_color),
+        _round_tuple(data.specular_color),
+        _round_tuple(data.sheen_color),
+        _round_tuple(data.transparent_color),
+        _round_tuple(data.volume_attenuation_color),
+        _round_tuple(data.diffuse_transmission_color),
+        round(float(data.metallic), 6),
+        round(float(data.roughness), 6),
+        round(float(data.opacity), 6),
+        round(float(data.alpha_cutoff), 6),
+        round(float(data.transparent_amount), 6),
+        round(float(data.normal_scale), 6),
+        round(float(data.occlusion_strength), 6),
+        round(float(data.specular_strength), 6),
+        round(float(data.ior), 6),
+        round(float(data.clearcoat), 6),
+        round(float(data.clearcoat_roughness), 6),
+        round(float(data.clearcoat_normal_scale), 6),
+        round(float(data.transmission), 6),
+        round(float(data.sheen_roughness), 6),
+        round(float(data.iridescence), 6),
+        round(float(data.iridescence_ior), 6),
+        round(float(data.iridescence_thickness_minimum), 6),
+        round(float(data.iridescence_thickness_maximum), 6),
+        round(float(data.volume_thickness), 6),
+        round(float(data.volume_attenuation_distance), 6),
+        round(float(data.anisotropy), 6),
+        round(float(data.anisotropy_rotation), 6),
+        round(float(data.diffuse_transmission), 6),
+        round(float(data.dispersion), 6),
+        int(data.alpha_mode),
+        bool(data.double_sided),
+        data.base_color_texture,
+        data.metallic_roughness_texture,
+        data.occlusion_texture,
+        data.normal_texture,
+        data.emissive_texture,
+        data.transparent_texture,
+        data.specular_texture,
+        data.specular_color_texture,
+        data.clearcoat_texture,
+        data.clearcoat_roughness_texture,
+        data.clearcoat_normal_texture,
+        data.transmission_texture,
+        data.sheen_color_texture,
+        data.sheen_roughness_texture,
+        data.iridescence_texture,
+        data.iridescence_thickness_texture,
+        data.volume_thickness_texture,
+        data.anisotropy_texture,
+        data.diffuse_transmission_texture,
+    )
+
+
+def _default_material_cache_key() -> object:
+    return (
+        "props",
+        (1.0, 1.0, 1.0, 1.0),
+        (0.0, 0.0, 0.0),
+        (1.0, 1.0, 1.0),
+        (0.0, 0.0, 0.0),
+        (1.0, 1.0, 1.0, 1.0),
+        (1.0, 1.0, 1.0),
+        (1.0, 1.0, 1.0),
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.5,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.3,
+        100.0,
+        400.0,
+        0.0,
+        1000000.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0,
+        False,
+        *(("",) * 19),
+    )
+
+
+def _round_tuple(values: tuple[float, ...]) -> tuple[float, ...]:
+    return tuple(round(float(value), 6) for value in values)
 
 
 def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
