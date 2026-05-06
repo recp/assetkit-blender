@@ -16,10 +16,10 @@
 #include "ak/assetkit.h"
 #include "ak/options.h"
 
-#define AKB_GEOMETRY_MESH 1
-#define AKB_PRIMITIVE_LINES 1
-#define AKB_PRIMITIVE_TRIANGLES 3
-#define AKB_PRIMITIVE_POINTS 4
+#define AKB_GEOMETRY_MESH AK_GEOMETRY_MESH
+#define AKB_PRIMITIVE_LINES AK_PRIMITIVE_LINES
+#define AKB_PRIMITIVE_TRIANGLES AK_PRIMITIVE_TRIANGLES
+#define AKB_PRIMITIVE_POINTS AK_PRIMITIVE_POINTS
 #define AKB_INPUT_NORMAL 13
 #define AKB_INPUT_POSITION 16
 #define AKB_INPUT_TANGENT 17
@@ -2334,6 +2334,56 @@ akb_animation_push(AkbAnimation *animation, AkbAnimChannel *channel) {
 }
 
 static int
+akb_animation_extract_cubic_values(float **values_io,
+                                   uint32_t *value_count_io,
+                                   uint8_t *borrowed_io,
+                                   uint32_t time_count,
+                                   uint32_t read_width,
+                                   uint32_t value_width) {
+  float *src;
+  float *dst;
+  uint32_t sample_width;
+  uint32_t expected_count;
+  uint32_t compact_count;
+  uint32_t i;
+
+  if (!values_io || !*values_io || !value_count_io || !borrowed_io
+      || !time_count || !read_width || !value_width)
+    return 1;
+
+  sample_width = (read_width == 1 && value_width > 1) ? value_width : read_width;
+  expected_count = time_count * 3;
+  if (read_width == 1 && value_width > 1)
+    expected_count *= value_width;
+
+  if (*value_count_io != expected_count)
+    return 1;
+
+  compact_count = time_count * sample_width;
+  src = *values_io;
+  if (*borrowed_io) {
+    dst = (float *)malloc((size_t)compact_count * sizeof(float));
+    if (!dst)
+      return 0;
+    *borrowed_io = 0;
+  } else {
+    dst = src;
+  }
+
+  for (i = 0; i < time_count; i++) {
+    memmove(&dst[(size_t)i * sample_width],
+            &src[((size_t)i * 3 + 1) * sample_width],
+            (size_t)sample_width * sizeof(float));
+  }
+
+  *values_io = dst;
+  *value_count_io = (read_width == 1 && value_width > 1)
+                    ? compact_count
+                    : time_count;
+  return 1;
+}
+
+static int
 akb_animation_convert_values(AkbAnimChannel *out,
                              float *raw_values,
                              uint32_t raw_count,
@@ -2469,6 +2519,20 @@ akb_animation_add_channel(AkbAnimation *animation,
         free(out.times);
       return 0;
     }
+  }
+
+  if (sampler->uniInterpolation == AK_INTERPOLATION_HERMITE
+      && !akb_animation_extract_cubic_values(&raw_values,
+                                             &value_count,
+                                             &raw_borrowed,
+                                             time_count,
+                                             read_width,
+                                             out.value_width)) {
+    if (!out.borrowed_times)
+      free(out.times);
+    if (!raw_borrowed)
+      free(raw_values);
+    return 0;
   }
 
   logical_value_count = value_count;
@@ -3942,6 +4006,9 @@ akb_extract_mesh(AkbPrimitiveList *list,
     return 1;
 
   mesh = (AkMesh *)ak_objGet(gdata);
+  if (!mesh)
+    return 1;
+
   for (prim = mesh->primitive; prim; prim = prim->next, prim_index++) {
     if (!akb_primitive_supported(prim))
       continue;
