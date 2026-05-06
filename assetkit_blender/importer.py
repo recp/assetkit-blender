@@ -108,6 +108,14 @@ _AK_MATERIAL_LAMBERT = 3
 _AK_MATERIAL_CONSTANT = 4
 _AK_MATERIAL_SPECULAR_GLOSSINESS = 6
 _AK_FILE_TYPE_COLLADA = 1
+_GLTF_SETTINGS_GROUP_NAME = "glTF Material Output"
+_GLTF_SETTINGS_SOCKETS = (
+    ("Occlusion", 1.0),
+    ("Thickness", 0.0),
+    ("Dispersion", 0.0),
+    ("Iridescence Factor", 0.0),
+    ("Iridescence Thickness Minimum", 100.0),
+)
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_TIME_BUDGET = 0.025
 _AUTO_PROGRESSIVE_MESH_COUNT = 128
@@ -2325,6 +2333,7 @@ def _create_material(
     _set_assetkit_material_props(mat, data)
     _set_assetkit_json_prop(mat, "assetkit_material_extra_json", data.material_extra)
     _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
+    settings_node = _ensure_gltf_settings_node(mat, data)
 
     if data.base_color_texture or color_attr:
         _link_base_color(mat, color_target, data, color_attr, color_input, alpha_socket)
@@ -2336,7 +2345,7 @@ def _create_material(
             _texture_info(data, "metallic_roughness"),
         )
     if data.occlusion_texture and bsdf == color_target:
-        _link_occlusion_texture(mat, bsdf, data)
+        _link_occlusion_texture(mat, bsdf, data, settings_node)
     if data.normal_texture:
         _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale, _texture_info(data, "normal"))
     if data.emissive_texture:
@@ -2447,27 +2456,51 @@ def _create_material(
             tex_info=_texture_info(data, "iridescence_thickness"),
         )
     if data.iridescence_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.iridescence_texture,
-            ("Thin Film Weight", "Iridescence Weight", "Iridescence"),
-            colorspace="Non-Color",
-            channel="Red",
-            factor=data.iridescence,
-            tex_info=_texture_info(data, "iridescence"),
-        )
+        if settings_node:
+            _link_factor_texture(
+                mat,
+                settings_node,
+                data.iridescence_texture,
+                ("Iridescence Factor",),
+                colorspace="Non-Color",
+                channel="Red",
+                factor=data.iridescence,
+                tex_info=_texture_info(data, "iridescence"),
+            )
+        else:
+            _link_factor_texture(
+                mat,
+                bsdf,
+                data.iridescence_texture,
+                ("Thin Film Weight", "Iridescence Weight", "Iridescence"),
+                colorspace="Non-Color",
+                channel="Red",
+                factor=data.iridescence,
+                tex_info=_texture_info(data, "iridescence"),
+            )
     if data.volume_thickness_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.volume_thickness_texture,
-            ("Volume Thickness", "Thickness"),
-            colorspace="Non-Color",
-            channel="Green",
-            factor=data.volume_thickness,
-            tex_info=_texture_info(data, "volume_thickness"),
-        )
+        if settings_node:
+            _link_factor_texture(
+                mat,
+                settings_node,
+                data.volume_thickness_texture,
+                ("Thickness",),
+                colorspace="Non-Color",
+                channel="Green",
+                factor=data.volume_thickness,
+                tex_info=_texture_info(data, "volume_thickness"),
+            )
+        else:
+            _link_factor_texture(
+                mat,
+                bsdf,
+                data.volume_thickness_texture,
+                ("Volume Thickness", "Thickness"),
+                colorspace="Non-Color",
+                channel="Green",
+                factor=data.volume_thickness,
+                tex_info=_texture_info(data, "volume_thickness"),
+            )
     if data.anisotropy_texture:
         _link_factor_texture(
             mat,
@@ -2503,7 +2536,7 @@ def _create_material(
     if data.volume_thickness > 0.0:
         _link_volume_absorption(mat, data)
 
-    _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket)
+    _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket, settings_node)
 
     if material_cache is not None:
         material_cache[cache_key] = mat
@@ -2517,6 +2550,7 @@ def _apply_material_animation(
     color_target,
     color_input: str,
     alpha_socket,
+    settings_node=None,
 ) -> None:
     channels = data.material_anim_channels or []
     if not channels:
@@ -2557,6 +2591,7 @@ def _apply_material_animation(
                 color_target,
                 color_input,
                 alpha_socket,
+                settings_node,
                 target,
                 target_index,
             )
@@ -2639,6 +2674,7 @@ def _material_anim_channel_target(
     color_target,
     color_input: str,
     alpha_socket,
+    settings_node,
     target: int,
     target_index: int,
 ) -> tuple[bpy.types.ID | None, str, int | None, str]:
@@ -2699,6 +2735,18 @@ def _material_anim_channel_target(
 
     if target == _ANIM_MATERIAL_ALPHA_CUTOFF:
         return mat, "alpha_threshold", None, "Material"
+
+    settings_socket_target = {
+        _ANIM_MATERIAL_OCCLUSION_STRENGTH: ("Occlusion",),
+        _ANIM_MATERIAL_IRIDESCENCE: ("Iridescence Factor",),
+        _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM: ("Iridescence Thickness Minimum",),
+        _ANIM_MATERIAL_VOLUME_THICKNESS: ("Thickness",),
+        _ANIM_MATERIAL_DISPERSION: ("Dispersion",),
+    }.get(target)
+    if settings_socket_target:
+        socket = _first_input(settings_node, settings_socket_target)
+        if socket:
+            return mat.node_tree, socket.path_from_id("default_value"), None, "glTF Material Output"
 
     prop = _material_anim_custom_prop(target)
     if prop:
@@ -3044,6 +3092,103 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
             mat[f"{prefix}_transform_rotation"] = info.transform_rotation
 
 
+def _ensure_gltf_settings_node(mat: bpy.types.Material, data: MeshPrimitiveData):
+    if not _needs_gltf_settings_node(data):
+        return None
+
+    group = _ensure_gltf_settings_group()
+    if not group:
+        return None
+
+    node = mat.node_tree.nodes.new("ShaderNodeGroup")
+    node.node_tree = group
+    node.label = _GLTF_SETTINGS_GROUP_NAME
+    node.location = (-220, -520)
+
+    _set_input(node, "Occlusion", data.occlusion_strength)
+    _set_input(node, "Thickness", data.volume_thickness)
+    _set_input(node, "Dispersion", data.dispersion)
+    _set_input(node, "Iridescence Factor", data.iridescence)
+    _set_input(node, "Iridescence Thickness Minimum", data.iridescence_thickness_minimum)
+    return node
+
+
+def _needs_gltf_settings_node(data: MeshPrimitiveData) -> bool:
+    return (
+        bool(data.occlusion_texture)
+        or float(data.volume_thickness) > 0.0
+        or bool(data.volume_thickness_texture)
+        or float(data.dispersion) != 0.0
+        or float(data.iridescence) != 0.0
+        or bool(data.iridescence_texture)
+        or float(data.iridescence_thickness_minimum) != 100.0
+        or _has_material_settings_animation(data)
+    )
+
+
+def _has_material_settings_animation(data: MeshPrimitiveData) -> bool:
+    settings_targets = {
+        _ANIM_MATERIAL_OCCLUSION_STRENGTH,
+        _ANIM_MATERIAL_IRIDESCENCE,
+        _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM,
+        _ANIM_MATERIAL_VOLUME_THICKNESS,
+        _ANIM_MATERIAL_DISPERSION,
+    }
+    return any(int(channel.get("target") or 0) in settings_targets for channel in data.material_anim_channels or [])
+
+
+def _ensure_gltf_settings_group():
+    group = bpy.data.node_groups.get(_GLTF_SETTINGS_GROUP_NAME)
+    if group is None:
+        group = bpy.data.node_groups.new(_GLTF_SETTINGS_GROUP_NAME, "ShaderNodeTree")
+        group.nodes.new("NodeGroupInput").location = (-200, 0)
+        group.nodes.new("NodeGroupOutput")
+
+    for name, default in _GLTF_SETTINGS_SOCKETS:
+        _ensure_gltf_settings_socket(group, name, default)
+    return group
+
+
+def _ensure_gltf_settings_socket(group, name: str, default: float) -> None:
+    if _has_gltf_settings_socket(group, name):
+        return
+
+    socket = None
+    interface = getattr(group, "interface", None)
+    if interface is not None:
+        try:
+            socket = interface.new_socket(name, in_out="INPUT", socket_type="NodeSocketFloat")
+        except TypeError:
+            socket = interface.new_socket(name, socket_type="NodeSocketFloat")
+        except Exception:
+            socket = None
+
+    if socket is None:
+        try:
+            socket = group.inputs.new("NodeSocketFloat", name)
+        except Exception:
+            socket = None
+
+    if socket is not None:
+        try:
+            socket.default_value = default
+        except Exception:
+            pass
+
+
+def _has_gltf_settings_socket(group, name: str) -> bool:
+    for socket in getattr(group, "inputs", ()) or ():
+        if socket.name == name:
+            return True
+
+    interface = getattr(group, "interface", None)
+    for item in getattr(interface, "items_tree", ()) if interface is not None else ():
+        if getattr(item, "item_type", "") == "SOCKET" and item.name == name:
+            if getattr(item, "in_out", "INPUT") == "INPUT":
+                return True
+    return False
+
+
 def _set_assetkit_json_prop(target, key: str, value: object | None) -> None:
     if not value:
         return
@@ -3260,13 +3405,23 @@ def _link_occlusion_texture(
     mat: bpy.types.Material,
     bsdf,
     data: MeshPrimitiveData,
+    settings_node=None,
 ) -> None:
-    base_color = bsdf.inputs.get("Base Color")
-    if not base_color:
-        return
-
     tex = _image_texture_node(mat, data.occlusion_texture, "Non-Color", _texture_info(data, "occlusion"))
     if not tex:
+        return
+
+    ao_output = tex.outputs.get("Color")
+    strength = float(data.occlusion_strength)
+    if strength != 1.0:
+        ao_output = _mix_color_factor(mat, ao_output, (1.0, 1.0, 1.0), strength, "Occlusion Strength")
+    if settings_node and ao_output:
+        socket = settings_node.inputs.get("Occlusion")
+        if socket:
+            mat.node_tree.links.new(ao_output, socket)
+
+    base_color = bsdf.inputs.get("Base Color")
+    if not base_color:
         return
 
     color_output = None
@@ -3279,11 +3434,6 @@ def _link_occlusion_texture(
         color_node = mat.node_tree.nodes.new("ShaderNodeRGB")
         color_node.outputs["Color"].default_value = data.base_color
         color_output = color_node.outputs["Color"]
-
-    ao_output = tex.outputs.get("Color")
-    strength = float(data.occlusion_strength)
-    if strength != 1.0:
-        ao_output = _mix_color_factor(mat, ao_output, (1.0, 1.0, 1.0), strength, "Occlusion Strength")
 
     mixed = _multiply_color_outputs(mat, color_output, ao_output, "Occlusion")
     if mixed:
