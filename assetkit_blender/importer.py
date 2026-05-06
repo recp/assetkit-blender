@@ -54,10 +54,9 @@ def import_assetkit_file(
     existing_actions = _snapshot_actions(fit_timeline)
     primitives, scene_nodes, doc_extra = _load_assetkit_scene(filepath, library_path, load_options)
     state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection, doc_extra)
-    objects = [
-        _create_import_object(primitive, state, collection or bpy.context.collection, shading_mode)
-        for primitive in primitives
-    ]
+    objects: list[bpy.types.Object] = []
+    for primitive in primitives:
+        objects.extend(_create_import_object(primitive, state, collection or bpy.context.collection, shading_mode))
 
     _finish_import(
         objects,
@@ -176,7 +175,9 @@ def import_assetkit_file_auto(
 
     primitives = stream.read_mesh_batch(0, stream.mesh_count)
     state = _begin_scene_build(primitives, stream.nodes, active_collection, stream.doc_extra)
-    objects = [_create_import_object(primitive, state, active_collection, shading_mode) for primitive in primitives]
+    objects: list[bpy.types.Object] = []
+    for primitive in primitives:
+        objects.extend(_create_import_object(primitive, state, active_collection, shading_mode))
     _finish_import(
         objects,
         focus_mode,
@@ -228,7 +229,7 @@ def _create_import_object(
     state: dict,
     collection: bpy.types.Collection,
     shading_mode: str = "AUTO",
-) -> bpy.types.Object:
+) -> list[bpy.types.Object]:
     node_objects = state["node_objects"]
     node_parent = node_objects.get(primitive.node_index)
     parent = node_parent or state["coord_root"]
@@ -742,13 +743,13 @@ class _ProgressiveImportJob:
         created_this_step = 0
         slice_started_at = time.perf_counter()
         while self.pending_primitives and created_this_step < self.batch_size:
-            obj = _create_import_object(
+            created_objects = _create_import_object(
                 self.pending_primitives.popleft(),
                 self.state,
                 self.collection,
                 self.shading_mode,
             )
-            self.objects.append(obj)
+            self.objects.extend(created_objects)
             self.created_count += 1
             created_this_step += 1
             if self.first_object_at == 0.0:
@@ -837,7 +838,7 @@ def _create_mesh_object(
     apply_animation: bool = True,
     shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
-) -> bpy.types.Object:
+) -> list[bpy.types.Object]:
     if data.vertices_f32 and data.indices_u32:
         return _create_mesh_object_bulk(
             data,
@@ -879,7 +880,7 @@ def _create_mesh_object(
     if apply_animation:
         _apply_animation(obj, data)
 
-    return obj
+    return _apply_instancing(obj, data, active_collection)
 
 
 def _create_mesh_object_bulk(
@@ -894,7 +895,7 @@ def _create_mesh_object_bulk(
     apply_animation: bool = True,
     shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
-) -> bpy.types.Object:
+) -> list[bpy.types.Object]:
     mesh = bpy.data.meshes.new(data.name)
 
     mesh.vertices.add(data.vertex_count)
@@ -973,7 +974,7 @@ def _create_mesh_object_bulk(
     if apply_animation:
         _apply_animation(obj, data)
 
-    return obj
+    return _apply_instancing(obj, data, active_collection)
 
 
 def _apply_shading(
@@ -1143,6 +1144,36 @@ def _set_parent(obj: bpy.types.Object, parent: bpy.types.Object | None) -> None:
 
 def _apply_matrix(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
     _apply_matrix_buffer(obj, data.matrix_f32)
+
+
+def _apply_instancing(
+    obj: bpy.types.Object,
+    data: MeshPrimitiveData,
+    collection: bpy.types.Collection,
+) -> list[bpy.types.Object]:
+    count = int(data.instance_count or 0)
+    matrices = _buffer_view(data.instance_matrices_f32, "f")
+    if count <= 0 or matrices is None or len(matrices) < count * 16:
+        return [obj]
+
+    original = obj.matrix_local.copy()
+    objects = [obj]
+    obj.matrix_local = original @ _matrix_from_values(matrices, 0)
+    obj["assetkit_instance_index"] = 0
+    obj["assetkit_instance_count"] = count
+
+    base_name = obj.name
+    for index in range(1, count):
+        duplicate = obj.copy()
+        duplicate.data = obj.data
+        duplicate.name = f"{base_name}_Instance_{index:03d}"
+        duplicate.matrix_local = original @ _matrix_from_values(matrices, index * 16)
+        duplicate["assetkit_instance_index"] = index
+        duplicate["assetkit_instance_count"] = count
+        collection.objects.link(duplicate)
+        objects.append(duplicate)
+
+    return objects
 
 
 def _apply_matrix_buffer(obj: bpy.types.Object, buffer: object) -> None:

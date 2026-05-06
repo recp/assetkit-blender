@@ -107,6 +107,7 @@ typedef struct AkbPrimitive {
   char     anisotropy_texture[1024];
   char     diffuse_transmission_texture[1024];
   float   *vertices;
+  float   *instance_matrices;
   uint32_t *indices;
   int32_t  *loop_meta;
   int32_t  *loop_starts;
@@ -154,6 +155,7 @@ typedef struct AkbPrimitive {
   float    coord_matrix[16];
   int32_t  node_index;
   int32_t  skin_root_node_index;
+  uint32_t instance_count;
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
@@ -529,6 +531,7 @@ akb_primitive_free(AkbPrimitive *prim) {
     return;
   if (!prim->borrowed_vertices)
     free(prim->vertices);
+  free(prim->instance_matrices);
   if (!prim->borrowed_indices)
     free(prim->indices);
   free(prim->loop_meta);
@@ -1207,6 +1210,138 @@ akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
   free(tmp);
   *count_out = acc->count;
   return out;
+}
+
+static float *
+akb_instance_attr_values(AkAccessor *acc,
+                         uint32_t width,
+                         uint32_t expected_count,
+                         uint8_t *borrowed) {
+  float *values;
+  uint32_t count;
+
+  *borrowed = 0;
+  values = akb_accessor_float_borrow(acc, width, &count);
+  if (values) {
+    if (count != expected_count)
+      return NULL;
+    *borrowed = 1;
+    return values;
+  }
+
+  values = akb_accessor_float_copy(acc, width, &count);
+  if (!values)
+    return NULL;
+  if (count != expected_count) {
+    free(values);
+    return NULL;
+  }
+
+  return values;
+}
+
+static void
+akb_trs_to_matrix(const float *translation,
+                  const float *rotation,
+                  const float *scale,
+                  float *dest) {
+  CGLM_ALIGN_MAT mat4 matrix;
+  CGLM_ALIGN(8) vec3 scale3;
+  versor quat;
+
+  if (rotation) {
+    quat[0] = rotation[0];
+    quat[1] = rotation[1];
+    quat[2] = rotation[2];
+    quat[3] = rotation[3];
+    glm_quat_normalize(quat);
+  } else {
+    glm_quat_identity(quat);
+  }
+
+  glm_quat_mat4(quat, matrix);
+
+  scale3[0] = scale ? scale[0] : 1.0f;
+  scale3[1] = scale ? scale[1] : 1.0f;
+  scale3[2] = scale ? scale[2] : 1.0f;
+  glm_scale(matrix, scale3);
+
+  matrix[3][0] = translation ? translation[0] : 0.0f;
+  matrix[3][1] = translation ? translation[1] : 0.0f;
+  matrix[3][2] = translation ? translation[2] : 0.0f;
+  matrix[3][3] = 1.0f;
+
+  memcpy(dest, matrix, 16 * sizeof(float));
+}
+
+static int
+akb_extract_instancing(AkbPrimitive *out, AkNode *node) {
+  AkInstanceAttribs *instancing;
+  float *translations = NULL;
+  float *rotations = NULL;
+  float *scales = NULL;
+  uint32_t i;
+  uint8_t borrowed_translations = 0;
+  uint8_t borrowed_rotations = 0;
+  uint8_t borrowed_scales = 0;
+
+  if (!node || !node->instancing || node->instancing->count == 0)
+    return 1;
+
+  instancing = node->instancing;
+  if (instancing->translation) {
+    translations = akb_instance_attr_values(instancing->translation,
+                                            3,
+                                            instancing->count,
+                                            &borrowed_translations);
+    if (!translations)
+      return 0;
+  }
+  if (instancing->rotation) {
+    rotations = akb_instance_attr_values(instancing->rotation,
+                                         4,
+                                         instancing->count,
+                                         &borrowed_rotations);
+    if (!rotations)
+      goto fail;
+  }
+  if (instancing->scale) {
+    scales = akb_instance_attr_values(instancing->scale,
+                                      3,
+                                      instancing->count,
+                                      &borrowed_scales);
+    if (!scales)
+      goto fail;
+  }
+
+  out->instance_matrices = (float *)malloc((size_t)instancing->count * 16 * sizeof(float));
+  if (!out->instance_matrices)
+    goto fail;
+
+  for (i = 0; i < instancing->count; i++) {
+    akb_trs_to_matrix(translations ? translations + (size_t)i * 3 : NULL,
+                      rotations ? rotations + (size_t)i * 4 : NULL,
+                      scales ? scales + (size_t)i * 3 : NULL,
+                      out->instance_matrices + (size_t)i * 16);
+  }
+  out->instance_count = instancing->count;
+
+  if (translations && !borrowed_translations)
+    free(translations);
+  if (rotations && !borrowed_rotations)
+    free(rotations);
+  if (scales && !borrowed_scales)
+    free(scales);
+  return 1;
+
+fail:
+  if (translations && !borrowed_translations)
+    free(translations);
+  if (rotations && !borrowed_rotations)
+    free(rotations);
+  if (scales && !borrowed_scales)
+    free(scales);
+  return 0;
 }
 
 static float *
@@ -2501,6 +2636,10 @@ akb_extract_primitive(AkbPrimitiveList *list,
   }
   out.animation = akb_animation_retain(animation);
   out.morph_animation = akb_animation_retain(morph_animation);
+  if (!akb_extract_instancing(&out, node)) {
+    akb_primitive_free(&out);
+    return 0;
+  }
 
   if (node) {
     snprintf(out.object_name, sizeof(out.object_name), "%s", akb_name(node->name, "AssetKitObject"));
@@ -3389,6 +3528,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("material_type", PyLong_FromUnsignedLong(prim->material_type));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
   AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
+  AKB_SET_OBJ("instance_count", PyLong_FromUnsignedLong(prim->instance_count));
   AKB_SET_OBJ("has_skin", PyBool_FromLong(prim->has_skin));
   AKB_SET_OBJ("skin_vertex_count", PyLong_FromUnsignedLong(prim->skin_vertex_count));
   AKB_SET_OBJ("skin_joint_count", PyLong_FromUnsignedLong(prim->skin_joint_count));
@@ -3429,6 +3569,13 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("coord_matrix_f32",
               akb_memoryview_or_empty(prim->coord_matrix,
                                       prim->has_coord_matrix ? 16 * sizeof(float) : 0));
+  AKB_SET_OBJ("instance_matrices_f32",
+              akb_memoryview_or_empty(prim->instance_matrices,
+                                      prim->instance_count
+                                      ? (size_t)prim->instance_count
+                                        * 16
+                                        * sizeof(float)
+                                      : 0));
   AKB_SET_OBJ("base_color_texture", akb_unicode_from_cstr(prim->base_color_texture));
   AKB_SET_OBJ("metallic_roughness_texture", akb_unicode_from_cstr(prim->metallic_roughness_texture));
   AKB_SET_OBJ("occlusion_texture", akb_unicode_from_cstr(prim->occlusion_texture));

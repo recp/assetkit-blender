@@ -277,7 +277,9 @@ class MeshPrimitiveData:
     object_name: str = ""
     matrix_f32: object = b""
     coord_matrix_f32: object = b""
+    instance_matrices_f32: object = b""
     node_index: int = -1
+    instance_count: int = 0
     has_node: bool = False
     has_skin: bool = False
     anim_count: int = 0
@@ -824,7 +826,9 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 object_name=item.get("object_name") or "",
                 matrix_f32=item.get("matrix_f32") or b"",
                 coord_matrix_f32=item.get("coord_matrix_f32") or b"",
+                instance_matrices_f32=item.get("instance_matrices_f32") or b"",
                 node_index=int(item.get("node_index") if item.get("node_index") is not None else -1),
+                instance_count=int(item.get("instance_count") or 0),
                 has_node=bool(item.get("has_node")),
                 has_skin=bool(item.get("has_skin")),
                 anim_count=int(item.get("anim_count") or 0),
