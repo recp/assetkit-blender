@@ -3839,20 +3839,24 @@ def _image_texture_node(
 
 
 def _load_texture_image(path: str, colorspace: str):
+    source_path = os.path.abspath(os.fspath(path))
+    image = _find_texture_image(source_path, colorspace)
+    if image:
+        return image
+
     if _is_ktx2_path(path):
-        image = _decode_ktx2_image(path)
+        image = _decode_ktx2_image(source_path, colorspace)
         if image:
-            _set_image_colorspace(image, colorspace)
             return image
 
     image = None
     try:
-        image = bpy.data.images.load(path, check_existing=True)
+        image = bpy.data.images.load(source_path, check_existing=False)
     except RuntimeError:
         image = None
 
     if image and _image_has_size(image):
-        _set_image_colorspace(image, colorspace)
+        _register_texture_image(image, source_path, colorspace)
         return image
 
     if image and _is_ktx2_path(path):
@@ -3862,12 +3866,49 @@ def _load_texture_image(path: str, colorspace: str):
             pass
 
     if _is_ktx2_path(path):
-        image = _decode_ktx2_image(path)
+        image = _decode_ktx2_image(source_path, colorspace)
         if image:
-            _set_image_colorspace(image, colorspace)
             return image
 
     return None
+
+
+def _find_texture_image(path: str, colorspace: str):
+    source_path = os.path.abspath(os.fspath(path))
+    for image in bpy.data.images:
+        if not _image_has_size(image):
+            continue
+        image_path = image.get("assetkit_source_path") or image.filepath
+        if not image_path:
+            continue
+        try:
+            image_path = bpy.path.abspath(image_path)
+        except Exception:
+            pass
+        if os.path.abspath(os.fspath(image_path)) != source_path:
+            continue
+        if _image_colorspace(image) != colorspace:
+            continue
+        image["assetkit_source_path"] = source_path
+        image["assetkit_colorspace"] = colorspace
+        return image
+    return None
+
+
+def _register_texture_image(image, path: str, colorspace: str) -> None:
+    image["assetkit_source_path"] = os.path.abspath(os.fspath(path))
+    image["assetkit_colorspace"] = colorspace
+    _set_image_colorspace(image, colorspace)
+
+
+def _image_colorspace(image) -> str:
+    stored = image.get("assetkit_colorspace")
+    if stored:
+        return str(stored)
+    try:
+        return image.colorspace_settings.name
+    except Exception:
+        return ""
 
 
 def _image_has_size(image) -> bool:
@@ -3888,11 +3929,11 @@ def _is_ktx2_path(path: str) -> bool:
     return os.fspath(path).lower().endswith(".ktx2")
 
 
-def _decode_ktx2_image(path: str):
-    source_path = os.fspath(path)
-    for image in bpy.data.images:
-        if image.get("assetkit_source_path") == source_path and _image_has_size(image):
-            return image
+def _decode_ktx2_image(path: str, colorspace: str):
+    source_path = os.path.abspath(os.fspath(path))
+    image = _find_texture_image(source_path, colorspace)
+    if image:
+        return image
 
     try:
         from . import _assetkit_blender
@@ -3916,7 +3957,7 @@ def _decode_ktx2_image(path: str):
     image.pixels.foreach_set(pixels)
     image.filepath = source_path
     image["assetkit_decoded_texture"] = True
-    image["assetkit_source_path"] = source_path
+    _register_texture_image(image, source_path, colorspace)
     image.update()
     return image
 
