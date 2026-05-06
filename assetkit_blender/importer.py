@@ -392,6 +392,7 @@ def _set_viewport_material_preview() -> None:
                 if space.type != "VIEW_3D" or not hasattr(space, "shading"):
                     continue
                 try:
+                    space.shading.color_type = "MATERIAL"
                     space.shading.type = "MATERIAL"
                 except Exception:
                     pass
