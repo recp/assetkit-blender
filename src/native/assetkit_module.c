@@ -166,6 +166,7 @@ typedef struct AkbTextureInfo {
 typedef struct AkbMaterialVariantMap {
   char     variant_name[512];
   char     material_name[512];
+  AkMaterial *material;
   uint32_t variant_index;
 } AkbMaterialVariantMap;
 
@@ -1313,6 +1314,7 @@ akb_extract_material_variants(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *o
        mapping && i < prim->variantMappingCount;
        mapping = mapping->next) {
     items[i].variant_index = mapping->variantIndex;
+    items[i].material = mapping->material;
     variant_name = akb_material_variant_name(doc, mapping->variantIndex);
     material_name = mapping->material ? mapping->material->name : NULL;
 
@@ -4231,10 +4233,15 @@ akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
 }
 
 static PyObject *
-akb_material_variants_to_py(AkbPrimitive *prim) {
+akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner);
+
+static PyObject *
+akb_material_variants_to_py(AkbPrimitive *prim, PyObject *owner) {
   PyObject *list;
   PyObject *dict;
   PyObject *value;
+  AkMeshPrimitive material_prim;
+  AkbPrimitive material_data;
   uint32_t i;
 
   if (!prim->material_variants || !prim->material_variant_count)
@@ -4269,6 +4276,17 @@ akb_material_variants_to_py(AkbPrimitive *prim) {
                         akb_unicode_from_cstr(prim->material_variants[i].variant_name));
     AKB_VARIANT_SET_OBJ("material_name",
                         akb_unicode_from_cstr(prim->material_variants[i].material_name));
+    if (prim->material_variants[i].material) {
+      memset(&material_prim, 0, sizeof(material_prim));
+      memset(&material_data, 0, sizeof(material_data));
+      material_prim.material = prim->material_variants[i].material;
+      material_data.file_type = prim->file_type;
+      akb_extract_material(prim->doc_owner ? prim->doc_owner->doc : NULL,
+                           &material_prim,
+                           NULL,
+                           &material_data);
+      AKB_VARIANT_SET_OBJ("material", akb_primitive_to_py(&material_data, owner));
+    }
 
     PyList_SET_ITEM(list, (Py_ssize_t)i, dict);
   }
@@ -4468,7 +4486,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("effect_extra", akb_tree_to_py(prim->effect_extra));
   AKB_SET_OBJ("material_variant_count",
               PyLong_FromUnsignedLong(prim->material_variant_count));
-  AKB_SET_OBJ("material_variants", akb_material_variants_to_py(prim));
+  AKB_SET_OBJ("material_variants", akb_material_variants_to_py(prim, owner));
   AKB_SET_OBJ("matrix_f32", akb_memoryview_or_empty(prim->matrix, prim->has_node ? 16 * sizeof(float) : 0));
   AKB_SET_OBJ("coord_matrix_f32",
               akb_memoryview_or_empty(prim->coord_matrix,

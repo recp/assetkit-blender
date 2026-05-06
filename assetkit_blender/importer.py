@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from array import array
 from collections import deque
+from dataclasses import replace
 import json
 import math
 import os
@@ -98,6 +99,7 @@ _ANIM_TEXTURE_TRANSFORM_ROLES = (
     "diffuse_transmission",
     "diffuse_transmission_color",
 )
+_MATERIAL_TEXTURE_FIELDS = tuple(f"{role}_texture" for role in _ANIM_TEXTURE_TRANSFORM_ROLES)
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_PHONG = 1
@@ -1168,7 +1170,7 @@ def _finish_mesh_object(
     if material:
         mesh.materials.append(material)
     _apply_assetkit_extra_props(obj, data)
-    _apply_material_variants(obj, data)
+    _apply_material_variants(obj, data, material_cache)
     _apply_shape_keys(obj, data)
     _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection, skin_cache)
     if apply_animation:
@@ -2093,7 +2095,11 @@ def _blender_interpolation(interpolation: int) -> str:
     return "LINEAR"
 
 
-def _apply_material_variants(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+def _apply_material_variants(
+    obj: bpy.types.Object,
+    data: MeshPrimitiveData,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+) -> None:
     variants = data.material_variants or []
     if not variants:
         return
@@ -2104,6 +2110,137 @@ def _apply_material_variants(obj: bpy.types.Object, data: MeshPrimitiveData) -> 
         obj[f"{prefix}_index"] = int(variant.get("variant_index") or 0)
         obj[f"{prefix}_name"] = variant.get("variant_name") or ""
         obj[f"{prefix}_material"] = variant.get("material_name") or ""
+        material = _create_variant_material(data, variant, material_cache)
+        if material:
+            slot = _ensure_material_slot(obj.data, material)
+            obj[f"{prefix}_slot"] = slot
+
+
+def _ensure_material_slot(mesh: bpy.types.Mesh, material: bpy.types.Material) -> int:
+    for index, slot_material in enumerate(mesh.materials):
+        if slot_material == material:
+            return index
+    mesh.materials.append(material)
+    return len(mesh.materials) - 1
+
+
+def _create_variant_material(
+    data: MeshPrimitiveData,
+    variant: dict,
+    material_cache: dict[object, bpy.types.Material] | None,
+) -> bpy.types.Material | None:
+    raw = variant.get("material")
+    if not isinstance(raw, dict):
+        return None
+    return _create_material(_variant_material_data(data, variant, raw), material_cache)
+
+
+def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) -> MeshPrimitiveData:
+    values = {
+        "material_name": _variant_material_name(data, variant, raw),
+        "base_color": tuple(raw.get("base_color") or data.base_color),
+        "transparent_color": tuple(raw.get("transparent_color") or data.transparent_color),
+        "emissive_color": tuple(raw.get("emissive_color") or data.emissive_color),
+        "specular_color": tuple(raw.get("specular_color") or data.specular_color),
+        "sheen_color": tuple(raw.get("sheen_color") or data.sheen_color),
+        "volume_attenuation_color": tuple(raw.get("volume_attenuation_color") or data.volume_attenuation_color),
+        "diffuse_transmission_color": tuple(
+            raw.get("diffuse_transmission_color") or data.diffuse_transmission_color
+        ),
+        "metallic": _raw_float(raw, "metallic", data.metallic),
+        "roughness": _raw_float(raw, "roughness", data.roughness),
+        "alpha_cutoff": _raw_float(raw, "alpha_cutoff", data.alpha_cutoff),
+        "transparent_amount": _raw_float(raw, "transparent_amount", data.transparent_amount),
+        "opacity": _raw_float(raw, "opacity", data.opacity),
+        "normal_scale": _raw_float(raw, "normal_scale", data.normal_scale),
+        "occlusion_strength": _raw_float(raw, "occlusion_strength", data.occlusion_strength),
+        "specular_strength": _raw_float(raw, "specular_strength", data.specular_strength),
+        "ior": _raw_float(raw, "ior", data.ior),
+        "clearcoat": _raw_float(raw, "clearcoat", data.clearcoat),
+        "clearcoat_roughness": _raw_float(raw, "clearcoat_roughness", data.clearcoat_roughness),
+        "clearcoat_normal_scale": _raw_float(raw, "clearcoat_normal_scale", data.clearcoat_normal_scale),
+        "transmission": _raw_float(raw, "transmission", data.transmission),
+        "sheen_roughness": _raw_float(raw, "sheen_roughness", data.sheen_roughness),
+        "iridescence": _raw_float(raw, "iridescence", data.iridescence),
+        "iridescence_ior": _raw_float(raw, "iridescence_ior", data.iridescence_ior),
+        "iridescence_thickness_minimum": _raw_float(
+            raw,
+            "iridescence_thickness_minimum",
+            data.iridescence_thickness_minimum,
+        ),
+        "iridescence_thickness_maximum": _raw_float(
+            raw,
+            "iridescence_thickness_maximum",
+            data.iridescence_thickness_maximum,
+        ),
+        "volume_thickness": _raw_float(raw, "volume_thickness", data.volume_thickness),
+        "volume_attenuation_distance": _raw_float(
+            raw,
+            "volume_attenuation_distance",
+            data.volume_attenuation_distance,
+        ),
+        "anisotropy": _raw_float(raw, "anisotropy", data.anisotropy),
+        "anisotropy_rotation": _raw_float(raw, "anisotropy_rotation", data.anisotropy_rotation),
+        "diffuse_transmission": _raw_float(raw, "diffuse_transmission", data.diffuse_transmission),
+        "dispersion": _raw_float(raw, "dispersion", data.dispersion),
+        "alpha_mode": _raw_int(raw, "alpha_mode", data.alpha_mode),
+        "double_sided": bool(raw.get("double_sided", data.double_sided)),
+        "has_sheen": bool(raw.get("has_sheen", data.has_sheen)),
+        "material_type": _raw_int(raw, "material_type", data.material_type),
+        "file_type": _raw_int(raw, "file_type", data.file_type),
+        "texture_infos": _raw_texture_infos(raw.get("texture_infos") or {}),
+        "material_extra": raw.get("material_extra"),
+        "effect_extra": raw.get("effect_extra"),
+    }
+
+    for name in _MATERIAL_TEXTURE_FIELDS:
+        values[name] = raw.get(name) or getattr(data, name)
+
+    return replace(data, **values)
+
+
+def _variant_material_name(data: MeshPrimitiveData, variant: dict, raw: dict) -> str:
+    name = raw.get("material_name") or variant.get("material_name") or ""
+    if name:
+        return str(name)
+
+    base = data.material_name or data.name or "AssetKitMaterial"
+    suffix = variant.get("variant_name") or f"Variant_{int(variant.get('variant_index') or 0)}"
+    return f"{base}_{suffix}"
+
+
+def _raw_float(raw: dict, key: str, fallback: float) -> float:
+    value = raw.get(key)
+    return float(value) if value is not None else float(fallback)
+
+
+def _raw_int(raw: dict, key: str, fallback: int) -> int:
+    value = raw.get(key)
+    return int(value) if value is not None else int(fallback)
+
+
+def _raw_texture_infos(raw_infos: dict) -> dict[str, TextureRefData]:
+    texture_infos = {}
+    for role, info in raw_infos.items():
+        texture_infos[str(role)] = TextureRefData(
+            role=str(role),
+            path=info.get("path") or "",
+            texcoord=info.get("texcoord") or "",
+            coord_input_name=info.get("coord_input_name") or "",
+            slot=int(info.get("slot") or 0),
+            wrap_s=int(info.get("wrap_s") or 1),
+            wrap_t=int(info.get("wrap_t") or 1),
+            wrap_p=int(info.get("wrap_p") or 1),
+            min_filter=int(info.get("min_filter") or 0),
+            mag_filter=int(info.get("mag_filter") or 0),
+            mip_filter=int(info.get("mip_filter") or 0),
+            has_transform=bool(info.get("has_transform")),
+            transform_offset=tuple(info.get("transform_offset") or (0.0, 0.0)),
+            transform_scale=tuple(info.get("transform_scale") or (1.0, 1.0)),
+            transform_rotation=_raw_float(info, "transform_rotation", 0.0),
+            transform_slot=int(info.get("transform_slot") if info.get("transform_slot") is not None else -1),
+        )
+    return texture_infos
 
 
 def _apply_assetkit_extra_props(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
