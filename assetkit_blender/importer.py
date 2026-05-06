@@ -2153,14 +2153,18 @@ def _create_material(
             _set_input(bsdf, "Metallic", 0.0)
             _set_input(bsdf, "Roughness", _legacy_roughness(data.specular_strength))
             _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _legacy_specular(data))
+        elif _is_specular_glossiness_material(data):
+            _set_input(bsdf, "Metallic", 0.0)
+            _set_input(bsdf, "Roughness", data.roughness)
+            _set_first_input(bsdf, ("Specular IOR Level", "Specular"), 0.5)
         else:
             _set_input(bsdf, "Metallic", data.metallic)
             _set_input(bsdf, "Roughness", data.roughness)
-            _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
+            _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _pbr_specular_level(data))
         _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
         _set_first_input(bsdf, ("Emission Strength",), 1.0 if _has_emission(data) else 0.0)
         _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
-        _set_first_input(bsdf, ("IOR",), data.ior)
+        _set_first_input(bsdf, ("IOR",), _material_ior(data))
         _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
         _set_first_input(bsdf, ("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
         _set_first_input(bsdf, ("Transmission Weight", "Transmission"), data.transmission)
@@ -2216,7 +2220,7 @@ def _create_material(
                 ("Specular IOR Level", "Specular"),
                 colorspace="Non-Color",
                 channel="Alpha",
-                factor=data.specular_strength,
+                factor=_pbr_specular_level(data),
                 tex_info=_texture_info(data, "specular"),
             )
     if data.specular_color_texture:
@@ -2424,7 +2428,8 @@ def _apply_material_animation(
             coords = array("f", [0.0]) * (count * 2)
             for key_index in range(count):
                 coords[key_index * 2] = times[key_index] * fps
-                coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
+                value = values[key_index * value_width + value_index]
+                coords[key_index * 2 + 1] = _material_anim_output_value(data, target, value)
 
             fcurve.keyframe_points.add(count)
             fcurve.keyframe_points.foreach_set("co", coords)
@@ -2564,6 +2569,12 @@ def _material_anim_channel_target(
     return None, "", None, ""
 
 
+def _material_anim_output_value(data: MeshPrimitiveData, target: int, value: float) -> float:
+    if target == _ANIM_MATERIAL_SPECULAR and _uses_pbr_specular_level(data):
+        return float(value) * 0.5
+    return float(value)
+
+
 def _first_input(node, names: tuple[str, ...]):
     if not node:
         return None
@@ -2636,6 +2647,10 @@ def _is_legacy_lit_material(data: MeshPrimitiveData) -> bool:
     }
 
 
+def _is_specular_glossiness_material(data: MeshPrimitiveData) -> bool:
+    return int(data.material_type) == _AK_MATERIAL_SPECULAR_GLOSSINESS
+
+
 def _legacy_roughness(shininess: float) -> float:
     value = max(float(shininess), 0.0)
     if value <= 0.0:
@@ -2647,6 +2662,20 @@ def _legacy_specular(data: MeshPrimitiveData) -> float:
     if int(data.material_type) == _AK_MATERIAL_LAMBERT:
         return 0.0
     return max(0.0, min(1.0, max(float(v) for v in data.specular_color)))
+
+
+def _uses_pbr_specular_level(data: MeshPrimitiveData) -> bool:
+    return not _is_legacy_lit_material(data) and not _is_specular_glossiness_material(data)
+
+
+def _pbr_specular_level(data: MeshPrimitiveData) -> float:
+    return 0.5 * max(0.0, float(data.specular_strength))
+
+
+def _material_ior(data: MeshPrimitiveData) -> float:
+    if _is_specular_glossiness_material(data):
+        return 1000.0
+    return data.ior
 
 
 def _is_double_sided_material(data: MeshPrimitiveData) -> bool:
