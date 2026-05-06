@@ -27,6 +27,7 @@ _ANIM_TRANSLATION = 1
 _ANIM_ROTATION_QUAT = 2
 _ANIM_SCALE = 3
 _ANIM_MORPH_WEIGHTS = 4
+_ANIM_VISIBILITY = 5
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_CONSTANT = 4
@@ -1049,6 +1050,7 @@ def _new_scene_node_object(node: SceneNodeData, index: int) -> bpy.types.Object:
         camera = bpy.data.cameras.new(node.camera_name or name)
         _configure_camera(camera, node)
         obj = bpy.data.objects.new(name, camera)
+        _set_node_visibility(obj, node.visible)
         _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
         return obj
 
@@ -1056,12 +1058,14 @@ def _new_scene_node_object(node: SceneNodeData, index: int) -> bpy.types.Object:
         light = bpy.data.lights.new(node.light_name or name, _blender_light_type(node.light_type))
         _configure_light(light, node)
         obj = bpy.data.objects.new(name, light)
+        _set_node_visibility(obj, node.visible)
         _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
         return obj
 
     obj = bpy.data.objects.new(name, None)
     obj.empty_display_type = "PLAIN_AXES"
     obj.empty_display_size = 0.35
+    _set_node_visibility(obj, node.visible)
     _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
     return obj
 
@@ -1102,6 +1106,12 @@ def _configure_light(light: bpy.types.Light, node: SceneNodeData) -> None:
         light.spot_size = values[3] * 2.0
         if values[2] > 0.0 and values[3] > values[2]:
             light.spot_blend = max(0.0, min(1.0, 1.0 - values[2] / values[3]))
+
+
+def _set_node_visibility(obj: bpy.types.Object, visible: bool) -> None:
+    hidden = not bool(visible)
+    obj.hide_viewport = hidden
+    obj.hide_render = hidden
 
 
 def _create_coord_root(
@@ -1196,6 +1206,10 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
 
     for channel in channels:
         target = int(channel.get("target") or 0)
+        if target == _ANIM_VISIBILITY:
+            end_frame = max(end_frame, _apply_visibility_animation_channel(obj, action, channel, fps, start_frame))
+            continue
+
         path, width = _anim_target_path(target)
         if not path:
             continue
@@ -1230,6 +1244,37 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
 
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
+
+
+def _apply_visibility_animation_channel(
+    obj: bpy.types.Object,
+    action: bpy.types.Action,
+    channel: dict,
+    fps: float,
+    start_frame: float,
+) -> int:
+    count = int(channel.get("count") or 0)
+    value_width = int(channel.get("value_width") or 0)
+    times = _buffer_view(channel.get("times_f32") or b"", "f")
+    values = _buffer_view(channel.get("values_f32") or b"", "f")
+    if count <= 0 or value_width <= 0 or times is None or values is None:
+        return bpy.context.scene.frame_end
+
+    interpolation = "CONSTANT"
+    coords = array("f", [0.0]) * (count * 2)
+    for key_index in range(count):
+        coords[key_index * 2] = start_frame + times[key_index] * fps
+        coords[key_index * 2 + 1] = 0.0 if values[key_index * value_width] >= 0.5 else 1.0
+
+    for path in ("hide_viewport", "hide_render"):
+        fcurve = _ensure_fcurve(action, obj, path, None, group_name="Visibility")
+        fcurve.keyframe_points.add(count)
+        fcurve.keyframe_points.foreach_set("co", coords)
+        for point in fcurve.keyframe_points:
+            point.interpolation = interpolation
+        fcurve.update()
+
+    return int(start_frame + times[count - 1] * fps + 0.5)
 
 
 def _apply_shape_keys(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
@@ -1667,10 +1712,14 @@ def _ensure_fcurve(
     action: bpy.types.Action,
     obj: bpy.types.ID,
     data_path: str,
-    index: int,
+    index: int | None,
     group_name: str = "Transform",
 ):
     ensure = getattr(action, "fcurve_ensure_for_datablock", None)
+    if index is None:
+        if ensure:
+            return ensure(obj, data_path, group_name=group_name)
+        return action.fcurves.new(data_path=data_path, action_group=group_name)
     if ensure:
         return ensure(obj, data_path, index=index, group_name=group_name)
     return action.fcurves.new(data_path=data_path, index=index, action_group=group_name)

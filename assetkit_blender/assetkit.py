@@ -360,6 +360,7 @@ class SceneNodeData:
     matrix_f32: object = b""
     anim_channels: list[dict] | None = None
     anim_count: int = 0
+    visible: bool = True
     camera_type: int = 0
     camera_name: str = ""
     camera_values: tuple[float, float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -675,6 +676,10 @@ class NativeSceneStream:
 def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
     nodes = []
     for item in raw_nodes:
+        extra = item.get("extra")
+        visible = _extra_bool(extra, ("extensions", "KHR_node_visibility", "visible"))
+        if visible is None:
+            visible = bool(item.get("visible", True))
         nodes.append(
             SceneNodeData(
                 name=item.get("name") or "AssetKitNode",
@@ -682,6 +687,7 @@ def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
                 matrix_f32=item.get("matrix_f32") or b"",
                 anim_channels=item.get("anim_channels") or [],
                 anim_count=int(item.get("anim_count") or 0),
+                visible=visible,
                 camera_type=int(item.get("camera_type") or 0),
                 camera_name=item.get("camera_name") or "",
                 camera_values=tuple(item.get("camera_values") or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
@@ -689,11 +695,40 @@ def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
                 light_name=item.get("light_name") or "",
                 light_color=tuple(item.get("light_color") or (1.0, 1.0, 1.0)),
                 light_values=tuple(item.get("light_values") or (0.0, 0.0, 0.0, 0.0, 0.0)),
-                extra=item.get("extra"),
+                extra=extra,
                 _native_owner=item.get("_owner"),
             )
         )
     return nodes
+
+
+def _extra_bool(extra: object, path: tuple[str, ...]) -> bool | None:
+    node = _extra_child_path(extra, path)
+    if not isinstance(node, dict):
+        return None
+
+    value = str(node.get("value") or "").strip().lower()
+    if value in {"true", "1"}:
+        return True
+    if value in {"false", "0"}:
+        return False
+    return None
+
+
+def _extra_child_path(extra: object, path: tuple[str, ...]) -> object | None:
+    node = extra
+    for name in path:
+        if not isinstance(node, dict):
+            return None
+        node = next(
+            (
+                child
+                for child in node.get("children") or []
+                if isinstance(child, dict) and child.get("name") == name
+            ),
+            None,
+        )
+    return node
 
 
 def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveData]:

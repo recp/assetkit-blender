@@ -22,6 +22,7 @@
 #define AKB_ANIM_ROTATION_QUAT 2
 #define AKB_ANIM_SCALE 3
 #define AKB_ANIM_MORPH_WEIGHTS 4
+#define AKB_ANIM_VISIBILITY 5
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
@@ -199,6 +200,7 @@ typedef struct AkbSceneNode {
   uint8_t  camera_type;
   uint8_t  light_type;
   uint8_t  has_transform;
+  uint8_t  visible;
 } AkbSceneNode;
 
 typedef struct AkbSceneNodeList {
@@ -2028,16 +2030,31 @@ akb_animation_collect_walk(AkbAnimation *animation,
 }
 
 static int
+akb_node_visibility_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity) {
+  if (!node)
+    return 0;
+
+  return akb_anim_binding_push(bindings,
+                               capacity,
+                               0,
+                               &node->visible,
+                               AKB_ANIM_VISIBILITY,
+                               1);
+}
+
+static int
 akb_node_transform_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity) {
   AkObject *object;
   uint32_t kind;
   uint32_t width;
   int count;
 
-  if (!node || !node->transform)
+  count = akb_node_visibility_bindings(node, bindings, capacity);
+  if (!node)
     return 0;
+  if (!node->transform)
+    return count;
 
-  count = 0;
   for (object = node->transform->base; object; object = object->next) {
     kind = (uint32_t)akb_anim_target_kind(object, &width);
     count = akb_anim_binding_push(bindings, capacity, count, object, kind, width);
@@ -2222,26 +2239,38 @@ akb_animation_new(AkDoc *doc,
   AkbAnimBinding bindings[64];
   AkContext context;
   int binding_count;
+  int needs_bake;
 
   *ok = 1;
-  if (ak_nodeNeedsBaking(node) || akb_node_has_rotate(node))
-    return akb_animation_new_baked(doc, doc_owner, node, ok);
+  needs_bake = ak_nodeNeedsBaking(node) || akb_node_has_rotate(node);
 
-  binding_count = akb_node_transform_bindings(node, bindings, 64);
+  if (needs_bake) {
+    animation = akb_animation_new_baked(doc, doc_owner, node, ok);
+    if (!animation || !*ok)
+      return animation;
+    binding_count = akb_node_visibility_bindings(node, bindings, 64);
+  } else {
+    binding_count = akb_node_transform_bindings(node, bindings, 64);
+  }
+
   if (!binding_count) {
+    if (needs_bake)
+      return animation;
     animation = akb_animation_new_baked(doc, doc_owner, node, ok);
     return animation;
   }
 
-  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
-  if (!animation) {
-    *ok = 0;
-    return NULL;
-  }
+  if (!needs_bake) {
+    animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+    if (!animation) {
+      *ok = 0;
+      return NULL;
+    }
 
-  animation->refcount = 1;
-  animation->doc_owner = doc_owner;
-  akb_shared_doc_retain(doc_owner);
+    animation->refcount = 1;
+    animation->doc_owner = doc_owner;
+    akb_shared_doc_retain(doc_owner);
+  }
 
   memset(&context, 0, sizeof(context));
   context.doc = doc;
@@ -2412,6 +2441,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   out.source = node;
   snprintf(out.name, sizeof(out.name), "%s", akb_name(node->name, "AssetKitNode"));
   out.parent_index = parent_index;
+  out.visible = node->visible ? 1 : 0;
   ak_transformCombine(node->transform, out.matrix);
   out.has_transform = 1;
   akb_extract_node_camera(&out, node);
@@ -3494,6 +3524,7 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
 
   AKB_NODE_SET_OBJ("name", akb_unicode_from_cstr(node->name));
   AKB_NODE_SET_OBJ("parent_index", PyLong_FromLong(node->parent_index));
+  AKB_NODE_SET_OBJ("visible", PyBool_FromLong(node->visible));
   AKB_NODE_SET_OBJ("camera_type", PyLong_FromUnsignedLong(node->camera_type));
   AKB_NODE_SET_OBJ("camera_name", akb_unicode_from_cstr(node->camera_name));
   AKB_NODE_SET_OBJ("camera_values", Py_BuildValue("(ffffff)",
