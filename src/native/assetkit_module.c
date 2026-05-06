@@ -367,18 +367,22 @@ typedef struct AkbSharedDoc {
 } AkbSharedDoc;
 
 typedef struct AkbAnimChannel {
-  float    *times;
-  float    *values;
+  float      *times;
+  float      *values;
+  float      *in_tangents;
+  float      *out_tangents;
   const char *clip_name;
-  uint32_t  count;
-  uint32_t  value_width;
-  uint32_t  target;
-  uint32_t  target_offset;
-  uint32_t  clip_index;
-  uint8_t   interpolation;
-  uint8_t   is_partial;
-  uint8_t   borrowed_times;
-  uint8_t   borrowed_values;
+  uint32_t    count;
+  uint32_t    value_width;
+  uint32_t    target;
+  uint32_t    target_offset;
+  uint32_t    clip_index;
+  uint8_t     interpolation;
+  uint8_t     is_partial;
+  uint8_t     borrowed_times;
+  uint8_t     borrowed_values;
+  uint8_t     borrowed_in_tangents;
+  uint8_t     borrowed_out_tangents;
 } AkbAnimChannel;
 
 typedef struct AkbAnimation {
@@ -619,6 +623,10 @@ akb_animation_release(AkbAnimation *animation) {
         free(animation->channels[i].times);
       if (!animation->channels[i].borrowed_values)
         free(animation->channels[i].values);
+      if (!animation->channels[i].borrowed_in_tangents)
+        free(animation->channels[i].in_tangents);
+      if (!animation->channels[i].borrowed_out_tangents)
+        free(animation->channels[i].out_tangents);
     }
     free(animation->channels);
     free(animation->baked_values);
@@ -2335,19 +2343,24 @@ akb_animation_push(AkbAnimation *animation, AkbAnimChannel *channel) {
 
 static int
 akb_animation_extract_cubic_values(float **values_io,
+                                   float **in_tangents_out,
+                                   float **out_tangents_out,
                                    uint32_t *value_count_io,
                                    uint8_t *borrowed_io,
                                    uint32_t time_count,
                                    uint32_t read_width,
                                    uint32_t value_width) {
   float *src;
-  float *dst;
+  float *values;
+  float *in_tangents;
+  float *out_tangents;
   uint32_t sample_width;
   uint32_t expected_count;
   uint32_t compact_count;
   uint32_t i;
 
-  if (!values_io || !*values_io || !value_count_io || !borrowed_io
+  if (!values_io || !*values_io || !in_tangents_out || !out_tangents_out
+      || !value_count_io || !borrowed_io
       || !time_count || !read_width || !value_width)
     return 1;
 
@@ -2361,26 +2374,49 @@ akb_animation_extract_cubic_values(float **values_io,
 
   compact_count = time_count * sample_width;
   src = *values_io;
-  if (*borrowed_io) {
-    dst = (float *)malloc((size_t)compact_count * sizeof(float));
-    if (!dst)
-      return 0;
-    *borrowed_io = 0;
-  } else {
-    dst = src;
+  values = (float *)malloc((size_t)compact_count * sizeof(float));
+  in_tangents = (float *)malloc((size_t)compact_count * sizeof(float));
+  out_tangents = (float *)malloc((size_t)compact_count * sizeof(float));
+  if (!values || !in_tangents || !out_tangents) {
+    free(values);
+    free(in_tangents);
+    free(out_tangents);
+    return 0;
   }
 
   for (i = 0; i < time_count; i++) {
-    memmove(&dst[(size_t)i * sample_width],
-            &src[((size_t)i * 3 + 1) * sample_width],
-            (size_t)sample_width * sizeof(float));
+    memcpy(&in_tangents[(size_t)i * sample_width],
+           &src[((size_t)i * 3) * sample_width],
+           (size_t)sample_width * sizeof(float));
+    memcpy(&values[(size_t)i * sample_width],
+           &src[((size_t)i * 3 + 1) * sample_width],
+           (size_t)sample_width * sizeof(float));
+    memcpy(&out_tangents[(size_t)i * sample_width],
+           &src[((size_t)i * 3 + 2) * sample_width],
+           (size_t)sample_width * sizeof(float));
   }
 
-  *values_io = dst;
+  if (!*borrowed_io)
+    free(src);
+
+  *values_io = values;
+  *in_tangents_out = in_tangents;
+  *out_tangents_out = out_tangents;
+  *borrowed_io = 0;
   *value_count_io = (read_width == 1 && value_width > 1)
                     ? compact_count
                     : time_count;
   return 1;
+}
+
+static void
+akb_animation_copy_quat_sample(float *dst,
+                               const float *src,
+                               float sign) {
+  dst[0] = sign * src[3];
+  dst[1] = sign * src[0];
+  dst[2] = sign * src[1];
+  dst[3] = sign * src[2];
 }
 
 static int
@@ -2390,7 +2426,12 @@ akb_animation_convert_values(AkbAnimChannel *out,
                              uint8_t raw_borrowed,
                              const AkbCoordContext *coord) {
   float *values;
+  float *in_tangents;
+  float *out_tangents;
+  float *raw_in_tangents;
+  float *raw_out_tangents;
   float dot;
+  float sign;
   uint32_t i;
 
   (void)coord;
@@ -2411,37 +2452,86 @@ akb_animation_convert_values(AkbAnimChannel *out,
   }
 
   values = (float *)malloc((size_t)raw_count * 4 * sizeof(float));
+  in_tangents = out->in_tangents
+                ? (float *)malloc((size_t)raw_count * 4 * sizeof(float))
+                : NULL;
+  out_tangents = out->out_tangents
+                 ? (float *)malloc((size_t)raw_count * 4 * sizeof(float))
+                 : NULL;
   if (!values) {
     if (!raw_borrowed)
       free(raw_values);
+    if (!out->borrowed_in_tangents)
+      free(out->in_tangents);
+    if (!out->borrowed_out_tangents)
+      free(out->out_tangents);
+    out->in_tangents = NULL;
+    out->out_tangents = NULL;
+    return 0;
+  }
+  if ((out->in_tangents && !in_tangents)
+      || (out->out_tangents && !out_tangents)) {
+    free(values);
+    free(in_tangents);
+    free(out_tangents);
+    if (!raw_borrowed)
+      free(raw_values);
+    if (!out->borrowed_in_tangents)
+      free(out->in_tangents);
+    if (!out->borrowed_out_tangents)
+      free(out->out_tangents);
+    out->in_tangents = NULL;
+    out->out_tangents = NULL;
     return 0;
   }
 
+  raw_in_tangents = out->in_tangents;
+  raw_out_tangents = out->out_tangents;
   for (i = 0; i < raw_count; i++) {
-    values[(size_t)i * 4]     = raw_values[(size_t)i * out->value_width + 3];
-    values[(size_t)i * 4 + 1] = raw_values[(size_t)i * out->value_width];
-    values[(size_t)i * 4 + 2] = raw_values[(size_t)i * out->value_width + 1];
-    values[(size_t)i * 4 + 3] = raw_values[(size_t)i * out->value_width + 2];
+    akb_animation_copy_quat_sample(&values[(size_t)i * 4],
+                                   &raw_values[(size_t)i * out->value_width],
+                                   1.0f);
 
+    sign = 1.0f;
     if (i > 0) {
       dot = values[(size_t)i * 4] * values[(size_t)(i - 1) * 4]
             + values[(size_t)i * 4 + 1] * values[(size_t)(i - 1) * 4 + 1]
             + values[(size_t)i * 4 + 2] * values[(size_t)(i - 1) * 4 + 2]
             + values[(size_t)i * 4 + 3] * values[(size_t)(i - 1) * 4 + 3];
       if (dot < 0.0f) {
+        sign = -1.0f;
         values[(size_t)i * 4]     = -values[(size_t)i * 4];
         values[(size_t)i * 4 + 1] = -values[(size_t)i * 4 + 1];
         values[(size_t)i * 4 + 2] = -values[(size_t)i * 4 + 2];
         values[(size_t)i * 4 + 3] = -values[(size_t)i * 4 + 3];
       }
     }
+
+    if (raw_in_tangents) {
+      akb_animation_copy_quat_sample(&in_tangents[(size_t)i * 4],
+                                     &raw_in_tangents[(size_t)i * out->value_width],
+                                     sign);
+    }
+    if (raw_out_tangents) {
+      akb_animation_copy_quat_sample(&out_tangents[(size_t)i * 4],
+                                     &raw_out_tangents[(size_t)i * out->value_width],
+                                     sign);
+    }
   }
   out->value_width = 4;
 
   if (!raw_borrowed)
     free(raw_values);
+  if (!out->borrowed_in_tangents)
+    free(raw_in_tangents);
+  if (!out->borrowed_out_tangents)
+    free(raw_out_tangents);
   out->values = values;
   out->borrowed_values = 0;
+  out->in_tangents = in_tangents;
+  out->out_tangents = out_tangents;
+  out->borrowed_in_tangents = 0;
+  out->borrowed_out_tangents = 0;
   return 1;
 }
 
@@ -2523,6 +2613,8 @@ akb_animation_add_channel(AkbAnimation *animation,
 
   if (sampler->uniInterpolation == AK_INTERPOLATION_HERMITE
       && !akb_animation_extract_cubic_values(&raw_values,
+                                             &out.in_tangents,
+                                             &out.out_tangents,
                                              &value_count,
                                              &raw_borrowed,
                                              time_count,
@@ -2557,6 +2649,12 @@ akb_animation_add_channel(AkbAnimation *animation,
                                     coord)) {
     if (!out.borrowed_times)
       free(out.times);
+    if (!out.borrowed_values)
+      free(out.values);
+    if (!out.borrowed_in_tangents)
+      free(out.in_tangents);
+    if (!out.borrowed_out_tangents)
+      free(out.out_tangents);
     return 0;
   }
 
@@ -2565,6 +2663,10 @@ akb_animation_add_channel(AkbAnimation *animation,
       free(out.times);
     if (!out.borrowed_values)
       free(out.values);
+    if (!out.borrowed_in_tangents)
+      free(out.in_tangents);
+    if (!out.borrowed_out_tangents)
+      free(out.out_tangents);
     return 1;
   }
 
@@ -2573,6 +2675,10 @@ akb_animation_add_channel(AkbAnimation *animation,
       free(out.times);
     if (!out.borrowed_values)
       free(out.values);
+    if (!out.borrowed_in_tangents)
+      free(out.in_tangents);
+    if (!out.borrowed_out_tangents)
+      free(out.out_tangents);
     return 0;
   }
 
@@ -4373,6 +4479,16 @@ akb_anim_channels_to_py(AkbAnimation *animation) {
                                            (size_t)channel->count * sizeof(float)));
     AKB_CH_SET_OBJ("values_f32",
                    akb_memoryview_or_empty(channel->values,
+                                           (size_t)channel->count
+                                           * channel->value_width
+                                           * sizeof(float)));
+    AKB_CH_SET_OBJ("in_tangents_f32",
+                   akb_memoryview_or_empty(channel->in_tangents,
+                                           (size_t)channel->count
+                                           * channel->value_width
+                                           * sizeof(float)));
+    AKB_CH_SET_OBJ("out_tangents_f32",
+                   akb_memoryview_or_empty(channel->out_tangents,
                                            (size_t)channel->count
                                            * channel->value_width
                                            * sizeof(float)));

@@ -101,6 +101,7 @@ _ANIM_TEXTURE_TRANSFORM_ROLES = (
 )
 _MATERIAL_TEXTURE_FIELDS = tuple(f"{role}_texture" for role in _ANIM_TEXTURE_TRANSFORM_ROLES)
 _INTERPOLATION_LINEAR = 1
+_INTERPOLATION_HERMITE = 4
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_PHONG = 1
 _AK_MATERIAL_BLINN = 2
@@ -1564,6 +1565,7 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
             continue
 
         interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        in_tangents, out_tangents = _channel_tangents(channel)
         if target_offset >= width:
             continue
 
@@ -1587,11 +1589,20 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
                     values[key_index * value_width + value_index],
                 )
 
-            fcurve.keyframe_points.add(count)
-            fcurve.keyframe_points.foreach_set("co", coords)
-            for point in fcurve.keyframe_points:
-                point.interpolation = interpolation
-            fcurve.update()
+            _write_fcurve_points(
+                fcurve,
+                coords,
+                interpolation,
+                times=times,
+                fps=fps,
+                in_tangents=in_tangents,
+                out_tangents=out_tangents,
+                value_width=value_width,
+                value_index=value_index,
+                tangent_value=(
+                    lambda value, target=target: _anim_channel_tangent_value(target, value)
+                ),
+            )
 
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
@@ -1698,6 +1709,12 @@ def _anim_channel_value(obj: bpy.types.Object, target: int, value: float) -> flo
     return value
 
 
+def _anim_channel_tangent_value(target: int, value: float) -> float:
+    if target in {_ANIM_CAMERA_ORTHO_XMAG, _ANIM_CAMERA_ORTHO_YMAG, _ANIM_LIGHT_SPOT_OUTER}:
+        return value * 2.0
+    return value
+
+
 def _apply_visibility_animation_channel(
     obj: bpy.types.Object,
     action: bpy.types.Action,
@@ -1780,6 +1797,7 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
             continue
 
         interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        in_tangents, out_tangents = _channel_tangents(channel)
         component_count = 1 if is_partial else value_width
         action = _animation_action_for(obj, shape_keys, actions, "_Morph", channel)
         for component in range(component_count):
@@ -1800,11 +1818,17 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
                 coords[frame_index * 2] = start_frame + times[frame_index] * fps
                 coords[frame_index * 2 + 1] = values[frame_index * value_width + value_index]
 
-            fcurve.keyframe_points.add(count)
-            fcurve.keyframe_points.foreach_set("co", coords)
-            for point in fcurve.keyframe_points:
-                point.interpolation = interpolation
-            fcurve.update()
+            _write_fcurve_points(
+                fcurve,
+                coords,
+                interpolation,
+                times=times,
+                fps=fps,
+                in_tangents=in_tangents,
+                out_tangents=out_tangents,
+                value_width=value_width,
+                value_index=value_index,
+            )
 
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
@@ -2165,6 +2189,7 @@ def _apply_bone_animations(
                 continue
 
             interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+            in_tangents, out_tangents = _channel_tangents(channel)
             component_count = 1 if is_partial else min(width - target_offset, value_width)
             data_path = pose_bone.path_from_id(path)
             for component in range(component_count):
@@ -2176,11 +2201,17 @@ def _apply_bone_animations(
                     coords[key_index * 2] = times[key_index] * fps
                     coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
 
-                fcurve.keyframe_points.add(count)
-                fcurve.keyframe_points.foreach_set("co", coords)
-                for point in fcurve.keyframe_points:
-                    point.interpolation = interpolation
-                fcurve.update()
+                _write_fcurve_points(
+                    fcurve,
+                    coords,
+                    interpolation,
+                    times=times,
+                    fps=fps,
+                    in_tangents=in_tangents,
+                    out_tangents=out_tangents,
+                    value_width=value_width,
+                    value_index=value_index,
+                )
 
             end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
@@ -2223,6 +2254,103 @@ def _ensure_fcurve(
     return fcurve
 
 
+def _channel_tangents(channel: dict) -> tuple[object | None, object | None]:
+    if int(channel.get("interpolation") or 0) != _INTERPOLATION_HERMITE:
+        return None, None
+
+    in_tangents = _buffer_view(channel.get("in_tangents_f32") or b"", "f")
+    out_tangents = _buffer_view(channel.get("out_tangents_f32") or b"", "f")
+    if in_tangents is None or out_tangents is None:
+        return None, None
+    return in_tangents, out_tangents
+
+
+def _write_fcurve_points(
+    fcurve,
+    coords,
+    interpolation: str,
+    *,
+    times=None,
+    fps: float = 1.0,
+    in_tangents=None,
+    out_tangents=None,
+    value_width: int = 0,
+    value_index: int = 0,
+    tangent_value=None,
+) -> None:
+    count = len(coords) // 2
+    fcurve.keyframe_points.add(count)
+    fcurve.keyframe_points.foreach_set("co", coords)
+
+    use_cubic = (
+        interpolation == "BEZIER"
+        and times is not None
+        and in_tangents is not None
+        and out_tangents is not None
+        and value_width > 0
+        and count > 0
+    )
+
+    for point in fcurve.keyframe_points:
+        point.interpolation = "BEZIER" if use_cubic else interpolation
+
+    if use_cubic:
+        _apply_cubic_handles(
+            fcurve,
+            coords,
+            times,
+            fps,
+            in_tangents,
+            out_tangents,
+            value_width,
+            value_index,
+            tangent_value,
+        )
+
+    fcurve.update()
+
+
+def _apply_cubic_handles(
+    fcurve,
+    coords,
+    times,
+    fps: float,
+    in_tangents,
+    out_tangents,
+    value_width: int,
+    value_index: int,
+    tangent_value,
+) -> None:
+    points = fcurve.keyframe_points
+    count = len(points)
+    for index, point in enumerate(points):
+        frame = coords[index * 2]
+        value = coords[index * 2 + 1]
+        point.handle_left_type = "FREE"
+        point.handle_right_type = "FREE"
+
+        if index > 0:
+            dt = max(0.0, float(times[index] - times[index - 1]))
+            tangent = _output_tangent(in_tangents[index * value_width + value_index], tangent_value)
+            point.handle_left = (frame - (dt * fps) / 3.0, value - (tangent * dt) / 3.0)
+        else:
+            point.handle_left = (frame, value)
+
+        if index + 1 < count:
+            dt = max(0.0, float(times[index + 1] - times[index]))
+            tangent = _output_tangent(out_tangents[index * value_width + value_index], tangent_value)
+            point.handle_right = (frame + (dt * fps) / 3.0, value + (tangent * dt) / 3.0)
+        else:
+            point.handle_right = (frame, value)
+
+
+def _output_tangent(value: float, tangent_value) -> float:
+    if tangent_value is None:
+        return float(value)
+    converted = tangent_value(float(value))
+    return float(value) if converted is None else float(converted)
+
+
 def _anim_target_path(target: int) -> tuple[str, int]:
     if target == _ANIM_TRANSLATION:
         return "location", 3
@@ -2236,6 +2364,8 @@ def _anim_target_path(target: int) -> tuple[str, int]:
 def _blender_interpolation(interpolation: int) -> str:
     if interpolation == _INTERPOLATION_STEP:
         return "CONSTANT"
+    if interpolation == _INTERPOLATION_HERMITE:
+        return "BEZIER"
     if interpolation == _INTERPOLATION_LINEAR:
         return "LINEAR"
     return "LINEAR"
@@ -2723,6 +2853,7 @@ def _apply_material_animation(
             continue
 
         interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        in_tangents, out_tangents = _channel_tangents(channel)
         component_count = 1 if is_partial else min(width - target_offset, value_width)
         for component in range(component_count):
             target_index = target_offset + component
@@ -2752,11 +2883,24 @@ def _apply_material_animation(
                 value = values[key_index * value_width + value_index]
                 coords[key_index * 2 + 1] = _material_anim_output_value(data, target, value)
 
-            fcurve.keyframe_points.add(count)
-            fcurve.keyframe_points.foreach_set("co", coords)
-            for point in fcurve.keyframe_points:
-                point.interpolation = interpolation
-            fcurve.update()
+            _write_fcurve_points(
+                fcurve,
+                coords,
+                interpolation,
+                times=times,
+                fps=fps,
+                in_tangents=in_tangents,
+                out_tangents=out_tangents,
+                value_width=value_width,
+                value_index=value_index,
+                tangent_value=(
+                    lambda value, target=target, data=data: _material_anim_output_tangent(
+                        data,
+                        target,
+                        value,
+                    )
+                ),
+            )
 
         end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
@@ -2908,6 +3052,14 @@ def _material_anim_output_value(data: MeshPrimitiveData, target: int, value: flo
         return float(value) * 0.5
     if target == _ANIM_MATERIAL_ANISOTROPY_ROTATION:
         return _blender_anisotropy_rotation(value)
+    return float(value)
+
+
+def _material_anim_output_tangent(data: MeshPrimitiveData, target: int, value: float) -> float:
+    if target == _ANIM_MATERIAL_SPECULAR and _uses_pbr_specular_level(data):
+        return float(value) * 0.5
+    if target == _ANIM_MATERIAL_ANISOTROPY_ROTATION:
+        return float(value) / (2.0 * math.pi)
     return float(value)
 
 
