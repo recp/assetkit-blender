@@ -2363,6 +2363,8 @@ def _create_material(
             factor=(*data.diffuse_transmission_color, 1.0),
             tex_info=_texture_info(data, "diffuse_transmission_color"),
         )
+    if data.volume_thickness > 0.0:
+        _link_volume_absorption(mat, data)
 
     _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket)
 
@@ -3172,6 +3174,32 @@ def _link_emissive_texture(
     )
     if color_output:
         mat.node_tree.links.new(color_output, emission)
+
+
+def _link_volume_absorption(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    output = nodes.get("Material Output")
+    if not output or "Volume" not in output.inputs:
+        return
+
+    try:
+        volume = nodes.new("ShaderNodeVolumeAbsorption")
+    except Exception:
+        return
+
+    color = volume.inputs.get("Color")
+    if color:
+        color.default_value = (*data.volume_attenuation_color, 1.0)
+
+    density = volume.inputs.get("Density")
+    if density:
+        distance = float(data.volume_attenuation_distance)
+        density.default_value = 1.0 / distance if distance > 0.0 else 0.0
+
+    volume_output = volume.outputs.get("Volume")
+    if volume_output:
+        links.new(volume_output, output.inputs["Volume"])
 
 
 def _vertex_color_node(mat: bpy.types.Material, name: str):
