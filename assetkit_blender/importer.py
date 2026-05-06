@@ -31,6 +31,7 @@ _ANIM_VISIBILITY = 5
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_CONSTANT = 4
+_AK_MATERIAL_SPECULAR_GLOSSINESS = 6
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_TIME_BUDGET = 0.025
 _AUTO_PROGRESSIVE_MESH_COUNT = 128
@@ -1882,16 +1883,19 @@ def _create_material(
     if data.transparent_texture:
         _link_alpha_texture(mat, bsdf, data.transparent_texture, _texture_info(data, "transparent"))
     if data.specular_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.specular_texture,
-            ("Specular IOR Level", "Specular"),
-            colorspace="Non-Color",
-            channel="Alpha",
-            factor=data.specular_strength,
-            tex_info=_texture_info(data, "specular"),
-        )
+        if int(data.material_type) == _AK_MATERIAL_SPECULAR_GLOSSINESS:
+            _link_specular_glossiness_texture(mat, bsdf, data)
+        else:
+            _link_factor_texture(
+                mat,
+                bsdf,
+                data.specular_texture,
+                ("Specular IOR Level", "Specular"),
+                colorspace="Non-Color",
+                channel="Alpha",
+                factor=data.specular_strength,
+                tex_info=_texture_info(data, "specular"),
+            )
     if data.specular_color_texture:
         _link_color_texture(
             mat,
@@ -2300,6 +2304,33 @@ def _link_factor_texture(
             return
 
 
+def _link_specular_glossiness_texture(
+    mat: bpy.types.Material,
+    bsdf,
+    data: MeshPrimitiveData,
+) -> None:
+    tex_info = _texture_info(data, "specular")
+    _link_color_texture(
+        mat,
+        bsdf,
+        data.specular_texture,
+        ("Specular Tint",),
+        colorspace="sRGB",
+        factor=(*data.specular_color, 1.0),
+        tex_info=tex_info,
+    )
+
+    output = _image_texture_channel(mat, data.specular_texture, "Non-Color", "Alpha", tex_info)
+    if not output:
+        return
+    if data.specular_strength != 1.0:
+        output = _multiply_value_factor(mat, output, data.specular_strength, "Glossiness Factor")
+    output = _one_minus_value(mat, output, "Glossiness to Roughness")
+    socket = bsdf.inputs.get("Roughness")
+    if socket:
+        mat.node_tree.links.new(output, socket)
+
+
 def _link_range_texture(
     mat: bpy.types.Material,
     target,
@@ -2604,6 +2635,18 @@ def _add_value_factor(
     node.operation = "ADD"
     mat.node_tree.links.new(output, node.inputs[0])
     node.inputs[1].default_value = value
+    return node.outputs[0]
+
+
+def _one_minus_value(mat: bpy.types.Material, output, label: str):
+    try:
+        node = mat.node_tree.nodes.new("ShaderNodeMath")
+    except Exception:
+        return output
+    node.label = label
+    node.operation = "SUBTRACT"
+    node.inputs[0].default_value = 1.0
+    mat.node_tree.links.new(output, node.inputs[1])
     return node.outputs[0]
 
 

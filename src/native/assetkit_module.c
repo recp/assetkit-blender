@@ -23,6 +23,7 @@
 #define AKB_ANIM_SCALE 3
 #define AKB_ANIM_MORPH_WEIGHTS 4
 #define AKB_ANIM_VISIBILITY 5
+#define AKB_MATERIAL_SPECULAR_GLOSSINESS 6
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
@@ -791,6 +792,23 @@ akb_luminance3(const float color[3]) {
   return color[0] * 0.2126f + color[1] * 0.7152f + color[2] * 0.0722f;
 }
 
+static int
+akb_tree_has_name(const AkTreeNode *node, const char *name, unsigned int depth) {
+  const AkTreeNode *child;
+
+  if (!node || !name || depth > 64)
+    return 0;
+  if (node->name && strcmp(node->name, name) == 0)
+    return 1;
+
+  for (child = node->chld; child; child = child->next) {
+    if (akb_tree_has_name(child, name, depth + 1))
+      return 1;
+  }
+
+  return 0;
+}
+
 static void
 akb_extract_material(AkDoc *doc,
                      AkMeshPrimitive *prim,
@@ -800,6 +818,7 @@ akb_extract_material(AkDoc *doc,
   AkInstanceMaterial *inst_mat;
   AkEffect *effect;
   AkTechniqueFxCommon *cmn;
+  int is_specular_glossiness;
 
   out->base_color[0] = 1.0f;
   out->base_color[1] = 1.0f;
@@ -874,7 +893,12 @@ akb_extract_material(AkDoc *doc,
   if (!cmn)
     return;
 
+  is_specular_glossiness = akb_tree_has_name(out->material_extra,
+                                             "KHR_materials_pbrSpecularGlossiness",
+                                             0);
   out->material_type = (uint32_t)cmn->type;
+  if (is_specular_glossiness)
+    out->material_type = AKB_MATERIAL_SPECULAR_GLOSSINESS;
 
 #define AKB_COPY_TEX(ROLE, TEXREF, DEST) \
   akb_copy_texture_info(doc, (TEXREF), inst_mat, (ROLE), (DEST), sizeof(DEST), out)
@@ -919,6 +943,10 @@ akb_extract_material(AkDoc *doc,
       AKB_COPY_TEX("specular_color", cmn->specular->color->texture, out->specular_color_texture);
     }
     AKB_COPY_TEX("specular", cmn->specular->specularTex, out->specular_texture);
+  }
+  if (is_specular_glossiness) {
+    out->metallic = 0.0f;
+    out->roughness = 1.0f - akb_clampf(out->specular_strength, 0.0f, 1.0f);
   }
 
   out->ior = cmn->ior > 0.0f ? cmn->ior : out->ior;
