@@ -284,6 +284,11 @@ class MeshPrimitiveData:
     morph_target_count: int = 0
     morph_anim_count: int = 0
     material_variant_count: int = 0
+    primitive_extra: object | None = None
+    mesh_extra: object | None = None
+    geometry_extra: object | None = None
+    material_extra: object | None = None
+    effect_extra: object | None = None
     skin_vertex_count: int = 0
     skin_joint_count: int = 0
     skin_joint_width: int = 0
@@ -362,6 +367,7 @@ class SceneNodeData:
     light_name: str = ""
     light_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     light_values: tuple[float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0)
+    extra: object | None = None
     _native_owner: object | None = None
 
 
@@ -369,6 +375,7 @@ class SceneNodeData:
 class AssetKitSceneData:
     meshes: list[MeshPrimitiveData]
     nodes: list[SceneNodeData]
+    doc_extra: object | None = None
 
 
 class AssetKitError(RuntimeError):
@@ -619,7 +626,11 @@ def native_load_meshes(
     raw_meshes = result.get("meshes", []) if isinstance(result, dict) else result
     raw_nodes = result.get("nodes", []) if isinstance(result, dict) else []
 
-    return AssetKitSceneData(meshes=_native_meshes_from_raw(raw_meshes), nodes=_native_nodes_from_raw(raw_nodes))
+    return AssetKitSceneData(
+        meshes=_native_meshes_from_raw(raw_meshes),
+        nodes=_native_nodes_from_raw(raw_nodes),
+        doc_extra=result.get("doc_extra") if isinstance(result, dict) else None,
+    )
 
 
 def native_open_scene_stream(
@@ -637,15 +648,24 @@ def native_open_scene_stream(
         result.get("_owner"),
         int(result.get("mesh_count") or 0),
         _native_nodes_from_raw(result.get("nodes", [])),
+        result.get("doc_extra"),
     )
 
 
 class NativeSceneStream:
-    def __init__(self, module: object, owner: object, mesh_count: int, nodes: list[SceneNodeData]) -> None:
+    def __init__(
+        self,
+        module: object,
+        owner: object,
+        mesh_count: int,
+        nodes: list[SceneNodeData],
+        doc_extra: object | None = None,
+    ) -> None:
         self._module = module
         self._owner = owner
         self.mesh_count = mesh_count
         self.nodes = nodes
+        self.doc_extra = doc_extra
 
     def read_mesh_batch(self, start: int, count: int) -> list[MeshPrimitiveData]:
         raw_meshes = self._module.read_mesh_batch(self._owner, start, count)
@@ -669,6 +689,7 @@ def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
                 light_name=item.get("light_name") or "",
                 light_color=tuple(item.get("light_color") or (1.0, 1.0, 1.0)),
                 light_values=tuple(item.get("light_values") or (0.0, 0.0, 0.0, 0.0, 0.0)),
+                extra=item.get("extra"),
                 _native_owner=item.get("_owner"),
             )
         )
@@ -775,6 +796,11 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 morph_target_count=int(item.get("morph_target_count") or 0),
                 morph_anim_count=int(item.get("morph_anim_count") or 0),
                 material_variant_count=int(item.get("material_variant_count") or 0),
+                primitive_extra=item.get("primitive_extra"),
+                mesh_extra=item.get("mesh_extra"),
+                geometry_extra=item.get("geometry_extra"),
+                material_extra=item.get("material_extra"),
+                effect_extra=item.get("effect_extra"),
                 skin_vertex_count=int(item.get("skin_vertex_count") or 0),
                 skin_joint_count=int(item.get("skin_joint_count") or 0),
                 skin_joint_width=int(item.get("skin_joint_width") or 0),

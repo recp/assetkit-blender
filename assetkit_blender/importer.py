@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from array import array
 from collections import deque
+import json
 import math
 import queue
 import threading
@@ -50,8 +51,8 @@ def import_assetkit_file(
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
     existing_actions = _snapshot_actions(fit_timeline)
-    primitives, scene_nodes = _load_assetkit_scene(filepath, library_path, load_options)
-    state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection)
+    primitives, scene_nodes, doc_extra = _load_assetkit_scene(filepath, library_path, load_options)
+    state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection, doc_extra)
     objects = [
         _create_import_object(primitive, state, collection or bpy.context.collection, shading_mode)
         for primitive in primitives
@@ -173,7 +174,7 @@ def import_assetkit_file_auto(
         return job
 
     primitives = stream.read_mesh_batch(0, stream.mesh_count)
-    state = _begin_scene_build(primitives, stream.nodes, active_collection)
+    state = _begin_scene_build(primitives, stream.nodes, active_collection, stream.doc_extra)
     objects = [_create_import_object(primitive, state, active_collection, shading_mode) for primitive in primitives]
     _finish_import(
         objects,
@@ -192,22 +193,24 @@ def _load_assetkit_scene(
     filepath: str,
     library_path: str = "",
     load_options: dict | None = None,
-) -> tuple[list[MeshPrimitiveData], list[SceneNodeData]]:
+) -> tuple[list[MeshPrimitiveData], list[SceneNodeData], object | None]:
     loaded = native_load_meshes(filepath, load_options) if not library_path else None
     if loaded is None:
         kit = AssetKit(library_path or None)
         loaded = kit.load_meshes(filepath)
 
     if isinstance(loaded, AssetKitSceneData):
-        return loaded.meshes, loaded.nodes
-    return loaded, []
+        return loaded.meshes, loaded.nodes, loaded.doc_extra
+    return loaded, [], None
 
 
 def _begin_scene_build(
     primitives: list[MeshPrimitiveData],
     scene_nodes: list[SceneNodeData],
     collection: bpy.types.Collection,
+    doc_extra: object | None = None,
 ) -> dict:
+    _set_assetkit_json_prop(collection, "assetkit_document_extra_json", doc_extra)
     coord_root = _create_coord_root(primitives, collection)
     node_objects = _create_scene_nodes(scene_nodes, coord_root, collection)
     return {
@@ -652,6 +655,7 @@ class _ProgressiveImportJob:
         self.existing_actions = existing_actions
         self.stream = stream
         self.scene_nodes: list[SceneNodeData] = []
+        self.doc_extra: object | None = getattr(stream, "doc_extra", None)
         self.mesh_count = 0
         self.pending_primitives: deque[MeshPrimitiveData] = deque()
         self.objects: list[bpy.types.Object] = []
@@ -679,6 +683,7 @@ class _ProgressiveImportJob:
                 stream = self.stream or native_open_scene_stream(self.filepath, self.load_options)
                 if stream is not None:
                     self.scene_nodes = stream.nodes
+                    self.doc_extra = stream.doc_extra
                     self.mesh_count = stream.mesh_count
                     start = 0
                     producer_batch_size = max(self.batch_size * 4, 256)
@@ -690,8 +695,13 @@ class _ProgressiveImportJob:
                         start += count
                     return
 
-            primitives, scene_nodes = _load_assetkit_scene(self.filepath, self.library_path, self.load_options)
+            primitives, scene_nodes, doc_extra = _load_assetkit_scene(
+                self.filepath,
+                self.library_path,
+                self.load_options,
+            )
             self.scene_nodes = scene_nodes
+            self.doc_extra = doc_extra
             self.mesh_count = len(primitives)
             if primitives:
                 self._queue.put(primitives)
@@ -722,7 +732,7 @@ class _ProgressiveImportJob:
                 return 0.01
             self.build_started_at = time.perf_counter()
             coord_probe = [self.pending_primitives[0]] if self.pending_primitives else []
-            self.state = _begin_scene_build(coord_probe, self.scene_nodes, self.collection)
+            self.state = _begin_scene_build(coord_probe, self.scene_nodes, self.collection, self.doc_extra)
             self._progress_begin()
             if not self.pending_primitives and self.producer_done:
                 self._finish()
@@ -861,6 +871,7 @@ def _create_mesh_object(
     material = _create_material(data, material_cache)
     if material:
         mesh.materials.append(material)
+    _apply_assetkit_extra_props(obj, data)
     _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
     _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection, skin_cache)
@@ -954,6 +965,7 @@ def _create_mesh_object_bulk(
     material = _create_material(data, material_cache)
     if material:
         mesh.materials.append(material)
+    _apply_assetkit_extra_props(obj, data)
     _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
     _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection, skin_cache)
@@ -1036,16 +1048,21 @@ def _new_scene_node_object(node: SceneNodeData, index: int) -> bpy.types.Object:
     if node.camera_type:
         camera = bpy.data.cameras.new(node.camera_name or name)
         _configure_camera(camera, node)
-        return bpy.data.objects.new(name, camera)
+        obj = bpy.data.objects.new(name, camera)
+        _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
+        return obj
 
     if node.light_type:
         light = bpy.data.lights.new(node.light_name or name, _blender_light_type(node.light_type))
         _configure_light(light, node)
-        return bpy.data.objects.new(name, light)
+        obj = bpy.data.objects.new(name, light)
+        _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
+        return obj
 
     obj = bpy.data.objects.new(name, None)
     obj.empty_display_type = "PLAIN_AXES"
     obj.empty_display_size = 0.35
+    _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
     return obj
 
 
@@ -1690,6 +1707,12 @@ def _apply_material_variants(obj: bpy.types.Object, data: MeshPrimitiveData) -> 
         obj[f"{prefix}_material"] = variant.get("material_name") or ""
 
 
+def _apply_assetkit_extra_props(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    _set_assetkit_json_prop(obj, "assetkit_primitive_extra_json", data.primitive_extra)
+    _set_assetkit_json_prop(obj, "assetkit_mesh_extra_json", data.mesh_extra)
+    _set_assetkit_json_prop(obj, "assetkit_geometry_extra_json", data.geometry_extra)
+
+
 def _create_material(
     data: MeshPrimitiveData,
     material_cache: dict[object, bpy.types.Material] | None = None,
@@ -1730,6 +1753,7 @@ def _create_material(
         _set_input(bsdf, "Metallic", data.metallic)
         _set_input(bsdf, "Roughness", data.roughness)
         _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
+        _set_first_input(bsdf, ("Emission Strength",), 1.0 if _has_emission(data) else 0.0)
         _set_first_input(bsdf, ("Specular IOR Level", "Specular"), data.specular_strength)
         _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
         _set_first_input(bsdf, ("IOR",), data.ior)
@@ -1753,6 +1777,8 @@ def _create_material(
             pass
 
     _set_assetkit_material_props(mat, data)
+    _set_assetkit_json_prop(mat, "assetkit_material_extra_json", data.material_extra)
+    _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
 
     if data.base_color_texture or color_attr:
         _link_base_color(mat, color_target, data, color_attr, color_input, alpha_socket)
@@ -1763,62 +1789,59 @@ def _create_material(
             data.metallic_roughness_texture,
             _texture_info(data, "metallic_roughness"),
         )
-    if data.occlusion_texture:
-        _link_image_first(
-            mat,
-            bsdf,
-            data.occlusion_texture,
-            ("Ambient Occlusion", "Occlusion"),
-            colorspace="Non-Color",
-            tex_info=_texture_info(data, "occlusion"),
-        )
+    if data.occlusion_texture and bsdf == color_target:
+        _link_occlusion_texture(mat, bsdf, data)
     if data.normal_texture:
         _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale, _texture_info(data, "normal"))
     if data.emissive_texture:
-        _link_image(
+        _link_emissive_texture(
             mat,
             bsdf,
-            data.emissive_texture,
-            "Emission Color",
-            colorspace="sRGB",
-            tex_info=_texture_info(data, "emissive"),
+            data,
         )
     if data.transparent_texture:
         _link_alpha_texture(mat, bsdf, data.transparent_texture, _texture_info(data, "transparent"))
     if data.specular_texture:
-        _link_image_first(
+        _link_factor_texture(
             mat,
             bsdf,
             data.specular_texture,
             ("Specular IOR Level", "Specular"),
             colorspace="Non-Color",
+            channel="Alpha",
+            factor=data.specular_strength,
             tex_info=_texture_info(data, "specular"),
         )
     if data.specular_color_texture:
-        _link_image_first(
+        _link_color_texture(
             mat,
             bsdf,
             data.specular_color_texture,
             ("Specular Tint",),
             colorspace="sRGB",
+            factor=(*data.specular_color, 1.0),
             tex_info=_texture_info(data, "specular_color"),
         )
     if data.clearcoat_texture:
-        _link_image_first(
+        _link_factor_texture(
             mat,
             bsdf,
             data.clearcoat_texture,
             ("Coat Weight", "Clearcoat"),
             colorspace="Non-Color",
+            channel="Red",
+            factor=data.clearcoat,
             tex_info=_texture_info(data, "clearcoat"),
         )
     if data.clearcoat_roughness_texture:
-        _link_image_first(
+        _link_factor_texture(
             mat,
             bsdf,
             data.clearcoat_roughness_texture,
             ("Coat Roughness", "Clearcoat Roughness"),
             colorspace="Non-Color",
+            channel="Green",
+            factor=data.clearcoat_roughness,
             tex_info=_texture_info(data, "clearcoat_roughness"),
         )
     if data.clearcoat_normal_texture:
@@ -1831,48 +1854,58 @@ def _create_material(
             input_name="Coat Normal",
         )
     if data.transmission_texture:
-        _link_image_first(
+        _link_factor_texture(
             mat,
             bsdf,
             data.transmission_texture,
             ("Transmission Weight", "Transmission"),
             colorspace="Non-Color",
+            channel="Red",
+            factor=data.transmission,
             tex_info=_texture_info(data, "transmission"),
         )
     if data.sheen_color_texture:
-        _link_image_first(
+        _link_color_texture(
             mat,
             bsdf,
             data.sheen_color_texture,
             ("Sheen Tint",),
             colorspace="sRGB",
+            factor=(*data.sheen_color, 1.0),
             tex_info=_texture_info(data, "sheen_color"),
         )
     if data.sheen_roughness_texture:
-        _link_image_first(
+        _link_factor_texture(
             mat,
             bsdf,
             data.sheen_roughness_texture,
             ("Sheen Roughness",),
             colorspace="Non-Color",
+            channel="Alpha",
+            factor=data.sheen_roughness,
             tex_info=_texture_info(data, "sheen_roughness"),
         )
     if data.iridescence_thickness_texture:
-        _link_image_first(
+        _link_range_texture(
             mat,
             bsdf,
             data.iridescence_thickness_texture,
             ("Thin Film Thickness",),
             colorspace="Non-Color",
+            channel="Green",
+            minimum=data.iridescence_thickness_minimum,
+            maximum=data.iridescence_thickness_maximum,
             tex_info=_texture_info(data, "iridescence_thickness"),
         )
     if data.anisotropy_texture:
-        _link_image_first(
+        _link_factor_texture(
             mat,
             bsdf,
             data.anisotropy_texture,
             ("Anisotropic",),
             colorspace="Non-Color",
+            channel="Blue",
+            factor=data.anisotropy,
             tex_info=_texture_info(data, "anisotropy"),
         )
 
@@ -1891,6 +1924,12 @@ def _has_material_data(data: MeshPrimitiveData) -> bool:
 
 def _is_unlit_material(data: MeshPrimitiveData) -> bool:
     return int(data.material_type) == _AK_MATERIAL_CONSTANT
+
+
+def _has_emission(data: MeshPrimitiveData) -> bool:
+    if data.emissive_texture:
+        return True
+    return any(abs(float(value)) > 1e-6 for value in data.emissive_color)
 
 
 def _material_cache_key(data: MeshPrimitiveData) -> object:
@@ -2088,6 +2127,17 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
             mat[f"{prefix}_transform_rotation"] = info.transform_rotation
 
 
+def _set_assetkit_json_prop(target, key: str, value: object | None) -> None:
+    if not value:
+        return
+    try:
+        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return
+    if payload and payload != "null":
+        target[key] = payload
+
+
 def _texture_info(data: MeshPrimitiveData, role: str) -> TextureRefData | None:
     return (data.texture_infos or {}).get(role)
 
@@ -2148,6 +2198,74 @@ def _link_image_first(
             return
 
 
+def _link_factor_texture(
+    mat: bpy.types.Material,
+    target,
+    path: str,
+    input_names: tuple[str, ...],
+    colorspace: str,
+    channel: str,
+    factor: float = 1.0,
+    tex_info: TextureRefData | None = None,
+) -> None:
+    output = _image_texture_channel(mat, path, colorspace, channel, tex_info)
+    if not output:
+        return
+    if factor != 1.0:
+        output = _multiply_value_factor(mat, output, factor, f"{channel} Factor")
+    for input_name in input_names:
+        socket = target.inputs.get(input_name)
+        if socket:
+            mat.node_tree.links.new(output, socket)
+            return
+
+
+def _link_range_texture(
+    mat: bpy.types.Material,
+    target,
+    path: str,
+    input_names: tuple[str, ...],
+    colorspace: str,
+    channel: str,
+    minimum: float,
+    maximum: float,
+    tex_info: TextureRefData | None = None,
+) -> None:
+    output = _image_texture_channel(mat, path, colorspace, channel, tex_info)
+    if not output:
+        return
+    extent = float(maximum) - float(minimum)
+    if extent != 1.0:
+        output = _multiply_value_factor(mat, output, extent, f"{channel} Range")
+    if minimum != 0.0:
+        output = _add_value_factor(mat, output, float(minimum), f"{channel} Offset")
+    for input_name in input_names:
+        socket = target.inputs.get(input_name)
+        if socket:
+            mat.node_tree.links.new(output, socket)
+            return
+
+
+def _link_color_texture(
+    mat: bpy.types.Material,
+    target,
+    path: str,
+    input_names: tuple[str, ...],
+    colorspace: str,
+    factor: tuple[float, float, float, float],
+    tex_info: TextureRefData | None = None,
+) -> None:
+    tex = _image_texture_node(mat, path, colorspace, tex_info)
+    if not tex:
+        return
+    output = _multiply_color_factor(mat, tex.outputs.get("Color"), factor, "Color Factor")
+    for input_name in input_names:
+        socket = target.inputs.get(input_name)
+        if socket:
+            mat.node_tree.links.new(output, socket)
+            return
+
+
 def _link_base_color(
     mat: bpy.types.Material,
     target,
@@ -2192,6 +2310,63 @@ def _link_base_color(
         mat.node_tree.links.new(color_output, base_color)
     if data.alpha_mode and alpha_socket and alpha_output:
         mat.node_tree.links.new(alpha_output, alpha_socket)
+
+
+def _link_occlusion_texture(
+    mat: bpy.types.Material,
+    bsdf,
+    data: MeshPrimitiveData,
+) -> None:
+    base_color = bsdf.inputs.get("Base Color")
+    if not base_color:
+        return
+
+    tex = _image_texture_node(mat, data.occlusion_texture, "Non-Color", _texture_info(data, "occlusion"))
+    if not tex:
+        return
+
+    color_output = None
+    for link in list(base_color.links):
+        color_output = link.from_socket
+        mat.node_tree.links.remove(link)
+        break
+
+    if color_output is None:
+        color_node = mat.node_tree.nodes.new("ShaderNodeRGB")
+        color_node.outputs["Color"].default_value = data.base_color
+        color_output = color_node.outputs["Color"]
+
+    ao_output = tex.outputs.get("Color")
+    strength = float(data.occlusion_strength)
+    if strength != 1.0:
+        ao_output = _mix_color_factor(mat, ao_output, (1.0, 1.0, 1.0), strength, "Occlusion Strength")
+
+    mixed = _multiply_color_outputs(mat, color_output, ao_output, "Occlusion")
+    if mixed:
+        mat.node_tree.links.new(mixed, base_color)
+
+
+def _link_emissive_texture(
+    mat: bpy.types.Material,
+    bsdf,
+    data: MeshPrimitiveData,
+) -> None:
+    emission = bsdf.inputs.get("Emission Color")
+    if not emission:
+        return
+
+    tex = _image_texture_node(mat, data.emissive_texture, "sRGB", _texture_info(data, "emissive"))
+    if not tex:
+        return
+
+    color_output = _multiply_color_factor(
+        mat,
+        tex.outputs.get("Color"),
+        (*data.emissive_color, 1.0),
+        "Emissive Factor",
+    )
+    if color_output:
+        mat.node_tree.links.new(color_output, emission)
 
 
 def _vertex_color_node(mat: bpy.types.Material, name: str):
@@ -2332,6 +2507,60 @@ def _multiply_value_factor(
     return node.outputs[0]
 
 
+def _add_value_factor(
+    mat: bpy.types.Material,
+    output,
+    value: float,
+    label: str,
+):
+    if value == 0.0:
+        return output
+
+    try:
+        node = mat.node_tree.nodes.new("ShaderNodeMath")
+    except Exception:
+        return output
+    node.label = label
+    node.operation = "ADD"
+    mat.node_tree.links.new(output, node.inputs[0])
+    node.inputs[1].default_value = value
+    return node.outputs[0]
+
+
+def _mix_color_factor(
+    mat: bpy.types.Material,
+    output,
+    base: tuple[float, float, float],
+    factor: float,
+    label: str,
+):
+    if output is None:
+        return None
+
+    try:
+        node = mat.node_tree.nodes.new("ShaderNodeMixRGB")
+        node.blend_type = "MIX"
+        node.inputs["Fac"].default_value = factor
+        node.inputs["Color1"].default_value = (*base, 1.0)
+        mat.node_tree.links.new(output, node.inputs["Color2"])
+        node.label = label
+        return node.outputs["Color"]
+    except Exception:
+        pass
+
+    try:
+        node = mat.node_tree.nodes.new("ShaderNodeMix")
+    except Exception:
+        return output
+    node.data_type = "RGBA"
+    node.blend_type = "MIX"
+    node.inputs["Factor"].default_value = factor
+    node.inputs[6].default_value = (*base, 1.0)
+    node.label = label
+    mat.node_tree.links.new(output, node.inputs[7])
+    return node.outputs[2]
+
+
 def _new_value_multiply_node(mat: bpy.types.Material, label: str):
     try:
         node = mat.node_tree.nodes.new("ShaderNodeMath")
@@ -2431,6 +2660,31 @@ def _image_texture_node(
     tex.image = image
     _configure_texture_node(mat, tex, tex_info)
     return tex
+
+
+def _image_texture_channel(
+    mat: bpy.types.Material,
+    path: str,
+    colorspace: str,
+    channel: str,
+    tex_info: TextureRefData | None = None,
+):
+    tex = _image_texture_node(mat, path, colorspace, tex_info)
+    if not tex:
+        return None
+    if channel == "Alpha":
+        return tex.outputs.get("Alpha") or tex.outputs.get("Color")
+    if channel == "Color":
+        return tex.outputs.get("Color")
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    try:
+        separate = nodes.new("ShaderNodeSeparateColor")
+        links.new(tex.outputs["Color"], separate.inputs["Color"])
+        return separate.outputs.get(channel)
+    except Exception:
+        return tex.outputs.get("Color")
 
 
 def _configure_texture_node(mat: bpy.types.Material, tex, tex_info: TextureRefData | None) -> None:

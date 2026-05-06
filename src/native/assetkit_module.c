@@ -71,6 +71,11 @@ typedef struct AkbPrimitive {
   struct AkbSharedDoc *doc_owner;
   struct AkbAnimation *animation;
   struct AkbAnimation *morph_animation;
+  AkTree *primitive_extra;
+  AkTree *mesh_extra;
+  AkTree *geometry_extra;
+  AkTree *material_extra;
+  AkTree *effect_extra;
   AkbMorphTarget *morph_targets;
   AkbLoopFloatAttribute *uv_sets;
   AkbLoopFloatAttribute *color_sets;
@@ -857,6 +862,10 @@ akb_extract_material(AkDoc *doc,
   }
 
   cmn = effect ? ak_getProfileTechniqueCommon(effect) : NULL;
+  if (mat)
+    out->material_extra = ak_extra(mat);
+  if (effect)
+    out->effect_extra = ak_extra(effect);
   if (!cmn)
     return;
 
@@ -2449,6 +2458,9 @@ akb_extract_primitive(AkbPrimitiveList *list,
     return 1;
 
   out.node_index = node_index;
+  out.primitive_extra = ak_extra(prim);
+  out.mesh_extra = ak_extra(mesh);
+  out.geometry_extra = ak_extra(geom);
   akb_extract_material(doc,
                        prim,
                        node && node->geometry ? node->geometry->bindMaterial : NULL,
@@ -2883,6 +2895,103 @@ akb_unicode_from_cstr(const char *value) {
   return PyUnicode_DecodeUTF8(value, (Py_ssize_t)len, "replace");
 }
 
+static int
+akb_py_dict_set_owned(PyObject *dict, const char *key, PyObject *value) {
+  int ok;
+
+  if (!value)
+    return 0;
+  ok = PyDict_SetItemString(dict, key, value) == 0;
+  Py_DECREF(value);
+  return ok;
+}
+
+static PyObject *
+akb_tree_to_py_rec(const AkTreeNode *node, unsigned int depth) {
+  const AkTreeNodeAttr *attr;
+  const AkTreeNode *child;
+  PyObject *dict;
+  PyObject *attrs;
+  PyObject *children;
+  PyObject *item;
+
+  if (!node || depth > 64)
+    Py_RETURN_NONE;
+
+  dict = PyDict_New();
+  if (!dict)
+    return NULL;
+
+  if (!akb_py_dict_set_owned(dict, "name", akb_unicode_from_cstr(node->name))) {
+    Py_DECREF(dict);
+    return NULL;
+  }
+  if (!akb_py_dict_set_owned(dict, "value", akb_unicode_from_cstr(node->val))) {
+    Py_DECREF(dict);
+    return NULL;
+  }
+
+  attrs = PyDict_New();
+  if (!attrs) {
+    Py_DECREF(dict);
+    return NULL;
+  }
+  for (attr = node->attribs; attr; attr = attr->next) {
+    if (!attr->name)
+      continue;
+    item = akb_unicode_from_cstr(attr->val);
+    if (!item) {
+      Py_DECREF(attrs);
+      Py_DECREF(dict);
+      return NULL;
+    }
+    if (PyDict_SetItemString(attrs, attr->name, item) < 0) {
+      Py_DECREF(item);
+      Py_DECREF(attrs);
+      Py_DECREF(dict);
+      return NULL;
+    }
+    Py_DECREF(item);
+  }
+  if (PyDict_SetItemString(dict, "attributes", attrs) < 0) {
+    Py_DECREF(attrs);
+    Py_DECREF(dict);
+    return NULL;
+  }
+  Py_DECREF(attrs);
+
+  children = PyList_New(0);
+  if (!children) {
+    Py_DECREF(dict);
+    return NULL;
+  }
+  for (child = node->chld; child; child = child->next) {
+    item = akb_tree_to_py_rec(child, depth + 1);
+    if (!item || PyList_Append(children, item) < 0) {
+      Py_XDECREF(item);
+      Py_DECREF(children);
+      Py_DECREF(dict);
+      return NULL;
+    }
+    Py_DECREF(item);
+  }
+  if (PyDict_SetItemString(dict, "children", children) < 0) {
+    Py_DECREF(children);
+    Py_DECREF(dict);
+    return NULL;
+  }
+  Py_DECREF(children);
+
+  return dict;
+}
+
+static PyObject *
+akb_tree_to_py(const AkTree *tree) {
+  if (!tree)
+    Py_RETURN_NONE;
+  return akb_tree_to_py_rec(tree, 0);
+}
+
 static PyObject *
 akb_anim_channels_to_py(AkbAnimation *animation) {
   PyObject *list;
@@ -3278,6 +3387,11 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                                        prim->loop_count));
   AKB_SET_OBJ("texture_infos", akb_texture_infos_to_py(prim->texture_infos,
                                                        prim->texture_info_count));
+  AKB_SET_OBJ("primitive_extra", akb_tree_to_py(prim->primitive_extra));
+  AKB_SET_OBJ("mesh_extra", akb_tree_to_py(prim->mesh_extra));
+  AKB_SET_OBJ("geometry_extra", akb_tree_to_py(prim->geometry_extra));
+  AKB_SET_OBJ("material_extra", akb_tree_to_py(prim->material_extra));
+  AKB_SET_OBJ("effect_extra", akb_tree_to_py(prim->effect_extra));
   AKB_SET_OBJ("material_variant_count",
               PyLong_FromUnsignedLong(prim->material_variant_count));
   AKB_SET_OBJ("material_variants", akb_material_variants_to_py(prim));
@@ -3404,6 +3518,7 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
   AKB_NODE_SET_OBJ("matrix_f32",
                    akb_memoryview_or_empty(node->matrix,
                                            node->has_transform ? 16 * sizeof(float) : 0));
+  AKB_NODE_SET_OBJ("extra", akb_tree_to_py(node->source ? ak_extra(node->source) : NULL));
   AKB_NODE_SET_OBJ("anim_count",
                    PyLong_FromUnsignedLong(node->animation
                                            ? (unsigned long)node->animation->count
@@ -3570,6 +3685,18 @@ akb_load_meshes(PyObject *self, PyObject *args) {
     return NULL;
   }
 
+  item = akb_tree_to_py(ak_extra(doc));
+  if (!item || PyDict_SetItemString(out, "doc_extra", item) < 0) {
+    Py_XDECREF(item);
+    Py_DECREF(node_list);
+    Py_DECREF(mesh_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(item);
+
   Py_DECREF(node_list);
   Py_DECREF(mesh_list);
   Py_DECREF(owner);
@@ -3700,6 +3827,17 @@ akb_open_scene(PyObject *self, PyObject *args) {
       || PyDict_SetItemString(out, "nodes", node_list) < 0
       || PyDict_SetItemString(out, "mesh_count", item) < 0) {
     Py_DECREF(item);
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(item);
+
+  item = akb_tree_to_py(ak_extra(doc));
+  if (!item || PyDict_SetItemString(out, "doc_extra", item) < 0) {
+    Py_XDECREF(item);
     Py_DECREF(node_list);
     Py_DECREF(out);
     Py_DECREF(owner);
