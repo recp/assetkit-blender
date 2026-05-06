@@ -274,6 +274,7 @@ class MeshPrimitiveData:
     morph_targets: list[MorphTargetData] | None = None
     material_variants: list[dict] | None = None
     morph_anim_channels: list[dict] | None = None
+    material_anim_channels: list[dict] | None = None
     object_name: str = ""
     matrix_f32: object = b""
     coord_matrix_f32: object = b""
@@ -285,6 +286,7 @@ class MeshPrimitiveData:
     anim_count: int = 0
     morph_target_count: int = 0
     morph_anim_count: int = 0
+    material_anim_count: int = 0
     material_variant_count: int = 0
     primitive_extra: object | None = None
     mesh_extra: object | None = None
@@ -823,6 +825,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 morph_targets=morph_targets,
                 material_variants=item.get("material_variants") or [],
                 morph_anim_channels=item.get("morph_anim_channels") or [],
+                material_anim_channels=item.get("material_anim_channels") or [],
                 object_name=item.get("object_name") or "",
                 matrix_f32=item.get("matrix_f32") or b"",
                 coord_matrix_f32=item.get("coord_matrix_f32") or b"",
@@ -834,6 +837,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 anim_count=int(item.get("anim_count") or 0),
                 morph_target_count=int(item.get("morph_target_count") or 0),
                 morph_anim_count=int(item.get("morph_anim_count") or 0),
+                material_anim_count=int(item.get("material_anim_count") or 0),
                 material_variant_count=int(item.get("material_variant_count") or 0),
                 primitive_extra=item.get("primitive_extra"),
                 mesh_extra=item.get("mesh_extra"),

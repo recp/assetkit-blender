@@ -39,6 +39,35 @@ _ANIM_LIGHT_INTENSITY = 13
 _ANIM_LIGHT_RANGE = 14
 _ANIM_LIGHT_SPOT_INNER = 15
 _ANIM_LIGHT_SPOT_OUTER = 16
+_ANIM_MATERIAL_BASE_COLOR = 32
+_ANIM_MATERIAL_METALLIC = 33
+_ANIM_MATERIAL_ROUGHNESS = 34
+_ANIM_MATERIAL_ALPHA_CUTOFF = 35
+_ANIM_MATERIAL_EMISSIVE_COLOR = 36
+_ANIM_MATERIAL_EMISSIVE_STRENGTH = 37
+_ANIM_MATERIAL_NORMAL_SCALE = 38
+_ANIM_MATERIAL_OCCLUSION_STRENGTH = 39
+_ANIM_MATERIAL_SPECULAR = 40
+_ANIM_MATERIAL_SPECULAR_COLOR = 41
+_ANIM_MATERIAL_IOR = 42
+_ANIM_MATERIAL_CLEARCOAT = 43
+_ANIM_MATERIAL_CLEARCOAT_ROUGHNESS = 44
+_ANIM_MATERIAL_CLEARCOAT_NORMAL_SCALE = 45
+_ANIM_MATERIAL_TRANSMISSION = 46
+_ANIM_MATERIAL_SHEEN_COLOR = 47
+_ANIM_MATERIAL_SHEEN_ROUGHNESS = 48
+_ANIM_MATERIAL_IRIDESCENCE = 49
+_ANIM_MATERIAL_IRIDESCENCE_IOR = 50
+_ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM = 51
+_ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MAXIMUM = 52
+_ANIM_MATERIAL_VOLUME_THICKNESS = 53
+_ANIM_MATERIAL_VOLUME_ATTENUATION_DISTANCE = 54
+_ANIM_MATERIAL_VOLUME_ATTENUATION_COLOR = 55
+_ANIM_MATERIAL_ANISOTROPY = 56
+_ANIM_MATERIAL_ANISOTROPY_ROTATION = 57
+_ANIM_MATERIAL_DISPERSION = 58
+_ANIM_MATERIAL_DIFFUSE_TRANSMISSION = 59
+_ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR = 60
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_STEP = 6
 _AK_MATERIAL_CONSTANT = 4
@@ -2080,9 +2109,211 @@ def _create_material(
             tex_info=_texture_info(data, "anisotropy"),
         )
 
+    _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket)
+
     if material_cache is not None:
         material_cache[cache_key] = mat
     return mat
+
+
+def _apply_material_animation(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    bsdf,
+    color_target,
+    color_input: str,
+    alpha_socket,
+) -> None:
+    channels = data.material_anim_channels or []
+    if not channels:
+        return
+    if mat.get("assetkit_material_animation_applied"):
+        return
+
+    scene = bpy.context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    actions: dict[int, bpy.types.Action] = {}
+    end_frame = scene.frame_end
+
+    for channel in channels:
+        target = int(channel.get("target") or 0)
+        width = _material_anim_width(target)
+        if width <= 0:
+            continue
+
+        count = int(channel.get("count") or 0)
+        value_width = int(channel.get("value_width") or 0)
+        target_offset = int(channel.get("target_offset") or 0)
+        is_partial = bool(channel.get("is_partial"))
+        times = _buffer_view(channel.get("times_f32") or b"", "f")
+        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        if count <= 0 or value_width <= 0 or times is None or values is None:
+            continue
+        if target_offset >= width:
+            continue
+
+        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        component_count = 1 if is_partial else min(width - target_offset, value_width)
+        for component in range(component_count):
+            target_index = target_offset + component
+            value_index = 0 if is_partial else component
+            owner, path, fcurve_index, group_name = _material_anim_channel_target(
+                mat,
+                bsdf,
+                color_target,
+                color_input,
+                alpha_socket,
+                target,
+                target_index,
+            )
+            if not owner or not path:
+                continue
+
+            action = _animation_action_for(mat, owner, actions, "" if owner == mat else "_Nodes")
+            fcurve = _ensure_fcurve(action, owner, path, fcurve_index, group_name=group_name)
+            coords = array("f", [0.0]) * (count * 2)
+            for key_index in range(count):
+                coords[key_index * 2] = times[key_index] * fps
+                coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
+
+            fcurve.keyframe_points.add(count)
+            fcurve.keyframe_points.foreach_set("co", coords)
+            for point in fcurve.keyframe_points:
+                point.interpolation = interpolation
+            fcurve.update()
+
+        end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
+
+    if actions:
+        mat["assetkit_material_animation_applied"] = True
+    if end_frame > scene.frame_end:
+        scene.frame_end = end_frame
+
+
+def _material_anim_width(target: int) -> int:
+    if target in {
+        _ANIM_MATERIAL_BASE_COLOR,
+    }:
+        return 4
+    if target in {
+        _ANIM_MATERIAL_EMISSIVE_COLOR,
+        _ANIM_MATERIAL_SPECULAR_COLOR,
+        _ANIM_MATERIAL_SHEEN_COLOR,
+        _ANIM_MATERIAL_VOLUME_ATTENUATION_COLOR,
+        _ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR,
+    }:
+        return 3
+    if target in {
+        _ANIM_MATERIAL_METALLIC,
+        _ANIM_MATERIAL_ROUGHNESS,
+        _ANIM_MATERIAL_ALPHA_CUTOFF,
+        _ANIM_MATERIAL_EMISSIVE_STRENGTH,
+        _ANIM_MATERIAL_NORMAL_SCALE,
+        _ANIM_MATERIAL_OCCLUSION_STRENGTH,
+        _ANIM_MATERIAL_SPECULAR,
+        _ANIM_MATERIAL_IOR,
+        _ANIM_MATERIAL_CLEARCOAT,
+        _ANIM_MATERIAL_CLEARCOAT_ROUGHNESS,
+        _ANIM_MATERIAL_CLEARCOAT_NORMAL_SCALE,
+        _ANIM_MATERIAL_TRANSMISSION,
+        _ANIM_MATERIAL_SHEEN_ROUGHNESS,
+        _ANIM_MATERIAL_IRIDESCENCE,
+        _ANIM_MATERIAL_IRIDESCENCE_IOR,
+        _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM,
+        _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MAXIMUM,
+        _ANIM_MATERIAL_VOLUME_THICKNESS,
+        _ANIM_MATERIAL_VOLUME_ATTENUATION_DISTANCE,
+        _ANIM_MATERIAL_ANISOTROPY,
+        _ANIM_MATERIAL_ANISOTROPY_ROTATION,
+        _ANIM_MATERIAL_DISPERSION,
+        _ANIM_MATERIAL_DIFFUSE_TRANSMISSION,
+    }:
+        return 1
+    return 0
+
+
+def _material_anim_channel_target(
+    mat: bpy.types.Material,
+    bsdf,
+    color_target,
+    color_input: str,
+    alpha_socket,
+    target: int,
+    target_index: int,
+) -> tuple[bpy.types.ID | None, str, int | None, str]:
+    if target == _ANIM_MATERIAL_BASE_COLOR:
+        socket = alpha_socket if target_index == 3 and alpha_socket else _first_input(color_target, (color_input,))
+        if not socket:
+            return None, "", None, ""
+        index = None if socket == alpha_socket else target_index
+        return mat.node_tree, socket.path_from_id("default_value"), index, "Material"
+
+    socket_target = {
+        _ANIM_MATERIAL_METALLIC: ("Metallic",),
+        _ANIM_MATERIAL_ROUGHNESS: ("Roughness",),
+        _ANIM_MATERIAL_EMISSIVE_STRENGTH: ("Emission Strength",),
+        _ANIM_MATERIAL_SPECULAR: ("Specular IOR Level", "Specular"),
+        _ANIM_MATERIAL_IOR: ("IOR",),
+        _ANIM_MATERIAL_CLEARCOAT: ("Coat Weight", "Clearcoat"),
+        _ANIM_MATERIAL_CLEARCOAT_ROUGHNESS: ("Coat Roughness", "Clearcoat Roughness"),
+        _ANIM_MATERIAL_TRANSMISSION: ("Transmission Weight", "Transmission"),
+        _ANIM_MATERIAL_SHEEN_ROUGHNESS: ("Sheen Roughness",),
+        _ANIM_MATERIAL_ANISOTROPY: ("Anisotropic",),
+        _ANIM_MATERIAL_ANISOTROPY_ROTATION: ("Anisotropic Rotation",),
+        _ANIM_MATERIAL_IRIDESCENCE_IOR: ("Thin Film IOR",),
+        _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MAXIMUM: ("Thin Film Thickness",),
+    }.get(target)
+    if socket_target:
+        socket = _first_input(bsdf, socket_target)
+        if socket:
+            return mat.node_tree, socket.path_from_id("default_value"), None, "Material"
+
+    color_socket_target = {
+        _ANIM_MATERIAL_EMISSIVE_COLOR: ("Emission Color",),
+        _ANIM_MATERIAL_SPECULAR_COLOR: ("Specular Tint",),
+        _ANIM_MATERIAL_SHEEN_COLOR: ("Sheen Tint",),
+    }.get(target)
+    if color_socket_target:
+        socket = _first_input(bsdf, color_socket_target)
+        if socket:
+            return mat.node_tree, socket.path_from_id("default_value"), target_index, "Material"
+
+    if target == _ANIM_MATERIAL_ALPHA_CUTOFF:
+        return mat, "alpha_threshold", None, "Material"
+
+    prop = _material_anim_custom_prop(target)
+    if prop:
+        if prop not in mat:
+            mat[prop] = (0.0, 0.0, 0.0) if _material_anim_width(target) > 1 else 0.0
+        return mat, f'["{prop}"]', None if _material_anim_width(target) == 1 else target_index, "AssetKit"
+
+    return None, "", None, ""
+
+
+def _first_input(node, names: tuple[str, ...]):
+    if not node:
+        return None
+    for name in names:
+        socket = node.inputs.get(name)
+        if socket:
+            return socket
+    return None
+
+
+def _material_anim_custom_prop(target: int) -> str:
+    return {
+        _ANIM_MATERIAL_NORMAL_SCALE: "assetkit_normal_scale",
+        _ANIM_MATERIAL_OCCLUSION_STRENGTH: "assetkit_occlusion_strength",
+        _ANIM_MATERIAL_CLEARCOAT_NORMAL_SCALE: "assetkit_clearcoat_normal_scale",
+        _ANIM_MATERIAL_IRIDESCENCE: "assetkit_iridescence",
+        _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM: "assetkit_iridescence_thickness_minimum",
+        _ANIM_MATERIAL_VOLUME_THICKNESS: "assetkit_volume_thickness",
+        _ANIM_MATERIAL_VOLUME_ATTENUATION_DISTANCE: "assetkit_volume_attenuation_distance",
+        _ANIM_MATERIAL_VOLUME_ATTENUATION_COLOR: "assetkit_volume_attenuation_color",
+        _ANIM_MATERIAL_DISPERSION: "assetkit_dispersion",
+        _ANIM_MATERIAL_DIFFUSE_TRANSMISSION: "assetkit_diffuse_transmission",
+        _ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR: "assetkit_diffuse_transmission_color",
+    }.get(target, "")
 
 
 def _has_material_data(data: MeshPrimitiveData) -> bool:
@@ -2268,6 +2499,9 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_transparent_color": data.transparent_color,
         "assetkit_transparent_amount": data.transparent_amount,
         "assetkit_opacity": data.opacity,
+        "assetkit_normal_scale": data.normal_scale,
+        "assetkit_occlusion_strength": data.occlusion_strength,
+        "assetkit_clearcoat_normal_scale": data.clearcoat_normal_scale,
         "assetkit_material_type": data.material_type,
         "assetkit_iridescence_texture": data.iridescence_texture,
         "assetkit_iridescence_thickness_texture": data.iridescence_thickness_texture,

@@ -34,6 +34,35 @@
 #define AKB_ANIM_LIGHT_RANGE 14
 #define AKB_ANIM_LIGHT_SPOT_INNER 15
 #define AKB_ANIM_LIGHT_SPOT_OUTER 16
+#define AKB_ANIM_MATERIAL_BASE_COLOR 32
+#define AKB_ANIM_MATERIAL_METALLIC 33
+#define AKB_ANIM_MATERIAL_ROUGHNESS 34
+#define AKB_ANIM_MATERIAL_ALPHA_CUTOFF 35
+#define AKB_ANIM_MATERIAL_EMISSIVE_COLOR 36
+#define AKB_ANIM_MATERIAL_EMISSIVE_STRENGTH 37
+#define AKB_ANIM_MATERIAL_NORMAL_SCALE 38
+#define AKB_ANIM_MATERIAL_OCCLUSION_STRENGTH 39
+#define AKB_ANIM_MATERIAL_SPECULAR 40
+#define AKB_ANIM_MATERIAL_SPECULAR_COLOR 41
+#define AKB_ANIM_MATERIAL_IOR 42
+#define AKB_ANIM_MATERIAL_CLEARCOAT 43
+#define AKB_ANIM_MATERIAL_CLEARCOAT_ROUGHNESS 44
+#define AKB_ANIM_MATERIAL_CLEARCOAT_NORMAL_SCALE 45
+#define AKB_ANIM_MATERIAL_TRANSMISSION 46
+#define AKB_ANIM_MATERIAL_SHEEN_COLOR 47
+#define AKB_ANIM_MATERIAL_SHEEN_ROUGHNESS 48
+#define AKB_ANIM_MATERIAL_IRIDESCENCE 49
+#define AKB_ANIM_MATERIAL_IRIDESCENCE_IOR 50
+#define AKB_ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM 51
+#define AKB_ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MAXIMUM 52
+#define AKB_ANIM_MATERIAL_VOLUME_THICKNESS 53
+#define AKB_ANIM_MATERIAL_VOLUME_ATTENUATION_DISTANCE 54
+#define AKB_ANIM_MATERIAL_VOLUME_ATTENUATION_COLOR 55
+#define AKB_ANIM_MATERIAL_ANISOTROPY 56
+#define AKB_ANIM_MATERIAL_ANISOTROPY_ROTATION 57
+#define AKB_ANIM_MATERIAL_DISPERSION 58
+#define AKB_ANIM_MATERIAL_DIFFUSE_TRANSMISSION 59
+#define AKB_ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR 60
 #define AKB_MATERIAL_SPECULAR_GLOSSINESS 6
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
@@ -84,6 +113,7 @@ typedef struct AkbPrimitive {
   struct AkbSharedDoc *doc_owner;
   struct AkbAnimation *animation;
   struct AkbAnimation *morph_animation;
+  struct AkbAnimation *material_animation;
   AkTree *primitive_extra;
   AkTree *mesh_extra;
   AkTree *geometry_extra;
@@ -570,6 +600,7 @@ akb_primitive_free(AkbPrimitive *prim) {
   free(prim->morph_targets);
   akb_animation_release(prim->animation);
   akb_animation_release(prim->morph_animation);
+  akb_animation_release(prim->material_animation);
   akb_shared_doc_release(prim->doc_owner);
   memset(prim, 0, sizeof(*prim));
 }
@@ -818,6 +849,35 @@ akb_tree_has_name(const AkTreeNode *node, const char *name, unsigned int depth) 
   }
 
   return 0;
+}
+
+static AkEffect *
+akb_primitive_effect(AkMeshPrimitive *prim,
+                     AkBindMaterial *bind_material,
+                     AkMaterial **mat_out,
+                     AkInstanceMaterial **inst_mat_out) {
+  AkMaterial *mat;
+  AkInstanceMaterial *inst_mat;
+  AkEffect *effect;
+
+  mat = prim ? prim->material : NULL;
+  inst_mat = NULL;
+  effect = NULL;
+
+  if (mat) {
+    effect = mat->effect ? (AkEffect *)ak_instanceObject(&mat->effect->base) : NULL;
+  } else if (bind_material) {
+    effect = ak_effectForBindMaterial(bind_material, prim, &inst_mat);
+    if (inst_mat)
+      mat = (AkMaterial *)ak_instanceObject(&inst_mat->base);
+  }
+
+  if (mat_out)
+    *mat_out = mat;
+  if (inst_mat_out)
+    *inst_mat_out = inst_mat;
+
+  return effect;
 }
 
 static void
@@ -2203,6 +2263,55 @@ akb_animation_collect_walk(AkbAnimation *animation,
   return 1;
 }
 
+static AkbAnimation *
+akb_animation_new_for_bindings(AkDoc *doc,
+                               AkbSharedDoc *doc_owner,
+                               const AkbAnimBinding *bindings,
+                               int binding_count,
+                               const AkbCoordContext *coord,
+                               int *ok) {
+  AkbAnimation *animation;
+  AkLibrary *library;
+  AkContext context;
+
+  *ok = 1;
+  if (!doc || !bindings || binding_count <= 0)
+    return NULL;
+
+  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+  if (!animation) {
+    *ok = 0;
+    return NULL;
+  }
+
+  animation->refcount = 1;
+  animation->doc_owner = doc_owner;
+  akb_shared_doc_retain(doc_owner);
+
+  memset(&context, 0, sizeof(context));
+  context.doc = doc;
+
+  for (library = doc->lib.animations; library; library = library->next) {
+    if (!akb_animation_collect_walk(animation,
+                                    (AkAnimation *)library->chld,
+                                    &context,
+                                    bindings,
+                                    binding_count,
+                                    coord)) {
+      akb_animation_release(animation);
+      *ok = 0;
+      return NULL;
+    }
+  }
+
+  if (!animation->count) {
+    akb_animation_release(animation);
+    return NULL;
+  }
+
+  return animation;
+}
+
 static int
 akb_node_visibility_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity) {
   if (!node)
@@ -2382,6 +2491,246 @@ akb_node_scene_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity) {
   count = akb_node_light_bindings(node, bindings, capacity, count);
 
   return count;
+}
+
+static int
+akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int capacity) {
+  int count;
+
+  count = 0;
+  if (!cmn)
+    return 0;
+
+  if (cmn->albedo && cmn->albedo->color)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  cmn->albedo->color->vec,
+                                  AKB_ANIM_MATERIAL_BASE_COLOR,
+                                  4);
+  if (cmn->metalness)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->metalness->intensity,
+                                  AKB_ANIM_MATERIAL_METALLIC,
+                                  1);
+  if (cmn->roughness)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->roughness->intensity,
+                                  AKB_ANIM_MATERIAL_ROUGHNESS,
+                                  1);
+  if (cmn->transparent)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->transparent->cutoff,
+                                  AKB_ANIM_MATERIAL_ALPHA_CUTOFF,
+                                  1);
+  if (cmn->emission) {
+    if (cmn->emission->color.color)
+      count = akb_anim_binding_push(bindings,
+                                    capacity,
+                                    count,
+                                    cmn->emission->color.color->vec,
+                                    AKB_ANIM_MATERIAL_EMISSIVE_COLOR,
+                                    3);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->emission->strength,
+                                  AKB_ANIM_MATERIAL_EMISSIVE_STRENGTH,
+                                  1);
+  }
+  if (cmn->normal)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->normal->scale,
+                                  AKB_ANIM_MATERIAL_NORMAL_SCALE,
+                                  1);
+  if (cmn->occlusion)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->occlusion->strength,
+                                  AKB_ANIM_MATERIAL_OCCLUSION_STRENGTH,
+                                  1);
+  if (cmn->specular) {
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->specular->strength,
+                                  AKB_ANIM_MATERIAL_SPECULAR,
+                                  1);
+    if (cmn->specular->color && cmn->specular->color->color)
+      count = akb_anim_binding_push(bindings,
+                                    capacity,
+                                    count,
+                                    cmn->specular->color->color->vec,
+                                    AKB_ANIM_MATERIAL_SPECULAR_COLOR,
+                                    3);
+  }
+  if (cmn->ior > 0.0f)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->ior,
+                                  AKB_ANIM_MATERIAL_IOR,
+                                  1);
+  if (cmn->clearcoat) {
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->clearcoat->intensity,
+                                  AKB_ANIM_MATERIAL_CLEARCOAT,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->clearcoat->roughness,
+                                  AKB_ANIM_MATERIAL_CLEARCOAT_ROUGHNESS,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->clearcoat->normalScale,
+                                  AKB_ANIM_MATERIAL_CLEARCOAT_NORMAL_SCALE,
+                                  1);
+  }
+  if (cmn->transmission)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->transmission->factor,
+                                  AKB_ANIM_MATERIAL_TRANSMISSION,
+                                  1);
+  if (cmn->sheen) {
+    if (cmn->sheen->color && cmn->sheen->color->color)
+      count = akb_anim_binding_push(bindings,
+                                    capacity,
+                                    count,
+                                    cmn->sheen->color->color->vec,
+                                    AKB_ANIM_MATERIAL_SHEEN_COLOR,
+                                    3);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->sheen->roughness,
+                                  AKB_ANIM_MATERIAL_SHEEN_ROUGHNESS,
+                                  1);
+  }
+  if (cmn->iridescence) {
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->iridescence->factor,
+                                  AKB_ANIM_MATERIAL_IRIDESCENCE,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->iridescence->ior,
+                                  AKB_ANIM_MATERIAL_IRIDESCENCE_IOR,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->iridescence->thicknessMinimum,
+                                  AKB_ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->iridescence->thicknessMaximum,
+                                  AKB_ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MAXIMUM,
+                                  1);
+  }
+  if (cmn->volume) {
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->volume->thicknessFactor,
+                                  AKB_ANIM_MATERIAL_VOLUME_THICKNESS,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->volume->attenuationDistance,
+                                  AKB_ANIM_MATERIAL_VOLUME_ATTENUATION_DISTANCE,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  cmn->volume->attenuationColor.vec,
+                                  AKB_ANIM_MATERIAL_VOLUME_ATTENUATION_COLOR,
+                                  3);
+  }
+  if (cmn->anisotropy) {
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->anisotropy->strength,
+                                  AKB_ANIM_MATERIAL_ANISOTROPY,
+                                  1);
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->anisotropy->rotation,
+                                  AKB_ANIM_MATERIAL_ANISOTROPY_ROTATION,
+                                  1);
+  }
+  if (cmn->dispersion)
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->dispersion->dispersion,
+                                  AKB_ANIM_MATERIAL_DISPERSION,
+                                  1);
+  if (cmn->diffuseTransmission) {
+    count = akb_anim_binding_push(bindings,
+                                  capacity,
+                                  count,
+                                  &cmn->diffuseTransmission->factor,
+                                  AKB_ANIM_MATERIAL_DIFFUSE_TRANSMISSION,
+                                  1);
+    if (cmn->diffuseTransmission->color && cmn->diffuseTransmission->color->color)
+      count = akb_anim_binding_push(bindings,
+                                    capacity,
+                                    count,
+                                    cmn->diffuseTransmission->color->color->vec,
+                                    AKB_ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR,
+                                    3);
+  }
+
+  return count;
+}
+
+static AkbAnimation *
+akb_material_animation_new(AkDoc *doc,
+                           AkbSharedDoc *doc_owner,
+                           AkMeshPrimitive *prim,
+                           AkBindMaterial *bind_material,
+                           const AkbCoordContext *coord,
+                           int *ok) {
+  AkEffect *effect;
+  AkTechniqueFxCommon *cmn;
+  AkbAnimBinding bindings[64];
+  int binding_count;
+
+  *ok = 1;
+  effect = akb_primitive_effect(prim, bind_material, NULL, NULL);
+  cmn = effect ? ak_getProfileTechniqueCommon(effect) : NULL;
+  binding_count = akb_material_bindings(cmn, bindings, 64);
+
+  return akb_animation_new_for_bindings(doc,
+                                        doc_owner,
+                                        bindings,
+                                        binding_count,
+                                        coord,
+                                        ok);
 }
 
 static int
@@ -2798,6 +3147,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
   uint32_t pos_count = 0;
   uint32_t stride, pos_offset;
   uint32_t i;
+  int ok;
   const char *base_name;
 
   pos_input = prim->pos ? prim->pos
@@ -2813,6 +3163,18 @@ akb_extract_primitive(AkbPrimitiveList *list,
                        prim,
                        node && node->geometry ? node->geometry->bindMaterial : NULL,
                        &out);
+  out.material_animation = akb_material_animation_new(doc,
+                                                      doc_owner,
+                                                      prim,
+                                                      node && node->geometry
+                                                      ? node->geometry->bindMaterial
+                                                      : NULL,
+                                                      NULL,
+                                                      &ok);
+  if (!ok) {
+    akb_primitive_free(&out);
+    return 0;
+  }
   if (!akb_extract_material_variants(doc, prim, &out)) {
     akb_primitive_free(&out);
     return 0;
@@ -3732,6 +4094,11 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
                                       ? (unsigned long)prim->morph_animation->count
                                       : 0));
   AKB_SET_OBJ("morph_anim_channels", akb_anim_channels_to_py(prim->morph_animation));
+  AKB_SET_OBJ("material_anim_count",
+              PyLong_FromUnsignedLong(prim->material_animation
+                                      ? (unsigned long)prim->material_animation->count
+                                      : 0));
+  AKB_SET_OBJ("material_anim_channels", akb_anim_channels_to_py(prim->material_animation));
   AKB_SET_OBJ("uv_sets", akb_loop_float_attrs_to_py(prim->uv_sets,
                                                     prim->uv_set_count,
                                                     prim->loop_count));
