@@ -926,11 +926,13 @@ def _create_mesh_object_bulk(
                     domain="CORNER",
                 )
                 color_attr.data.foreach_set("color", colors)
+        _set_render_color_index(mesh)
     elif data.colors_f32:
         colors = _buffer_view(data.colors_f32, "f")
         if colors is not None:
             color_attr = mesh.color_attributes.new(name="Color", type="FLOAT_COLOR", domain="CORNER")
             color_attr.data.foreach_set("color", colors)
+            _set_render_color_index(mesh)
 
     if data.tangents_f32:
         tangents = _buffer_view(data.tangents_f32, "f")
@@ -996,6 +998,13 @@ def _set_mesh_smooth(mesh: bpy.types.Mesh, smooth: bool) -> None:
     except Exception:
         for poly in mesh.polygons:
             poly.use_smooth = smooth
+
+
+def _set_render_color_index(mesh: bpy.types.Mesh) -> None:
+    try:
+        mesh.color_attributes.render_color_index = 0
+    except Exception:
+        pass
 
 
 def _create_scene_nodes(
@@ -1691,7 +1700,10 @@ def _create_material(
     if material_cache is not None and cache_key in material_cache:
         return material_cache[cache_key]
 
+    color_attr = _color_attribute_name(data)
     material_name = data.material_name or f"{data.name}_Material"
+    if data.material_name and color_attr:
+        material_name = f"{material_name}_{color_attr}"
     mat = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
     mat.use_nodes = True
     mat.use_backface_culling = not data.double_sided
@@ -1729,8 +1741,8 @@ def _create_material(
 
     _set_assetkit_material_props(mat, data)
 
-    if data.base_color_texture:
-        _link_base_color_texture(mat, bsdf, data)
+    if data.base_color_texture or color_attr:
+        _link_base_color(mat, bsdf, data, color_attr)
     if data.metallic_roughness_texture:
         _link_metallic_roughness_texture(
             mat,
@@ -1859,12 +1871,15 @@ def _create_material(
 def _has_material_data(data: MeshPrimitiveData) -> bool:
     if data.material_name:
         return True
+    if _color_attribute_name(data):
+        return True
     return _material_cache_key(data) != _default_material_cache_key()
 
 
 def _material_cache_key(data: MeshPrimitiveData) -> object:
+    color_attr = _color_attribute_name(data)
     if data.material_name:
-        return ("name", data.material_name)
+        return ("name", data.material_name, color_attr)
     return (
         "props",
         _round_tuple(data.base_color),
@@ -1919,6 +1934,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         data.volume_thickness_texture,
         data.anisotropy_texture,
         data.diffuse_transmission_texture,
+        color_attr,
     )
 
 
@@ -1959,11 +1975,20 @@ def _default_material_cache_key() -> object:
         0,
         False,
         *(("",) * 19),
+        "",
     )
 
 
 def _round_tuple(values: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(round(float(value), 6) for value in values)
+
+
+def _color_attribute_name(data: MeshPrimitiveData) -> str:
+    if data.color_sets:
+        return data.color_sets[0].name or "Color"
+    if data.colors_f32:
+        return "Color"
+    return ""
 
 
 def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
@@ -2072,18 +2097,201 @@ def _link_image_first(
             return
 
 
-def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveData) -> None:
-    tex = _image_texture_node(mat, data.base_color_texture, "sRGB", _texture_info(data, "base_color"))
-    if not tex:
-        return
+def _link_base_color(
+    mat: bpy.types.Material,
+    bsdf,
+    data: MeshPrimitiveData,
+    color_attr: str,
+) -> None:
+    color_output = None
+    alpha_output = None
 
-    links = mat.node_tree.links
+    if data.base_color_texture:
+        tex = _image_texture_node(mat, data.base_color_texture, "sRGB", _texture_info(data, "base_color"))
+        if tex:
+            color_output = tex.outputs.get("Color")
+            alpha_output = tex.outputs.get("Alpha") if data.alpha_mode else None
+
+    if color_attr:
+        vertex_color = _vertex_color_node(mat, color_attr)
+        if vertex_color:
+            color_output = _multiply_color_outputs(
+                mat,
+                color_output,
+                vertex_color.outputs.get("Color"),
+                "Vertex Color",
+            )
+            if data.alpha_mode:
+                alpha_output = _multiply_value_outputs(
+                    mat,
+                    alpha_output,
+                    vertex_color.outputs.get("Alpha"),
+                    "Vertex Alpha",
+                )
+
+    if color_output:
+        color_output = _multiply_color_factor(mat, color_output, data.base_color, "Base Color Factor")
+    if data.alpha_mode and alpha_output:
+        alpha_output = _multiply_value_factor(mat, alpha_output, data.opacity, "Base Alpha Factor")
+
     base_color = bsdf.inputs.get("Base Color")
     alpha = bsdf.inputs.get("Alpha")
-    if base_color:
-        links.new(tex.outputs["Color"], base_color)
-    if data.alpha_mode and alpha and "Alpha" in tex.outputs:
-        links.new(tex.outputs["Alpha"], alpha)
+    if base_color and color_output:
+        mat.node_tree.links.new(color_output, base_color)
+    if data.alpha_mode and alpha and alpha_output:
+        mat.node_tree.links.new(alpha_output, alpha)
+
+
+def _vertex_color_node(mat: bpy.types.Material, name: str):
+    nodes = mat.node_tree.nodes
+    try:
+        node = nodes.new("ShaderNodeVertexColor")
+        node.layer_name = name
+    except Exception:
+        try:
+            node = nodes.new("ShaderNodeAttribute")
+            node.attribute_name = name
+        except Exception:
+            return None
+    return node
+
+
+def _multiply_color_outputs(
+    mat: bpy.types.Material,
+    output_a,
+    output_b,
+    label: str,
+):
+    if output_a is None:
+        return output_b
+    if output_b is None:
+        return output_a
+
+    node = _new_color_multiply_node(mat, label)
+    if not node:
+        return output_a
+
+    inputs = _color_multiply_inputs(node)
+    output = _color_multiply_output(node)
+    if not inputs or output is None:
+        return output_a
+
+    mat.node_tree.links.new(output_a, inputs[0])
+    mat.node_tree.links.new(output_b, inputs[1])
+    return output
+
+
+def _multiply_color_factor(
+    mat: bpy.types.Material,
+    output,
+    factor: tuple[float, float, float, float],
+    label: str,
+):
+    color = tuple(float(value) for value in factor[:3])
+    if color == (1.0, 1.0, 1.0):
+        return output
+
+    node = _new_color_multiply_node(mat, label)
+    if not node:
+        return output
+
+    inputs = _color_multiply_inputs(node)
+    result = _color_multiply_output(node)
+    if not inputs or result is None:
+        return output
+
+    mat.node_tree.links.new(output, inputs[0])
+    try:
+        inputs[1].default_value = (*color, 1.0)
+    except TypeError:
+        pass
+    return result
+
+
+def _new_color_multiply_node(mat: bpy.types.Material, label: str):
+    nodes = mat.node_tree.nodes
+    try:
+        node = nodes.new("ShaderNodeMixRGB")
+        node.blend_type = "MULTIPLY"
+        node.inputs["Fac"].default_value = 1.0
+    except Exception:
+        try:
+            node = nodes.new("ShaderNodeMix")
+            node.data_type = "RGBA"
+            node.blend_type = "MULTIPLY"
+            node.inputs["Factor"].default_value = 1.0
+        except Exception:
+            return None
+    node.label = label
+    return node
+
+
+def _color_multiply_inputs(node) -> tuple[object, object] | None:
+    if "Color1" in node.inputs and "Color2" in node.inputs:
+        return node.inputs["Color1"], node.inputs["Color2"]
+    if len(node.inputs) >= 8:
+        return node.inputs[6], node.inputs[7]
+    return None
+
+
+def _color_multiply_output(node):
+    if "Color" in node.outputs:
+        return node.outputs["Color"]
+    if len(node.outputs) >= 3:
+        return node.outputs[2]
+    return None
+
+
+def _multiply_value_outputs(
+    mat: bpy.types.Material,
+    output_a,
+    output_b,
+    label: str,
+):
+    if output_a is None:
+        return output_b
+    if output_b is None:
+        return output_a
+
+    node = _new_value_multiply_node(mat, label)
+    if not node:
+        return output_a
+
+    mat.node_tree.links.new(output_a, node.inputs[0])
+    mat.node_tree.links.new(output_b, node.inputs[1])
+    return node.outputs[0]
+
+
+def _multiply_value_factor(
+    mat: bpy.types.Material,
+    output,
+    factor: float,
+    label: str,
+):
+    if factor == 1.0:
+        return output
+
+    node = _new_value_multiply_node(mat, label)
+    if not node:
+        return output
+
+    mat.node_tree.links.new(output, node.inputs[0])
+    node.inputs[1].default_value = factor
+    return node.outputs[0]
+
+
+def _new_value_multiply_node(mat: bpy.types.Material, label: str):
+    try:
+        node = mat.node_tree.nodes.new("ShaderNodeMath")
+    except Exception:
+        return None
+    node.label = label
+    node.operation = "MULTIPLY"
+    return node
+
+
+def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveData) -> None:
+    _link_base_color(mat, bsdf, data, "")
 
 
 def _link_alpha_texture(
