@@ -50,6 +50,16 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         description="Generate normals when the source mesh does not provide them",
         default=True,
     )
+    mesh_shading: bpy.props.EnumProperty(
+        name="Shading",
+        description="How mesh shading is set after import",
+        items=(
+            ("AUTO", "Auto", "Use authored normal data when available"),
+            ("FLAT", "Flat", "Use flat face shading"),
+            ("SMOOTH", "Smooth", "Use smooth shading"),
+        ),
+        default="AUTO",
+    )
     convert_triangle_strip: bpy.props.BoolProperty(
         name="Convert Triangle Strips",
         description="Convert triangle strip primitives to triangles",
@@ -87,6 +97,21 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         ),
         default="EMPTY_SCENE",
     )
+    select_imported_objects: bpy.props.BoolProperty(
+        name="Select Imported Objects",
+        description="Select created mesh objects after import",
+        default=False,
+    )
+    set_viewport_shading: bpy.props.BoolProperty(
+        name="Set Viewport Shading",
+        description="Switch 3D viewports to material preview after import",
+        default=True,
+    )
+    fit_timeline: bpy.props.BoolProperty(
+        name="Fit Timeline",
+        description="Fit the timeline to the imported animation range",
+        default=True,
+    )
     replace_startup_cube: bpy.props.EnumProperty(
         name="Replace Startup",
         description="Remove Blender startup objects before importing",
@@ -117,6 +142,10 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                     focus_mode=self.focus_import,
                     scene_was_empty=scene_was_empty,
                     focus_camera=focus_camera,
+                    select_imported=self.select_imported_objects,
+                    shading_mode=self.mesh_shading,
+                    set_viewport_shading=self.set_viewport_shading,
+                    fit_timeline=self.fit_timeline,
                 )
             except AssetKitError as exc:
                 self.report({"ERROR"}, str(exc))
@@ -144,6 +173,10 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 focus_mode=self.focus_import,
                 scene_was_empty=scene_was_empty,
                 focus_camera=focus_camera,
+                select_imported=self.select_imported_objects,
+                shading_mode=self.mesh_shading,
+                set_viewport_shading=self.set_viewport_shading,
+                fit_timeline=self.fit_timeline,
             )
             self.report({"INFO"}, "AssetKit progressive import started")
             return {"FINISHED"}
@@ -157,6 +190,10 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 focus_mode=self.focus_import,
                 scene_was_empty=scene_was_empty,
                 focus_camera=focus_camera,
+                select_imported=self.select_imported_objects,
+                shading_mode=self.mesh_shading,
+                set_viewport_shading=self.set_viewport_shading,
+                fit_timeline=self.fit_timeline,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
@@ -198,8 +235,14 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 
         view_box = layout.box()
         view_box.label(text="View")
+        view_box.prop(self, "mesh_shading")
         view_box.prop(self, "focus_import")
         view_box.prop(self, "replace_startup_cube")
+        view_checks = view_box.column()
+        view_checks.use_property_split = False
+        view_checks.prop(self, "select_imported_objects")
+        view_checks.prop(self, "set_viewport_shading")
+        view_checks.prop(self, "fit_timeline")
 
     def _load_options(self) -> dict:
         return {

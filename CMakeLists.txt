@@ -23,8 +23,10 @@ endif()
 
 set(ASSETKIT_INCLUDE_HINTS)
 set(ASSETKIT_LIBRARY_HINTS)
+set(CGLM_INCLUDE_HINTS)
 if(ASSETKIT_ROOT)
   list(APPEND ASSETKIT_INCLUDE_HINTS "${ASSETKIT_ROOT}/include")
+  list(APPEND CGLM_INCLUDE_HINTS "${ASSETKIT_ROOT}/deps/cglm/include")
   list(APPEND ASSETKIT_LIBRARY_HINTS
     "${ASSETKIT_ROOT}/build"
     "${ASSETKIT_ROOT}/build/src"
@@ -35,6 +37,9 @@ endif()
 find_path(ASSETKIT_INCLUDE_DIR
   NAMES ak/assetkit.h
   HINTS ${ASSETKIT_INCLUDE_HINTS})
+find_path(CGLM_INCLUDE_DIR
+  NAMES cglm/cglm.h
+  HINTS ${CGLM_INCLUDE_HINTS})
 find_library(ASSETKIT_LIBRARY
   NAMES assetkit libassetkit
   HINTS ${ASSETKIT_LIBRARY_HINTS})
@@ -45,10 +50,16 @@ endif()
 if(NOT ASSETKIT_LIBRARY)
   message(FATAL_ERROR "AssetKit shared library not found. Build AssetKit first or set ASSETKIT_LIBRARY.")
 endif()
+if(NOT CGLM_INCLUDE_DIR)
+  message(FATAL_ERROR "cglm headers not found. Set ASSETKIT_ROOT to an AssetKit source root.")
+endif()
 
 Python3_add_library(_assetkit_blender MODULE src/native/assetkit_module.c WITH_SOABI)
-target_include_directories(_assetkit_blender PRIVATE "${ASSETKIT_INCLUDE_DIR}")
+target_include_directories(_assetkit_blender PRIVATE "${ASSETKIT_INCLUDE_DIR}" "${CGLM_INCLUDE_DIR}")
 target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_LIBRARY}")
+if(UNIX AND NOT APPLE)
+  target_link_libraries(_assetkit_blender PRIVATE m)
+endif()
 set_target_properties(_assetkit_blender PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${ASSETKIT_BLENDER_PACKAGE_DIR}"
   RUNTIME_OUTPUT_DIRECTORY "${ASSETKIT_BLENDER_PACKAGE_DIR}"

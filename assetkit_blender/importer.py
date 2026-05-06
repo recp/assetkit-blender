@@ -43,16 +43,29 @@ def import_assetkit_file(
     focus_mode: str = "NEVER",
     scene_was_empty: bool = False,
     focus_camera: bpy.types.Object | None = None,
+    select_imported: bool = False,
+    shading_mode: str = "AUTO",
+    set_viewport_shading: bool = True,
+    fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
+    existing_actions = _snapshot_actions(fit_timeline)
     primitives, scene_nodes = _load_assetkit_scene(filepath, library_path, load_options)
     state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection)
     objects = [
-        _create_import_object(primitive, state, collection or bpy.context.collection)
+        _create_import_object(primitive, state, collection or bpy.context.collection, shading_mode)
         for primitive in primitives
     ]
 
-    _select_imported_objects(objects)
-    _focus_imported_objects(objects, focus_mode, scene_was_empty, collection or bpy.context.collection, focus_camera)
+    _finish_import(
+        objects,
+        focus_mode,
+        scene_was_empty,
+        collection or bpy.context.collection,
+        focus_camera,
+        select_imported,
+        set_viewport_shading,
+        existing_actions,
+    )
     return objects
 
 
@@ -65,6 +78,10 @@ def import_assetkit_file_progressive(
     focus_mode: str = "NEVER",
     scene_was_empty: bool = False,
     focus_camera: bpy.types.Object | None = None,
+    select_imported: bool = False,
+    shading_mode: str = "AUTO",
+    set_viewport_shading: bool = True,
+    fit_timeline: bool = False,
 ) -> "_ProgressiveImportJob":
     job = _ProgressiveImportJob(
         filepath,
@@ -75,6 +92,10 @@ def import_assetkit_file_progressive(
         focus_mode,
         scene_was_empty,
         focus_camera,
+        select_imported,
+        shading_mode,
+        set_viewport_shading,
+        _snapshot_actions(fit_timeline),
     )
     job.start()
     return job
@@ -89,8 +110,13 @@ def import_assetkit_file_auto(
     focus_mode: str = "NEVER",
     scene_was_empty: bool = False,
     focus_camera: bpy.types.Object | None = None,
+    select_imported: bool = False,
+    shading_mode: str = "AUTO",
+    set_viewport_shading: bool = True,
+    fit_timeline: bool = False,
 ) -> list[bpy.types.Object] | "_ProgressiveImportJob":
     active_collection = collection or bpy.context.collection
+    existing_actions = _snapshot_actions(fit_timeline)
     if library_path:
         return import_assetkit_file(
             filepath,
@@ -100,6 +126,10 @@ def import_assetkit_file_auto(
             focus_mode,
             scene_was_empty,
             focus_camera,
+            select_imported,
+            shading_mode,
+            set_viewport_shading,
+            fit_timeline,
         )
 
     stream = native_open_scene_stream(filepath, load_options)
@@ -112,6 +142,10 @@ def import_assetkit_file_auto(
             focus_mode,
             scene_was_empty,
             focus_camera,
+            select_imported,
+            shading_mode,
+            set_viewport_shading,
+            fit_timeline,
         )
 
     use_progressive = (
@@ -128,6 +162,10 @@ def import_assetkit_file_auto(
             focus_mode,
             scene_was_empty,
             focus_camera,
+            select_imported,
+            shading_mode,
+            set_viewport_shading,
+            existing_actions,
             stream=stream,
         )
         job.start()
@@ -135,9 +173,17 @@ def import_assetkit_file_auto(
 
     primitives = stream.read_mesh_batch(0, stream.mesh_count)
     state = _begin_scene_build(primitives, stream.nodes, active_collection)
-    objects = [_create_import_object(primitive, state, active_collection) for primitive in primitives]
-    _select_imported_objects(objects)
-    _focus_imported_objects(objects, focus_mode, scene_was_empty, active_collection, focus_camera)
+    objects = [_create_import_object(primitive, state, active_collection, shading_mode) for primitive in primitives]
+    _finish_import(
+        objects,
+        focus_mode,
+        scene_was_empty,
+        active_collection,
+        focus_camera,
+        select_imported,
+        set_viewport_shading,
+        existing_actions,
+    )
     return objects
 
 
@@ -175,6 +221,7 @@ def _create_import_object(
     primitive: MeshPrimitiveData,
     state: dict,
     collection: bpy.types.Collection,
+    shading_mode: str = "AUTO",
 ) -> bpy.types.Object:
     node_objects = state["node_objects"]
     node_parent = node_objects.get(primitive.node_index)
@@ -188,6 +235,7 @@ def _create_import_object(
         material_cache=state["material_cache"],
         apply_transform=not use_node_parent,
         apply_animation=not use_node_parent,
+        shading_mode=shading_mode,
         collection=collection,
     )
 
@@ -196,9 +244,131 @@ def _select_imported_objects(objects: list[bpy.types.Object]) -> None:
     if not objects:
         return
 
+    _clear_selection()
     for obj in objects:
         obj.select_set(True)
     bpy.context.view_layer.objects.active = objects[-1]
+
+
+def _finish_import(
+    objects: list[bpy.types.Object],
+    focus_mode: str,
+    scene_was_empty: bool,
+    collection: bpy.types.Collection,
+    focus_camera: bpy.types.Object | None,
+    select_imported: bool,
+    set_viewport_shading: bool,
+    existing_actions: set[bpy.types.Action] | None,
+) -> None:
+    if select_imported:
+        _select_imported_objects(objects)
+    _focus_imported_objects(objects, focus_mode, scene_was_empty, collection, focus_camera)
+    if set_viewport_shading:
+        _set_viewport_material_preview()
+    _fit_timeline_to_new_actions(existing_actions)
+
+
+def _clear_selection() -> None:
+    try:
+        if bpy.ops.object.select_all.poll():
+            bpy.ops.object.select_all(action="DESELECT")
+            return
+    except Exception:
+        pass
+
+    for obj in bpy.context.scene.objects:
+        obj.select_set(False)
+
+
+class _SelectionState:
+    def __init__(self) -> None:
+        self.selected = list(bpy.context.selected_objects)
+        self.active = bpy.context.view_layer.objects.active
+
+    def restore(self) -> None:
+        _clear_selection()
+        for obj in self.selected:
+            if obj.name in bpy.data.objects:
+                obj.select_set(True)
+        if self.active and self.active.name in bpy.data.objects:
+            bpy.context.view_layer.objects.active = self.active
+
+
+def _temporary_selection(objects: list[bpy.types.Object]) -> _SelectionState:
+    selection = _SelectionState()
+    _select_imported_objects(objects)
+    return selection
+
+
+def _set_viewport_material_preview() -> None:
+    for window in getattr(bpy.context.window_manager, "windows", []):
+        for area in window.screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for space in area.spaces:
+                if space.type != "VIEW_3D" or not hasattr(space, "shading"):
+                    continue
+                try:
+                    space.shading.type = "MATERIAL"
+                except Exception:
+                    pass
+
+
+def _snapshot_actions(enabled: bool) -> set[bpy.types.Action] | None:
+    return set(bpy.data.actions) if enabled else None
+
+
+def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None) -> None:
+    if existing_actions is None:
+        return
+
+    min_frame: float | None = None
+    max_frame: float | None = None
+    for action in bpy.data.actions:
+        if action in existing_actions:
+            continue
+        frame_range = _action_frame_range(action)
+        if frame_range is None:
+            continue
+        start, end = frame_range
+        min_frame = start if min_frame is None else min(min_frame, start)
+        max_frame = end if max_frame is None else max(max_frame, end)
+
+    if min_frame is None or max_frame is None:
+        return
+
+    scene = bpy.context.scene
+    scene.frame_start = int(math.floor(max(0.0, min_frame)))
+    scene.frame_end = max(scene.frame_start + 1, int(math.ceil(max_frame)))
+
+
+def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
+    min_frame: float | None = None
+    max_frame: float | None = None
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves:
+        for fcurve in fcurves:
+            for key in fcurve.keyframe_points:
+                frame = float(key.co.x)
+                min_frame = frame if min_frame is None else min(min_frame, frame)
+                max_frame = frame if max_frame is None else max(max_frame, frame)
+
+        if min_frame is not None and max_frame is not None:
+            return min_frame, max_frame
+
+    for attr in ("curve_frame_range", "frame_range"):
+        value = getattr(action, attr, None)
+        if value is None:
+            continue
+        try:
+            start = float(value[0])
+            end = float(value[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if end > start:
+            return start, end
+
+    return None
 
 
 def _focus_imported_objects(
@@ -224,7 +394,7 @@ def _focus_imported_objects(
     if bounds is None:
         return
 
-    _frame_viewports(bounds)
+    _frame_viewports(bounds, objects)
     if scene_was_empty:
         _frame_camera(bounds, collection, focus_camera)
 
@@ -265,10 +435,14 @@ def _bounds_corners(bounds: tuple[Vector, Vector]) -> list[Vector]:
     ]
 
 
-def _frame_viewports(bounds: tuple[Vector, Vector]) -> None:
+def _frame_viewports(
+    bounds: tuple[Vector, Vector],
+    objects: list[bpy.types.Object] | None = None,
+) -> None:
     window_manager = bpy.context.window_manager
     minimum, maximum = bounds
     radius = max((maximum - minimum).length * 0.5, 0.5)
+    selection = _temporary_selection(objects) if objects else None
     for window in getattr(window_manager, "windows", []):
         screen = window.screen
         for area in screen.areas:
@@ -282,14 +456,38 @@ def _frame_viewports(bounds: tuple[Vector, Vector]) -> None:
             try:
                 with bpy.context.temp_override(window=window, area=area, region=region, space_data=space):
                     bpy.ops.view3d.view_selected(use_all_regions=False)
+                    _pad_view_distance(space, radius)
             except Exception:
                 pass
+    if selection:
+        selection.restore()
 
 
 def _set_viewport_clip(space: bpy.types.SpaceView3D, radius: float) -> None:
-    clip_end = max(space.clip_end, radius * 12.0, 1000.0)
-    space.clip_end = min(clip_end, 1_000_000.0)
-    space.clip_start = min(space.clip_start, max(radius / 100000.0, 0.001))
+    clip_end = max(space.clip_end, radius * 24.0, 1000.0)
+    space.clip_end = min(clip_end, 10_000_000.0)
+    space.clip_start = min(space.clip_start, max(radius / 100_000.0, 0.001))
+
+
+def _pad_view_distance(space: bpy.types.SpaceView3D, radius: float) -> None:
+    region_3d = getattr(space, "region_3d", None)
+    if region_3d is None:
+        return
+    try:
+        target = radius * _viewport_distance_factor(radius)
+        current = region_3d.view_distance
+        if current <= 0.0:
+            region_3d.view_distance = target
+        elif current < target:
+            region_3d.view_distance = target
+        elif current > target * 1.15:
+            region_3d.view_distance = target * 1.15
+    except Exception:
+        pass
+
+
+def _viewport_distance_factor(radius: float) -> float:
+    return 2.4 + 2.8 / (1.0 + radius / 8.0)
 
 
 def _frame_camera(
@@ -410,14 +608,14 @@ def _set_camera_clip(
     depths = [(corner - camera_obj.location).dot(forward) for corner in _bounds_corners(bounds)]
     positive_depths = [depth for depth in depths if depth > 0.0]
     if not positive_depths:
-        camera.clip_start = 0.001
-        camera.clip_end = max(camera.clip_end, radius * 12.0)
+        camera.clip_start = min(camera.clip_start, max(radius / 100_000.0, 0.001))
+        camera.clip_end = max(camera.clip_end, radius * 24.0)
         return
 
-    near_depth = max(min(positive_depths) - radius * 2.0, 0.001)
-    far_depth = max(positive_depths) + radius * 4.0
+    near_depth = max(min(positive_depths) - radius * 4.0, max(radius / 100_000.0, 0.001))
+    far_depth = max(positive_depths) + radius * 8.0
     camera.clip_start = min(camera.clip_start, near_depth)
-    camera.clip_end = max(camera.clip_end, far_depth, radius * 12.0)
+    camera.clip_end = max(camera.clip_end, far_depth, radius * 24.0)
 
 
 class _ProgressiveImportJob:
@@ -431,6 +629,10 @@ class _ProgressiveImportJob:
         focus_mode: str,
         scene_was_empty: bool,
         focus_camera: bpy.types.Object | None,
+        select_imported: bool,
+        shading_mode: str,
+        set_viewport_shading: bool,
+        existing_actions: set[bpy.types.Action] | None,
         stream: object | None = None,
     ) -> None:
         self.filepath = filepath
@@ -441,6 +643,10 @@ class _ProgressiveImportJob:
         self.focus_mode = focus_mode
         self.scene_was_empty = scene_was_empty
         self.focus_camera = focus_camera
+        self.select_imported = select_imported
+        self.shading_mode = shading_mode
+        self.set_viewport_shading = set_viewport_shading
+        self.existing_actions = existing_actions
         self.stream = stream
         self.scene_nodes: list[SceneNodeData] = []
         self.mesh_count = 0
@@ -522,7 +728,12 @@ class _ProgressiveImportJob:
         created_this_step = 0
         slice_started_at = time.perf_counter()
         while self.pending_primitives and created_this_step < self.batch_size:
-            obj = _create_import_object(self.pending_primitives.popleft(), self.state, self.collection)
+            obj = _create_import_object(
+                self.pending_primitives.popleft(),
+                self.state,
+                self.collection,
+                self.shading_mode,
+            )
             self.objects.append(obj)
             self.created_count += 1
             created_this_step += 1
@@ -548,13 +759,15 @@ class _ProgressiveImportJob:
             self.pending_primitives.extend(batch)
 
     def _finish_success(self) -> None:
-        _select_imported_objects(self.objects)
-        _focus_imported_objects(
+        _finish_import(
             self.objects,
             self.focus_mode,
             self.scene_was_empty,
             self.collection,
             self.focus_camera,
+            self.select_imported,
+            self.set_viewport_shading,
+            self.existing_actions,
         )
         finished_at = time.perf_counter()
         load_seconds = self.build_started_at - self.load_started_at
@@ -607,6 +820,7 @@ def _create_mesh_object(
     material_cache: dict[str, bpy.types.Material] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
 ) -> bpy.types.Object:
     if data.vertices_f32 and data.indices_u32:
@@ -618,6 +832,7 @@ def _create_mesh_object(
             material_cache=material_cache,
             apply_transform=apply_transform,
             apply_animation=apply_animation,
+            shading_mode=shading_mode,
             collection=collection,
         )
 
@@ -630,25 +845,23 @@ def _create_mesh_object(
         for loop_index, uv in enumerate(data.uvs[: len(mesh.loops)]):
             uv_layer.data[loop_index].uv = (uv[0], 1.0 - uv[1])
 
-    if data.normals and len(data.normals) >= len(mesh.loops):
-        mesh.normals_split_custom_set(data.normals[: len(mesh.loops)])
-        for poly in mesh.polygons:
-            poly.use_smooth = True
+    _apply_shading(mesh, shading_mode, data.normals[: len(mesh.loops)] if data.normals else None)
 
+    active_collection = collection or bpy.context.collection
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
     if apply_transform:
         _apply_matrix(obj, data)
+    active_collection.objects.link(obj)
     material = _create_material(data, material_cache)
     if material:
         mesh.materials.append(material)
     _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
-    _apply_skin(obj, data, node_objects or {}, node_data or {})
+    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection)
     if apply_animation:
         _apply_animation(obj, data)
 
-    (collection or bpy.context.collection).objects.link(obj)
     return obj
 
 
@@ -661,6 +874,7 @@ def _create_mesh_object_bulk(
     material_cache: dict[str, bpy.types.Material] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
 ) -> bpy.types.Object:
     mesh = bpy.data.meshes.new(data.name)
@@ -721,31 +935,62 @@ def _create_mesh_object_bulk(
 
     mesh.update(calc_edges=True)
 
-    if data.normals_f32:
-        normals = _buffer_view(data.normals_f32, "f")
-        try:
-            if normals is not None:
-                mesh.corner_normals.foreach_set("vector", normals)
-                for poly in mesh.polygons:
-                    poly.use_smooth = True
-        except Exception:
-            pass
+    _apply_shading(mesh, shading_mode, _buffer_view(data.normals_f32, "f") if data.normals_f32 else None)
 
+    active_collection = collection or bpy.context.collection
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
     if apply_transform:
         _apply_matrix(obj, data)
+    active_collection.objects.link(obj)
     material = _create_material(data, material_cache)
     if material:
         mesh.materials.append(material)
     _apply_material_variants(obj, data)
     _apply_shape_keys(obj, data)
-    _apply_skin(obj, data, node_objects or {}, node_data or {})
+    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection)
     if apply_animation:
         _apply_animation(obj, data)
 
-    (collection or bpy.context.collection).objects.link(obj)
     return obj
+
+
+def _apply_shading(
+    mesh: bpy.types.Mesh,
+    mode: str,
+    normals: object | None,
+) -> None:
+    if mode == "FLAT":
+        _set_mesh_smooth(mesh, False)
+        return
+    if mode == "SMOOTH":
+        _set_mesh_smooth(mesh, True)
+        return
+
+    if not normals:
+        _set_mesh_smooth(mesh, False)
+        return
+
+    try:
+        if isinstance(normals, memoryview):
+            mesh.corner_normals.foreach_set("vector", normals)
+        else:
+            mesh.normals_split_custom_set(normals)
+        _set_mesh_smooth(mesh, True)
+    except Exception:
+        _set_mesh_smooth(mesh, True)
+
+
+def _set_mesh_smooth(mesh: bpy.types.Mesh, smooth: bool) -> None:
+    if not mesh.polygons:
+        return
+
+    values = array("b", [1 if smooth else 0]) * len(mesh.polygons)
+    try:
+        mesh.polygons.foreach_set("use_smooth", values)
+    except Exception:
+        for poly in mesh.polygons:
+            poly.use_smooth = smooth
 
 
 def _create_scene_nodes(
@@ -1033,6 +1278,7 @@ def _apply_skin(
     data: MeshPrimitiveData,
     node_objects: dict[int, bpy.types.Object],
     node_data: dict[int, SceneNodeData],
+    collection: bpy.types.Collection,
 ) -> None:
     if not data.has_skin or data.skin_vertex_count <= 0 or data.skin_joint_count <= 0:
         return
@@ -1046,7 +1292,7 @@ def _apply_skin(
     width = max(1, int(data.skin_joint_width or 4))
     vertex_count = min(data.skin_vertex_count, len(obj.data.vertices))
     joint_names = _create_skin_vertex_groups(obj, data, joints, weights, vertex_count, width, joint_nodes, node_objects)
-    armature = _create_skin_armature(obj, joint_names, joint_nodes, node_objects, node_data)
+    armature = _create_skin_armature(obj, joint_names, joint_nodes, node_objects, node_data, collection)
     if not armature:
         return
 
@@ -1092,13 +1338,15 @@ def _create_skin_armature(
     joint_nodes: memoryview,
     node_objects: dict[int, bpy.types.Object],
     node_data: dict[int, SceneNodeData],
+    collection: bpy.types.Collection,
 ) -> bpy.types.Object | None:
     if not joint_names:
         return None
 
     armature_data = bpy.data.armatures.new(f"{obj.name}_Armature")
     armature = bpy.data.objects.new(f"{obj.name}_Armature", armature_data)
-    bpy.context.collection.objects.link(armature)
+    collection.objects.link(armature)
+    _match_object_space(armature, obj)
 
     previous_active = bpy.context.view_layer.objects.active
     previous_selection = list(bpy.context.selected_objects)
@@ -1111,7 +1359,7 @@ def _create_skin_armature(
     bpy.ops.object.mode_set(mode="EDIT")
 
     edit_bones = armature_data.edit_bones
-    positions = _joint_positions(joint_nodes, node_objects)
+    positions = _joint_positions(joint_nodes, node_objects, armature.parent)
     node_to_joint = {
         int(joint_nodes[index]): index
         for index in range(min(len(joint_nodes), len(joint_names)))
@@ -1140,7 +1388,9 @@ def _create_skin_armature(
             edit_bones[name].parent = edit_bones[joint_names[parent_joint]]
 
     bpy.ops.object.mode_set(mode="OBJECT")
-    _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
+    if not _bind_pose_bones_to_nodes(armature, joint_names, joint_nodes, node_objects):
+        _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
+    _match_object_space(armature, obj)
 
     bpy.ops.object.select_all(action="DESELECT")
     for selected in previous_selection:
@@ -1149,12 +1399,48 @@ def _create_skin_armature(
     return armature
 
 
-def _joint_positions(joint_nodes: memoryview, node_objects: dict[int, bpy.types.Object]) -> list[Vector]:
+def _bind_pose_bones_to_nodes(
+    armature: bpy.types.Object,
+    joint_names: list[str],
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+) -> bool:
+    bound_any = False
+    for index, name in enumerate(joint_names):
+        pose_bone = armature.pose.bones.get(name)
+        node = node_objects.get(int(joint_nodes[index]) if index < len(joint_nodes) else -1)
+        if not pose_bone or not node:
+            continue
+        constraint = pose_bone.constraints.new(type="COPY_TRANSFORMS")
+        constraint.name = "AssetKit Node"
+        constraint.target = node
+        constraint.target_space = "WORLD"
+        constraint.owner_space = "WORLD"
+        bound_any = True
+    return bound_any
+
+
+def _match_object_space(target: bpy.types.Object, source: bpy.types.Object) -> None:
+    target.parent = source.parent
+    target.matrix_parent_inverse.identity()
+    target.matrix_world = source.matrix_world.copy()
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
+
+
+def _joint_positions(
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    parent: bpy.types.Object | None,
+) -> list[Vector]:
     positions = []
+    world_to_parent = parent.matrix_world.inverted_safe() if parent else Matrix.Identity(4)
     for index in range(len(joint_nodes)):
         node = node_objects.get(int(joint_nodes[index]))
         if node:
-            positions.append(node.matrix_world.to_translation())
+            positions.append(world_to_parent @ node.matrix_world.to_translation())
         else:
             positions.append(Vector((0.0, float(index) * 0.05, 0.0)))
     return positions

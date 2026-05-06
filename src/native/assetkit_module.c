@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cglm/struct.h"
+
 #include "ak/assetkit.h"
 #include "ak/options.h"
 
@@ -253,6 +255,8 @@ typedef struct AkbAnimChannel {
 typedef struct AkbAnimation {
   AkbSharedDoc  *doc_owner;
   AkbAnimChannel *channels;
+  AkBakedAnimation *baked;
+  float         *baked_values;
   size_t         count;
   size_t         capacity;
   size_t         refcount;
@@ -472,6 +476,9 @@ akb_animation_release(AkbAnimation *animation) {
         free(animation->channels[i].values);
     }
     free(animation->channels);
+    free(animation->baked_values);
+    if (animation->baked)
+      ak_free(animation->baked);
     akb_shared_doc_release(animation->doc_owner);
     free(animation);
   }
@@ -2032,6 +2039,166 @@ akb_node_transform_bindings(AkNode *node, AkbAnimBinding *bindings, int capacity
   return count;
 }
 
+static int
+akb_node_has_rotate(AkNode *node) {
+  AkObject *object;
+
+  if (!node || !node->transform)
+    return 0;
+
+  for (object = node->transform->base; object; object = object->next) {
+    if ((AkTypeId)object->type == AKT_ROTATE)
+      return 1;
+  }
+
+  for (object = node->transform->item; object; object = object->next) {
+    if ((AkTypeId)object->type == AKT_ROTATE)
+      return 1;
+  }
+
+  return 0;
+}
+
+static void
+akb_baked_matrix_to_trs(const float m[16],
+                        float *translation,
+                        float *rotation,
+                        float *scale,
+                        const float *previous_rotation) {
+  CGLM_ALIGN_MAT mat4 matrix;
+  CGLM_ALIGN_MAT mat4 rotation_matrix;
+  CGLM_ALIGN(16) vec4 translation4;
+  CGLM_ALIGN(16) vec4 rotation_wxyz;
+  CGLM_ALIGN(16) vec4 previous_wxyz;
+  CGLM_ALIGN(8) vec3 scale3;
+  versor rotation_xyzw;
+
+  memcpy(matrix, m, sizeof(matrix));
+  glm_decompose(matrix, translation4, rotation_matrix, scale3);
+  glm_mat4_quat(rotation_matrix, rotation_xyzw);
+  glm_quat_normalize(rotation_xyzw);
+
+  translation[0] = translation4[0];
+  translation[1] = translation4[1];
+  translation[2] = translation4[2];
+  scale[0] = scale3[0];
+  scale[1] = scale3[1];
+  scale[2] = scale3[2];
+
+  rotation_wxyz[0] = rotation_xyzw[3];
+  rotation_wxyz[1] = rotation_xyzw[0];
+  rotation_wxyz[2] = rotation_xyzw[1];
+  rotation_wxyz[3] = rotation_xyzw[2];
+
+  if (previous_rotation) {
+    memcpy(previous_wxyz, previous_rotation, sizeof(previous_wxyz));
+    if (glm_vec4_dot(rotation_wxyz, previous_wxyz) < 0.0f)
+      glm_vec4_negate(rotation_wxyz);
+  }
+
+  memcpy(rotation, rotation_wxyz, sizeof(rotation_wxyz));
+}
+
+static AkbAnimation *
+akb_animation_new_baked(AkDoc *doc,
+                        AkbSharedDoc *doc_owner,
+                        AkNode *node,
+                        int *ok) {
+  AkbAnimation *animation;
+  AkBakedAnimation *baked;
+  AkbAnimChannel channel;
+  float *translations;
+  float *rotations;
+  float *scales;
+  uint32_t i;
+
+  baked = ak_nodeBakeAnimation(doc, node);
+  if (!baked || !baked->count || !baked->times || !baked->matrices) {
+    if (baked)
+      ak_free(baked);
+    return NULL;
+  }
+
+  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+  if (!animation) {
+    ak_free(baked);
+    *ok = 0;
+    return NULL;
+  }
+
+  animation->refcount = 1;
+  animation->doc_owner = doc_owner;
+  animation->baked = baked;
+  akb_shared_doc_retain(doc_owner);
+
+  animation->baked_values = (float *)malloc((size_t)baked->count * 10 * sizeof(float));
+  if (!animation->baked_values) {
+    akb_animation_release(animation);
+    *ok = 0;
+    return NULL;
+  }
+
+  translations = animation->baked_values;
+  rotations = translations + (size_t)baked->count * 3;
+  scales = rotations + (size_t)baked->count * 4;
+
+  for (i = 0; i < baked->count; i++) {
+    akb_baked_matrix_to_trs(baked->matrices + (size_t)i * 16,
+                            translations + (size_t)i * 3,
+                            rotations + (size_t)i * 4,
+                            scales + (size_t)i * 3,
+                            i > 0 ? rotations + (size_t)(i - 1) * 4 : NULL);
+  }
+
+  memset(&channel, 0, sizeof(channel));
+  channel.target = AKB_ANIM_TRANSLATION;
+  channel.value_width = 3;
+  channel.count = baked->count;
+  channel.times = baked->times;
+  channel.values = translations;
+  channel.borrowed_times = 1;
+  channel.borrowed_values = 1;
+  channel.interpolation = AK_INTERPOLATION_LINEAR;
+
+  if (!akb_animation_push(animation, &channel)) {
+    akb_animation_release(animation);
+    *ok = 0;
+    return NULL;
+  }
+
+  memset(&channel, 0, sizeof(channel));
+  channel.target = AKB_ANIM_ROTATION_QUAT;
+  channel.value_width = 4;
+  channel.count = baked->count;
+  channel.times = baked->times;
+  channel.values = rotations;
+  channel.borrowed_times = 1;
+  channel.borrowed_values = 1;
+  channel.interpolation = AK_INTERPOLATION_LINEAR;
+  if (!akb_animation_push(animation, &channel)) {
+    akb_animation_release(animation);
+    *ok = 0;
+    return NULL;
+  }
+
+  memset(&channel, 0, sizeof(channel));
+  channel.target = AKB_ANIM_SCALE;
+  channel.value_width = 3;
+  channel.count = baked->count;
+  channel.times = baked->times;
+  channel.values = scales;
+  channel.borrowed_times = 1;
+  channel.borrowed_values = 1;
+  channel.interpolation = AK_INTERPOLATION_LINEAR;
+  if (!akb_animation_push(animation, &channel)) {
+    akb_animation_release(animation);
+    *ok = 0;
+    return NULL;
+  }
+
+  return animation;
+}
+
 static AkbAnimation *
 akb_animation_new(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
@@ -2045,9 +2212,14 @@ akb_animation_new(AkDoc *doc,
   int binding_count;
 
   *ok = 1;
+  if (ak_nodeNeedsBaking(node) || akb_node_has_rotate(node))
+    return akb_animation_new_baked(doc, doc_owner, node, ok);
+
   binding_count = akb_node_transform_bindings(node, bindings, 64);
-  if (!binding_count)
-    return NULL;
+  if (!binding_count) {
+    animation = akb_animation_new_baked(doc, doc_owner, node, ok);
+    return animation;
+  }
 
   animation = (AkbAnimation *)calloc(1, sizeof(*animation));
   if (!animation) {
