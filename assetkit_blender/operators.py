@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from array import array
+
 import bpy
 from bpy_extras.io_utils import ImportHelper
 
@@ -334,3 +336,69 @@ def _is_startup_light(obj: bpy.types.Object) -> bool:
     if obj.animation_data or obj.constraints:
         return False
     return obj.data.type == "POINT"
+
+
+class ASSETKIT_OT_apply_material_variant(bpy.types.Operator):
+    bl_idname = "assetkit.apply_material_variant"
+    bl_label = "Apply AssetKit Material Variant"
+    bl_options = {"REGISTER", "UNDO"}
+
+    variant_name: bpy.props.StringProperty(
+        name="Variant",
+        description="Material variant name. Leave empty to restore default materials",
+        default="",
+    )
+    selected_only: bpy.props.BoolProperty(
+        name="Selected Only",
+        description="Apply the material variant only to selected objects",
+        default=False,
+    )
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        changed = _apply_material_variant(context, self.variant_name, self.selected_only)
+        if changed == 0:
+            self.report({"WARNING"}, "No matching AssetKit material variants found")
+        else:
+            label = self.variant_name or "default"
+            self.report({"INFO"}, f"Applied AssetKit material variant '{label}' to {changed} object(s)")
+        return {"FINISHED"}
+
+
+def _apply_material_variant(context, variant_name: str, selected_only: bool) -> int:
+    objects = context.selected_objects if selected_only else context.scene.objects
+    changed = 0
+    for obj in objects:
+        if obj.type != "MESH" or not obj.data:
+            continue
+        slot = _variant_slot(obj, variant_name)
+        if slot is None:
+            continue
+        _set_material_slot(obj, slot)
+        changed += 1
+    return changed
+
+
+def _variant_slot(obj: bpy.types.Object, variant_name: str) -> int | None:
+    count = int(obj.get("assetkit_material_variant_count") or 0)
+    if count <= 0:
+        return None
+    if not variant_name:
+        return 0
+    for index in range(count):
+        prefix = f"assetkit_material_variant_{index}"
+        if obj.get(f"{prefix}_name") == variant_name:
+            slot = obj.get(f"{prefix}_slot")
+            return int(slot) if slot is not None else None
+    return None
+
+
+def _set_material_slot(obj: bpy.types.Object, slot: int) -> None:
+    obj.active_material_index = max(0, min(slot, max(0, len(obj.data.materials) - 1)))
+    if not obj.data.polygons:
+        return
+    values = array("i", [obj.active_material_index]) * len(obj.data.polygons)
+    obj.data.polygons.foreach_set("material_index", values)
+    obj.data.update()

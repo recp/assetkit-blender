@@ -10,7 +10,7 @@ bl_info = {
 
 import bpy
 
-from .operators import ASSETKIT_OT_import_assetkit
+from .operators import ASSETKIT_OT_apply_material_variant, ASSETKIT_OT_import_assetkit
 from .preferences import AssetKitPreferences
 
 
@@ -22,11 +22,16 @@ class ASSETKIT_MT_file_menu(bpy.types.Menu):
             ASSETKIT_OT_import_assetkit.bl_idname,
             text="Import with AssetKit",
         )
+        self.layout.operator(
+            ASSETKIT_OT_apply_material_variant.bl_idname,
+            text="Apply Material Variant",
+        )
 
 
 classes = (
     AssetKitPreferences,
     ASSETKIT_OT_import_assetkit,
+    ASSETKIT_OT_apply_material_variant,
     ASSETKIT_MT_file_menu,
 )
 
