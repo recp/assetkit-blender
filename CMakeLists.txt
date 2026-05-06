@@ -43,6 +43,9 @@ find_path(CGLM_INCLUDE_DIR
 find_library(ASSETKIT_LIBRARY
   NAMES assetkit libassetkit
   HINTS ${ASSETKIT_LIBRARY_HINTS})
+find_library(ASSETKIT_KTX2_LIBRARY
+  NAMES assetkit_ktx2 libassetkit_ktx2
+  HINTS ${ASSETKIT_LIBRARY_HINTS})
 
 if(NOT ASSETKIT_INCLUDE_DIR)
   message(FATAL_ERROR "AssetKit headers not found. Set ASSETKIT_ROOT.")
@@ -79,4 +82,12 @@ elseif(UNIX)
 endif()
 
 message(STATUS "AssetKit library: ${ASSETKIT_LIBRARY}")
+if(ASSETKIT_KTX2_LIBRARY)
+  get_filename_component(ASSETKIT_KTX2_LIBRARY_NAME "${ASSETKIT_KTX2_LIBRARY}" NAME)
+  add_custom_command(TARGET _assetkit_blender POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${ASSETKIT_KTX2_LIBRARY}"
+            "${ASSETKIT_BLENDER_PACKAGE_DIR}/${ASSETKIT_KTX2_LIBRARY_NAME}")
+  message(STATUS "AssetKit KTX2 decoder: ${ASSETKIT_KTX2_LIBRARY}")
+endif()
 message(STATUS "Python extension output: ${ASSETKIT_BLENDER_PACKAGE_DIR}")

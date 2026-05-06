@@ -1,9 +1,15 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #include "cglm/struct.h"
 
@@ -98,6 +104,29 @@ typedef enum AkbTextureRoleId {
   AKB_TEX_ROLE_DIFFUSE_TRANSMISSION = 18,
   AKB_TEX_ROLE_DIFFUSE_TRANSMISSION_COLOR = 19
 } AkbTextureRoleId;
+
+typedef struct AkbKtx2MipLevel {
+  uint32_t width;
+  uint32_t height;
+  uint32_t byte_offset;
+  uint32_t byte_length;
+} AkbKtx2MipLevel;
+
+typedef struct AkbKtx2DecodedImage {
+  uint8_t         *data;
+  size_t           data_length;
+  uint32_t         width;
+  uint32_t         height;
+  uint32_t         channels;
+  uint32_t         mip_count;
+  AkbKtx2MipLevel *mips;
+  uint32_t         reserved[2];
+} AkbKtx2DecodedImage;
+
+typedef int
+(*AkbKtx2DecodeFn)(const uint8_t       *data,
+                   size_t               size,
+                   AkbKtx2DecodedImage *out);
 
 typedef struct AkbMorphTarget {
   char     name[512];
@@ -4839,10 +4868,199 @@ akb_read_mesh_batch(PyObject *self, PyObject *args) {
   return list;
 }
 
+static int
+akb_read_file_bytes(const char *path, uint8_t **bytes, size_t *size) {
+  FILE *file;
+  long length;
+  size_t read_size;
+  uint8_t *data;
+
+  *bytes = NULL;
+  *size = 0;
+
+  file = fopen(path, "rb");
+  if (!file)
+    return 0;
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return 0;
+  }
+  length = ftell(file);
+  if (length <= 0) {
+    fclose(file);
+    return 0;
+  }
+  if (fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return 0;
+  }
+
+  data = (uint8_t *)malloc((size_t)length);
+  if (!data) {
+    fclose(file);
+    return 0;
+  }
+
+  read_size = fread(data, 1, (size_t)length, file);
+  fclose(file);
+  if (read_size != (size_t)length) {
+    free(data);
+    return 0;
+  }
+
+  *bytes = data;
+  *size = read_size;
+  return 1;
+}
+
+static void *
+akb_ktx2_dlopen(const char *path) {
+#if defined(_WIN32)
+  return (void *)LoadLibraryA(path);
+#else
+  return dlopen(path, RTLD_NOW);
+#endif
+}
+
+static void *
+akb_ktx2_symbol(void *library, const char *name) {
+#if defined(_WIN32)
+  return library ? (void *)GetProcAddress((HMODULE)library, name) : NULL;
+#else
+  return library ? dlsym(library, name) : NULL;
+#endif
+}
+
+static AkbKtx2DecodeFn
+akb_ktx2_decoder(void) {
+  static void *library = NULL;
+  static AkbKtx2DecodeFn decode = NULL;
+  static int tried = 0;
+  const char *env_path;
+
+  if (tried)
+    return decode;
+  tried = 1;
+
+  env_path = getenv("ASSETKIT_KTX2_DECODER_PATH");
+  if (env_path && env_path[0])
+    library = akb_ktx2_dlopen(env_path);
+
+#if defined(__APPLE__)
+  if (!library)
+    library = akb_ktx2_dlopen("@loader_path/libassetkit_ktx2.dylib");
+  if (!library)
+    library = akb_ktx2_dlopen("@rpath/libassetkit_ktx2.dylib");
+  if (!library)
+    library = akb_ktx2_dlopen("libassetkit_ktx2.dylib");
+#elif defined(_WIN32)
+  if (!library)
+    library = akb_ktx2_dlopen("assetkit_ktx2.dll");
+#else
+  if (!library)
+    library = akb_ktx2_dlopen("$ORIGIN/libassetkit_ktx2.so");
+  if (!library)
+    library = akb_ktx2_dlopen("libassetkit_ktx2.so");
+#endif
+
+  decode = (AkbKtx2DecodeFn)akb_ktx2_symbol(library, "assetkit_ktx2_decode");
+  return decode;
+}
+
+static PyObject *
+akb_decode_ktx2(PyObject *self, PyObject *args) {
+  AkbKtx2DecodeFn decode;
+  AkbKtx2DecodedImage image;
+  PyObject *out;
+  PyObject *pixels;
+  PyObject *width_obj;
+  PyObject *height_obj;
+  uint8_t *file_bytes;
+  size_t file_size;
+  size_t pixel_count;
+  size_t i;
+  float *pixel_floats;
+  const char *path;
+  int result;
+
+  (void)self;
+
+  if (!PyArg_ParseTuple(args, "s", &path))
+    return NULL;
+
+  decode = akb_ktx2_decoder();
+  if (!decode) {
+    PyErr_SetString(PyExc_RuntimeError, "AssetKit KTX2 decoder library was not found");
+    return NULL;
+  }
+
+  if (!akb_read_file_bytes(path, &file_bytes, &file_size)) {
+    PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+    return NULL;
+  }
+
+  memset(&image, 0, sizeof(image));
+  result = decode(file_bytes, file_size, &image);
+  free(file_bytes);
+  if (result != 0 || !image.data || !image.width || !image.height || image.channels != 4) {
+    free(image.data);
+    free(image.mips);
+    PyErr_Format(PyExc_RuntimeError, "AssetKit KTX2 decode failed: result=%d", result);
+    return NULL;
+  }
+
+  if ((size_t)image.width > SIZE_MAX / (size_t)image.height / 4 / sizeof(float)) {
+    free(image.data);
+    free(image.mips);
+    PyErr_SetString(PyExc_OverflowError, "KTX2 image is too large");
+    return NULL;
+  }
+
+  pixel_count = (size_t)image.width * (size_t)image.height * 4;
+  pixels = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(pixel_count * sizeof(float)));
+  if (!pixels) {
+    free(image.data);
+    free(image.mips);
+    return NULL;
+  }
+
+  pixel_floats = (float *)PyBytes_AS_STRING(pixels);
+  for (i = 0; i < pixel_count; i++)
+    pixel_floats[i] = (float)image.data[i] * (1.0f / 255.0f);
+
+  free(image.data);
+  free(image.mips);
+
+  out = PyDict_New();
+  if (!out) {
+    Py_DECREF(pixels);
+    return NULL;
+  }
+
+  width_obj = PyLong_FromUnsignedLong(image.width);
+  height_obj = PyLong_FromUnsignedLong(image.height);
+  if (!width_obj || !height_obj
+      || PyDict_SetItemString(out, "width", width_obj) < 0
+      || PyDict_SetItemString(out, "height", height_obj) < 0
+      || PyDict_SetItemString(out, "pixels_f32", pixels) < 0) {
+    Py_XDECREF(width_obj);
+    Py_XDECREF(height_obj);
+    Py_DECREF(pixels);
+    Py_DECREF(out);
+    return NULL;
+  }
+
+  Py_DECREF(width_obj);
+  Py_DECREF(height_obj);
+  Py_DECREF(pixels);
+  return out;
+}
+
 static PyMethodDef akb_methods[] = {
   {"load_meshes", akb_load_meshes, METH_VARARGS, "Load mesh buffers through AssetKit."},
   {"open_scene", akb_open_scene, METH_VARARGS, "Open an AssetKit scene for batched mesh reads."},
   {"read_mesh_batch", akb_read_mesh_batch, METH_VARARGS, "Read a batch of mesh buffers from an open AssetKit scene."},
+  {"decode_ktx2", akb_decode_ktx2, METH_VARARGS, "Decode a KTX2 texture to float RGBA pixels."},
   {NULL, NULL, 0, NULL}
 };
 

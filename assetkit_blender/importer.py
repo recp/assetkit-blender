@@ -4,6 +4,7 @@ from array import array
 from collections import deque
 import json
 import math
+import os
 import queue
 import threading
 import time
@@ -3270,15 +3271,9 @@ def _image_texture_node(
     colorspace: str,
     tex_info: TextureRefData | None = None,
 ):
-    try:
-        image = bpy.data.images.load(path, check_existing=True)
-    except RuntimeError:
+    image = _load_texture_image(path, colorspace)
+    if not image:
         return None
-
-    try:
-        image.colorspace_settings.name = colorspace
-    except TypeError:
-        pass
 
     nodes = mat.node_tree.nodes
     tex = nodes.new("ShaderNodeTexImage")
@@ -3289,6 +3284,89 @@ def _image_texture_node(
         tex["assetkit_texture_slot"] = tex_info.slot
     _configure_texture_node(mat, tex, tex_info)
     return tex
+
+
+def _load_texture_image(path: str, colorspace: str):
+    if _is_ktx2_path(path):
+        image = _decode_ktx2_image(path)
+        if image:
+            _set_image_colorspace(image, colorspace)
+            return image
+
+    image = None
+    try:
+        image = bpy.data.images.load(path, check_existing=True)
+    except RuntimeError:
+        image = None
+
+    if image and _image_has_size(image):
+        _set_image_colorspace(image, colorspace)
+        return image
+
+    if image and _is_ktx2_path(path):
+        try:
+            bpy.data.images.remove(image)
+        except Exception:
+            pass
+
+    if _is_ktx2_path(path):
+        image = _decode_ktx2_image(path)
+        if image:
+            _set_image_colorspace(image, colorspace)
+            return image
+
+    return None
+
+
+def _image_has_size(image) -> bool:
+    try:
+        return int(image.size[0]) > 0 and int(image.size[1]) > 0
+    except Exception:
+        return False
+
+
+def _set_image_colorspace(image, colorspace: str) -> None:
+    try:
+        image.colorspace_settings.name = colorspace
+    except TypeError:
+        pass
+
+
+def _is_ktx2_path(path: str) -> bool:
+    return os.fspath(path).lower().endswith(".ktx2")
+
+
+def _decode_ktx2_image(path: str):
+    source_path = os.fspath(path)
+    for image in bpy.data.images:
+        if image.get("assetkit_source_path") == source_path and _image_has_size(image):
+            return image
+
+    try:
+        from . import _assetkit_blender
+    except Exception:
+        return None
+
+    try:
+        decoded = _assetkit_blender.decode_ktx2(source_path)
+    except Exception as exc:
+        print(f"AssetKit KTX2 decode skipped for {path}: {exc}")
+        return None
+
+    width = int(decoded.get("width") or 0)
+    height = int(decoded.get("height") or 0)
+    pixels = _buffer_view(decoded.get("pixels_f32") or b"", "f")
+    if width <= 0 or height <= 0 or pixels is None or len(pixels) != width * height * 4:
+        return None
+
+    name = os.path.basename(source_path)
+    image = bpy.data.images.new(name, width=width, height=height, alpha=True, float_buffer=False)
+    image.pixels.foreach_set(pixels)
+    image.filepath = source_path
+    image["assetkit_decoded_texture"] = True
+    image["assetkit_source_path"] = source_path
+    image.update()
+    return image
 
 
 def _image_texture_channel(
