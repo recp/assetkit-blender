@@ -357,6 +357,7 @@ class MeshPrimitiveData:
     volume_thickness_texture: str = ""
     anisotropy_texture: str = ""
     diffuse_transmission_texture: str = ""
+    diffuse_transmission_color_texture: str = ""
     _native_owner: object | None = None
 
 
@@ -927,6 +928,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 volume_thickness_texture=item.get("volume_thickness_texture") or "",
                 anisotropy_texture=item.get("anisotropy_texture") or "",
                 diffuse_transmission_texture=item.get("diffuse_transmission_texture") or "",
+                diffuse_transmission_color_texture=item.get("diffuse_transmission_color_texture") or "",
                 _native_owner=item.get("_owner"),
             )
         )

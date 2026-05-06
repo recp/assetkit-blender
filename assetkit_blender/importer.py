@@ -2171,6 +2171,28 @@ def _create_material(
             maximum=data.iridescence_thickness_maximum,
             tex_info=_texture_info(data, "iridescence_thickness"),
         )
+    if data.iridescence_texture:
+        _link_factor_texture(
+            mat,
+            bsdf,
+            data.iridescence_texture,
+            ("Thin Film Weight", "Iridescence Weight", "Iridescence"),
+            colorspace="Non-Color",
+            channel="Red",
+            factor=data.iridescence,
+            tex_info=_texture_info(data, "iridescence"),
+        )
+    if data.volume_thickness_texture:
+        _link_factor_texture(
+            mat,
+            bsdf,
+            data.volume_thickness_texture,
+            ("Volume Thickness", "Thickness"),
+            colorspace="Non-Color",
+            channel="Green",
+            factor=data.volume_thickness,
+            tex_info=_texture_info(data, "volume_thickness"),
+        )
     if data.anisotropy_texture:
         _link_factor_texture(
             mat,
@@ -2181,6 +2203,27 @@ def _create_material(
             channel="Blue",
             factor=data.anisotropy,
             tex_info=_texture_info(data, "anisotropy"),
+        )
+    if data.diffuse_transmission_texture:
+        _link_factor_texture(
+            mat,
+            bsdf,
+            data.diffuse_transmission_texture,
+            ("Diffuse Transmission Weight", "Diffuse Transmission"),
+            colorspace="Non-Color",
+            channel="Alpha",
+            factor=data.diffuse_transmission,
+            tex_info=_texture_info(data, "diffuse_transmission"),
+        )
+    if data.diffuse_transmission_color_texture:
+        _link_color_texture(
+            mat,
+            bsdf,
+            data.diffuse_transmission_color_texture,
+            ("Diffuse Transmission Color",),
+            colorspace="sRGB",
+            factor=(*data.diffuse_transmission_color, 1.0),
+            tex_info=_texture_info(data, "diffuse_transmission_color"),
         )
 
     _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket)
@@ -2453,7 +2496,12 @@ def _is_unlit_material(data: MeshPrimitiveData) -> bool:
 
 
 def _is_double_sided_material(data: MeshPrimitiveData) -> bool:
-    return bool(data.double_sided) or int(data.file_type) == _AK_FILE_TYPE_COLLADA
+    return (
+        bool(data.double_sided)
+        or int(data.file_type) == _AK_FILE_TYPE_COLLADA
+        or float(data.transmission) > 0.0
+        or float(data.diffuse_transmission) > 0.0
+    )
 
 
 def _has_emission(data: MeshPrimitiveData) -> bool:
@@ -2522,6 +2570,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         data.volume_thickness_texture,
         data.anisotropy_texture,
         data.diffuse_transmission_texture,
+        data.diffuse_transmission_color_texture,
         color_attr,
     )
 
@@ -2564,7 +2613,7 @@ def _default_material_cache_key() -> object:
         False,
         0,
         0,
-        *(("",) * 19),
+        *(("",) * 20),
         "",
     )
 
@@ -2639,6 +2688,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_volume_thickness_texture": data.volume_thickness_texture,
         "assetkit_anisotropy_texture": data.anisotropy_texture,
         "assetkit_diffuse_transmission_texture": data.diffuse_transmission_texture,
+        "assetkit_diffuse_transmission_color_texture": data.diffuse_transmission_color_texture,
         "assetkit_transparent_texture": data.transparent_texture,
     }
     for key, value in props.items():
@@ -3233,6 +3283,10 @@ def _image_texture_node(
     nodes = mat.node_tree.nodes
     tex = nodes.new("ShaderNodeTexImage")
     tex.image = image
+    if tex_info and tex_info.role:
+        tex.label = f"AssetKit {tex_info.role}"
+        tex["assetkit_texture_role"] = tex_info.role
+        tex["assetkit_texture_slot"] = tex_info.slot
     _configure_texture_node(mat, tex, tex_info)
     return tex
 

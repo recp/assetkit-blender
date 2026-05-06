@@ -177,6 +177,7 @@ typedef struct AkbPrimitive {
   char     volume_thickness_texture[1024];
   char     anisotropy_texture[1024];
   char     diffuse_transmission_texture[1024];
+  char     diffuse_transmission_color_texture[1024];
   float   *vertices;
   float   *instance_matrices;
   uint32_t *indices;
@@ -1124,7 +1125,7 @@ akb_extract_material(AkDoc *doc,
       }
       AKB_COPY_TEX("diffuse_transmission_color",
                    cmn->diffuseTransmission->color->texture,
-                   out->diffuse_transmission_texture);
+                   out->diffuse_transmission_color_texture);
     }
     AKB_COPY_TEX("diffuse_transmission",
                  cmn->diffuseTransmission->texture,
@@ -4352,6 +4353,8 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("anisotropy_texture", akb_unicode_from_cstr(prim->anisotropy_texture));
   AKB_SET_OBJ("diffuse_transmission_texture",
               akb_unicode_from_cstr(prim->diffuse_transmission_texture));
+  AKB_SET_OBJ("diffuse_transmission_color_texture",
+              akb_unicode_from_cstr(prim->diffuse_transmission_color_texture));
   AKB_SET_OBJ("vertices_f32", akb_memoryview_or_empty(prim->vertices, (size_t)prim->vertex_count * 3 * sizeof(float)));
   AKB_SET_OBJ("indices_u32", akb_memoryview_or_empty(prim->indices, (size_t)prim->loop_count * sizeof(uint32_t)));
   AKB_SET_OBJ("loop_starts_i32", akb_memoryview_or_empty(prim->loop_starts, (size_t)prim->face_count * sizeof(int32_t)));
