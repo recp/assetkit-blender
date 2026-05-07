@@ -1540,7 +1540,7 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
     if any(int(channel.get("target") or 0) == _ANIM_ROTATION_QUAT for channel in channels):
         obj.rotation_mode = "QUATERNION"
 
-    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
 
@@ -1606,6 +1606,7 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
 
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
+    _stash_animation_actions(actions)
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
 
@@ -1613,22 +1614,22 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
 def _animation_action_for(
     obj: bpy.types.Object,
     owner: bpy.types.ID,
-    actions: dict[tuple[int, int, str], bpy.types.Action],
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]],
     suffix: str,
     channel: dict | None = None,
 ) -> bpy.types.Action:
     clip_index, _clip_name = _channel_action_clip(channel)
     key = (owner.as_pointer(), clip_index, suffix)
-    action = actions.get(key)
-    if action:
-        return action
+    cached = actions.get(key)
+    if cached:
+        return cached[1]
 
     owner.animation_data_create()
     action = bpy.data.actions.new(_animation_action_name(obj.name, suffix, channel))
     action.use_fake_user = True
     if owner.animation_data.action is None or clip_index == 0:
         owner.animation_data.action = action
-    actions[key] = action
+    actions[key] = (owner, action)
     return action
 
 
@@ -1667,6 +1668,61 @@ def _fcurve_write_key(
 def _safe_action_name(name: str) -> str:
     out = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in name.strip())
     return out[:96]
+
+
+def _stash_animation_actions(actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]]) -> None:
+    for owner, action in actions.values():
+        if not action or _action_frame_range(action) is None:
+            continue
+        _stash_animation_action(owner, action)
+
+
+def _stash_animation_action(owner: bpy.types.ID, action: bpy.types.Action) -> None:
+    try:
+        owner.animation_data_create()
+        tracks = owner.animation_data.nla_tracks
+    except Exception:
+        return
+
+    for track in tracks:
+        if any(strip.action == action for strip in track.strips):
+            return
+
+    try:
+        track = tracks.new(prev=None)
+        track.name = action.name
+        strip = track.strips.new(action.name, bpy.context.scene.frame_start, action)
+    except Exception:
+        return
+
+    _set_nla_strip_action_slot(strip, action, owner)
+    frame_range = _action_frame_range(action)
+    if frame_range is not None:
+        strip.action_frame_start = frame_range[0]
+        strip.action_frame_end = frame_range[1]
+    track.lock = True
+    track.mute = True
+
+
+def _set_nla_strip_action_slot(strip, action: bpy.types.Action, owner: bpy.types.ID) -> None:
+    if not hasattr(strip, "action_slot"):
+        return
+
+    slot = None
+    for candidate in getattr(action, "slots", []):
+        if getattr(candidate, "target_id_type", "") == owner.id_type:
+            slot = candidate
+            break
+    if slot is None:
+        slots = list(getattr(action, "slots", []))
+        slot = slots[0] if slots else None
+    if slot is None:
+        return
+
+    try:
+        strip.action_slot = slot
+    except Exception:
+        pass
 
 
 def _anim_channel_target(
@@ -1790,7 +1846,7 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
     end_frame = scene.frame_end
 
     shape_keys.animation_data_create()
-    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
 
     for channel in channels:
@@ -1842,6 +1898,7 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
 
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
+    _stash_animation_actions(actions)
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
 
@@ -2172,7 +2229,7 @@ def _apply_bone_animations(
 
     scene = bpy.context.scene
     fps = scene.render.fps / scene.render.fps_base
-    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
 
@@ -2229,6 +2286,7 @@ def _apply_bone_animations(
 
             end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
+    _stash_animation_actions(actions)
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
 
@@ -2845,7 +2903,7 @@ def _apply_material_animation(
 
     scene = bpy.context.scene
     fps = scene.render.fps / scene.render.fps_base
-    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
 
@@ -2918,6 +2976,7 @@ def _apply_material_animation(
 
         end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
+    _stash_animation_actions(actions)
     if actions:
         mat["assetkit_material_animation_applied"] = True
     if end_frame > scene.frame_end:
