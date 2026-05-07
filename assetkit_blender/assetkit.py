@@ -341,6 +341,7 @@ class MeshPrimitiveData:
     diffuse_transmission: float = 0.0
     dispersion: float = 0.0
     alpha_mode: int = 0
+    transparent_opaque: int = 0
     double_sided: bool = False
     has_sheen: bool = False
     material_type: int = 0
@@ -929,6 +930,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 ),
                 dispersion=float(item.get("dispersion") if item.get("dispersion") is not None else 0.0),
                 alpha_mode=int(item.get("alpha_mode") or 0),
+                transparent_opaque=int(item.get("transparent_opaque") or 0),
                 double_sided=bool(item.get("double_sided")),
                 has_sheen=bool(item.get("has_sheen")),
                 material_type=int(item.get("material_type") or 0),

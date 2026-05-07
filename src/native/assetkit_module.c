@@ -288,6 +288,7 @@ typedef struct AkbPrimitive {
   uint8_t  has_sheen;
   uint8_t  double_sided;
   uint8_t  alpha_mode;
+  uint8_t  transparent_opaque;
   uint8_t  has_node;
   uint8_t  has_coord_matrix;
   uint8_t  borrowed_vertices;
@@ -1250,6 +1251,7 @@ akb_extract_material(AkDoc *doc,
 
     out->alpha_cutoff = cmn->transparent->cutoff;
     out->transparent_amount = cmn->transparent->amount;
+    out->transparent_opaque = (uint8_t)cmn->transparent->opaque;
 
     if (cmn->transparent->color) {
       if (cmn->transparent->color->color) {
@@ -4825,6 +4827,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("diffuse_transmission", PyFloat_FromDouble(prim->diffuse_transmission));
   AKB_SET_OBJ("dispersion", PyFloat_FromDouble(prim->dispersion));
   AKB_SET_OBJ("alpha_mode", PyLong_FromUnsignedLong(prim->alpha_mode));
+  AKB_SET_OBJ("transparent_opaque", PyLong_FromUnsignedLong(prim->transparent_opaque));
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("material_type", PyLong_FromUnsignedLong(prim->material_type));
   AKB_SET_OBJ("file_type", PyLong_FromUnsignedLong(prim->file_type));

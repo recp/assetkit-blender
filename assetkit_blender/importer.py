@@ -109,6 +109,10 @@ _AK_MATERIAL_LAMBERT = 3
 _AK_MATERIAL_CONSTANT = 4
 _AK_MATERIAL_SPECULAR_GLOSSINESS = 6
 _AK_FILE_TYPE_COLLADA = 1
+_AK_OPAQUE_A_ONE = 1
+_AK_OPAQUE_A_ZERO = 2
+_AK_OPAQUE_RGB_ONE = 3
+_AK_OPAQUE_RGB_ZERO = 4
 _GLTF_SETTINGS_GROUP_NAME = "glTF Material Output"
 _GLTF_SETTINGS_SOCKETS = (
     ("Occlusion", 1.0),
@@ -130,6 +134,7 @@ def import_assetkit_file(
     load_options: dict | None = None,
     collection: bpy.types.Collection | None = None,
     focus_mode: str = "NEVER",
+    placement_mode: str = "AS_AUTHORED",
     scene_was_empty: bool = False,
     focus_camera: bpy.types.Object | None = None,
     select_imported: bool = False,
@@ -147,6 +152,8 @@ def import_assetkit_file(
     _finish_import(
         objects,
         focus_mode,
+        placement_mode,
+        state["root_objects"],
         scene_was_empty,
         collection or bpy.context.collection,
         focus_camera,
@@ -164,6 +171,7 @@ def import_assetkit_file_progressive(
     collection: bpy.types.Collection | None = None,
     batch_size: int = _PROGRESSIVE_BATCH_SIZE,
     focus_mode: str = "NEVER",
+    placement_mode: str = "AS_AUTHORED",
     scene_was_empty: bool = False,
     focus_camera: bpy.types.Object | None = None,
     select_imported: bool = False,
@@ -178,6 +186,7 @@ def import_assetkit_file_progressive(
         collection or bpy.context.collection,
         max(1, batch_size),
         focus_mode,
+        placement_mode,
         scene_was_empty,
         focus_camera,
         select_imported,
@@ -196,6 +205,7 @@ def import_assetkit_file_auto(
     collection: bpy.types.Collection | None = None,
     batch_size: int = _PROGRESSIVE_BATCH_SIZE,
     focus_mode: str = "NEVER",
+    placement_mode: str = "AS_AUTHORED",
     scene_was_empty: bool = False,
     focus_camera: bpy.types.Object | None = None,
     select_imported: bool = False,
@@ -212,6 +222,7 @@ def import_assetkit_file_auto(
             load_options,
             active_collection,
             focus_mode,
+            placement_mode,
             scene_was_empty,
             focus_camera,
             select_imported,
@@ -228,6 +239,7 @@ def import_assetkit_file_auto(
             load_options,
             active_collection,
             focus_mode,
+            placement_mode,
             scene_was_empty,
             focus_camera,
             select_imported,
@@ -248,6 +260,7 @@ def import_assetkit_file_auto(
             active_collection,
             max(1, batch_size),
             focus_mode,
+            placement_mode,
             scene_was_empty,
             focus_camera,
             select_imported,
@@ -267,6 +280,8 @@ def import_assetkit_file_auto(
     _finish_import(
         objects,
         focus_mode,
+        placement_mode,
+        state["root_objects"],
         scene_was_empty,
         active_collection,
         focus_camera,
@@ -303,11 +318,26 @@ def _begin_scene_build(
     node_objects = _create_scene_nodes(scene_nodes, coord_root, collection)
     return {
         "coord_root": coord_root,
+        "root_objects": _scene_root_objects(scene_nodes, coord_root, node_objects),
         "node_objects": node_objects,
         "node_data": {index: node for index, node in enumerate(scene_nodes)},
         "material_cache": {},
         "skin_cache": {},
     }
+
+
+def _scene_root_objects(
+    scene_nodes: list[SceneNodeData],
+    coord_root: bpy.types.Object | None,
+    node_objects: dict[int, bpy.types.Object],
+) -> list[bpy.types.Object]:
+    if coord_root:
+        return [coord_root]
+    roots = []
+    for index, node in enumerate(scene_nodes):
+        if node.parent_index < 0 and index in node_objects:
+            roots.append(node_objects[index])
+    return roots
 
 
 def _create_import_object(
@@ -347,6 +377,8 @@ def _select_imported_objects(objects: list[bpy.types.Object]) -> None:
 def _finish_import(
     objects: list[bpy.types.Object],
     focus_mode: str,
+    placement_mode: str,
+    root_objects: list[bpy.types.Object],
     scene_was_empty: bool,
     collection: bpy.types.Collection,
     focus_camera: bpy.types.Object | None,
@@ -354,6 +386,7 @@ def _finish_import(
     set_viewport_shading: bool,
     existing_actions: set[bpy.types.Action] | None,
 ) -> None:
+    _apply_import_placement(objects, placement_mode, root_objects)
     if select_imported:
         _select_imported_objects(objects)
     _focus_imported_objects(objects, focus_mode, scene_was_empty, collection, focus_camera)
@@ -533,6 +566,81 @@ def _focus_imported_objects(
         _frame_camera(bounds, collection, focus_camera)
 
 
+def _apply_import_placement(
+    objects: list[bpy.types.Object],
+    placement_mode: str,
+    root_objects: list[bpy.types.Object] | None = None,
+) -> None:
+    if placement_mode == "AS_AUTHORED" or not objects:
+        return
+
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
+
+    bounds = _object_bounds(objects)
+    if bounds is None:
+        return
+
+    minimum, maximum = bounds
+    center = (minimum + maximum) * 0.5
+    cursor = bpy.context.scene.cursor.location
+    if placement_mode == "ORIGIN_GROUND":
+        target = Vector((0.0, 0.0, 0.0))
+    elif placement_mode == "CURSOR_GROUND":
+        target = Vector((cursor.x, cursor.y, cursor.z))
+    else:
+        return
+
+    offset = Vector((target.x - center.x, target.y - center.y, target.z - minimum.z))
+    if offset.length <= 1e-9:
+        return
+
+    for root in _placement_roots(objects, root_objects or []):
+        try:
+            matrix = root.matrix_world.copy()
+            matrix.translation += offset
+            root.matrix_world = matrix
+        except Exception:
+            root.location += offset
+
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
+
+
+def _placement_roots(
+    objects: list[bpy.types.Object],
+    root_objects: list[bpy.types.Object],
+) -> list[bpy.types.Object]:
+    roots = [obj for obj in root_objects if obj and obj.name in bpy.data.objects]
+    if roots:
+        return _unique_objects(roots)
+
+    object_set = set(objects)
+    roots = []
+    for obj in objects:
+        root = obj
+        while root.parent and root.parent in object_set:
+            root = root.parent
+        roots.append(root)
+    return _unique_objects(roots)
+
+
+def _unique_objects(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
+    seen = set()
+    unique = []
+    for obj in objects:
+        key = obj.as_pointer()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(obj)
+    return unique
+
+
 def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | None:
     minimum: Vector | None = None
     maximum: Vector | None = None
@@ -590,7 +698,7 @@ def _frame_viewports(
             try:
                 with bpy.context.temp_override(window=window, area=area, region=region, space_data=space):
                     bpy.ops.view3d.view_selected(use_all_regions=False)
-                    _pad_view_distance(space, radius)
+                    _set_view_distance(space, bounds, radius)
             except Exception:
                 pass
     if selection:
@@ -603,19 +711,19 @@ def _set_viewport_clip(space: bpy.types.SpaceView3D, radius: float) -> None:
     space.clip_start = min(space.clip_start, max(radius / 100_000.0, 0.001))
 
 
-def _pad_view_distance(space: bpy.types.SpaceView3D, radius: float) -> None:
+def _set_view_distance(
+    space: bpy.types.SpaceView3D,
+    bounds: tuple[Vector, Vector],
+    radius: float,
+) -> None:
     region_3d = getattr(space, "region_3d", None)
     if region_3d is None:
         return
     try:
+        minimum, maximum = bounds
+        region_3d.view_location = (minimum + maximum) * 0.5
         target = radius * _viewport_distance_factor(radius)
-        current = region_3d.view_distance
-        if current <= 0.0:
-            region_3d.view_distance = target
-        elif current < target:
-            region_3d.view_distance = target
-        elif current > target * 1.15:
-            region_3d.view_distance = target * 1.15
+        region_3d.view_distance = target
     except Exception:
         pass
 
@@ -761,6 +869,7 @@ class _ProgressiveImportJob:
         collection: bpy.types.Collection,
         batch_size: int,
         focus_mode: str,
+        placement_mode: str,
         scene_was_empty: bool,
         focus_camera: bpy.types.Object | None,
         select_imported: bool,
@@ -775,6 +884,7 @@ class _ProgressiveImportJob:
         self.collection = collection
         self.batch_size = batch_size
         self.focus_mode = focus_mode
+        self.placement_mode = placement_mode
         self.scene_was_empty = scene_was_empty
         self.focus_camera = focus_camera
         self.select_imported = select_imported
@@ -903,6 +1013,8 @@ class _ProgressiveImportJob:
         _finish_import(
             self.objects,
             self.focus_mode,
+            self.placement_mode,
+            self.state["root_objects"] if self.state else [],
             self.scene_was_empty,
             self.collection,
             self.focus_camera,
@@ -2533,6 +2645,7 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
         "diffuse_transmission": _raw_float(raw, "diffuse_transmission", data.diffuse_transmission),
         "dispersion": _raw_float(raw, "dispersion", data.dispersion),
         "alpha_mode": _raw_int(raw, "alpha_mode", data.alpha_mode),
+        "transparent_opaque": _raw_int(raw, "transparent_opaque", data.transparent_opaque),
         "double_sided": bool(raw.get("double_sided", data.double_sided)),
         "has_sheen": bool(raw.get("has_sheen", data.has_sheen)),
         "material_type": _raw_int(raw, "material_type", data.material_type),
@@ -2613,8 +2726,9 @@ def _create_material(
     material_name = data.material_name or f"{data.name}_Material"
     if data.material_name and color_attr:
         material_name = f"{material_name}_{color_attr}"
+    base_color = _material_base_color(data)
     mat = bpy.data.materials.new(material_name)
-    mat.diffuse_color = data.base_color
+    mat.diffuse_color = base_color
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
     if data.alpha_mode == 0:
@@ -2666,7 +2780,7 @@ def _create_material(
         if data.iridescence or data.iridescence_thickness_texture:
             _set_first_input(bsdf, ("Thin Film Thickness",), data.iridescence_thickness_maximum)
 
-    _set_input(color_target, color_input, data.base_color)
+    _set_input(color_target, color_input, base_color)
     if alpha_socket:
         try:
             alpha_socket.default_value = data.opacity
@@ -2697,8 +2811,8 @@ def _create_material(
             bsdf,
             data,
         )
-    if data.transparent_texture:
-        _link_alpha_texture(mat, bsdf, data.transparent_texture, _texture_info(data, "transparent"))
+    if data.transparent_texture and alpha_socket:
+        _link_transparent_texture(mat, alpha_socket, data)
     if data.specular_texture:
         if int(data.material_type) == _AK_MATERIAL_SPECULAR_GLOSSINESS:
             _link_specular_glossiness_texture(mat, bsdf, data)
@@ -3196,6 +3310,33 @@ def _has_material_data(data: MeshPrimitiveData) -> bool:
     return _material_cache_key(data) != _default_material_cache_key()
 
 
+def _material_base_color(data: MeshPrimitiveData) -> tuple[float, float, float, float]:
+    if _uses_collada_transparent_as_surface_color(data):
+        return (
+            float(data.transparent_color[0]),
+            float(data.transparent_color[1]),
+            float(data.transparent_color[2]),
+            float(data.base_color[3]),
+        )
+    return data.base_color
+
+
+def _uses_collada_transparent_as_surface_color(data: MeshPrimitiveData) -> bool:
+    if int(data.file_type) != _AK_FILE_TYPE_COLLADA:
+        return False
+    if data.base_color_texture or data.transparent_texture:
+        return False
+    if not _is_default_rgb(data.base_color):
+        return False
+    if _is_default_rgb(data.transparent_color):
+        return False
+    return True
+
+
+def _is_default_rgb(values: tuple[float, ...]) -> bool:
+    return len(values) >= 3 and all(abs(float(value) - 1.0) <= 1e-6 for value in values[:3])
+
+
 def _is_unlit_material(data: MeshPrimitiveData) -> bool:
     return int(data.material_type) == _AK_MATERIAL_CONSTANT
 
@@ -3301,6 +3442,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         round(float(data.diffuse_transmission), 6),
         round(float(data.dispersion), 6),
         int(data.alpha_mode),
+        int(data.transparent_opaque),
         _is_double_sided_material(data),
         bool(data.has_sheen),
         int(data.material_type),
@@ -3368,6 +3510,7 @@ def _default_material_cache_key() -> object:
         0.0,
         0.0,
         0.0,
+        0,
         0,
         False,
         False,
@@ -3478,6 +3621,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_transparent_color": data.transparent_color,
         "assetkit_transparent_amount": data.transparent_amount,
         "assetkit_opacity": data.opacity,
+        "assetkit_transparent_opaque": data.transparent_opaque,
         "assetkit_normal_scale": data.normal_scale,
         "assetkit_occlusion_strength": data.occlusion_strength,
         "assetkit_emissive_strength": data.emissive_strength,
@@ -4129,23 +4273,51 @@ def _link_base_color_texture(mat: bpy.types.Material, bsdf, data: MeshPrimitiveD
     _link_base_color(mat, bsdf, data, "")
 
 
-def _link_alpha_texture(
+def _link_transparent_texture(
     mat: bpy.types.Material,
-    bsdf,
-    path: str,
-    tex_info: TextureRefData | None = None,
+    alpha_socket,
+    data: MeshPrimitiveData,
 ) -> None:
-    tex = _image_texture_node(mat, path, "Non-Color", tex_info)
+    tex = _image_texture_node(mat, data.transparent_texture, "Non-Color", _texture_info(data, "transparent"))
     if not tex:
         return
 
-    alpha = bsdf.inputs.get("Alpha")
-    if not alpha:
+    opaque = int(data.transparent_opaque)
+    if opaque in {_AK_OPAQUE_RGB_ONE, _AK_OPAQUE_RGB_ZERO}:
+        output = _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent RGB")
+    else:
+        output = tex.outputs.get("Alpha") or _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent Alpha")
+
+    if not output:
         return
 
-    output = tex.outputs.get("Alpha") or tex.outputs.get("Color")
-    if output:
-        mat.node_tree.links.new(output, alpha)
+    if float(data.transparent_amount) != 1.0:
+        output = _multiply_value_factor(mat, output, data.transparent_amount, "Transparent Amount")
+
+    if opaque in {_AK_OPAQUE_A_ZERO, _AK_OPAQUE_RGB_ZERO}:
+        output = _one_minus_value(mat, output, "Transparent Invert")
+
+    _replace_socket_link(mat, alpha_socket, output)
+
+
+def _replace_socket_link(mat: bpy.types.Material, socket, output) -> None:
+    if not socket or not output:
+        return
+    for link in list(socket.links):
+        mat.node_tree.links.remove(link)
+    mat.node_tree.links.new(output, socket)
+
+
+def _rgb_to_luminance(mat: bpy.types.Material, output, label: str):
+    if output is None:
+        return None
+    try:
+        node = mat.node_tree.nodes.new("ShaderNodeRGBToBW")
+    except Exception:
+        return output
+    node.label = label
+    mat.node_tree.links.new(output, node.inputs["Color"])
+    return node.outputs["Val"]
 
 
 def _link_metallic_roughness_texture(

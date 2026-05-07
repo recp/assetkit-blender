@@ -110,6 +110,16 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         ),
         default="EMPTY_SCENE",
     )
+    placement: bpy.props.EnumProperty(
+        name="Placement",
+        description="Move the imported asset after import",
+        items=(
+            ("AS_AUTHORED", "As Authored", "Keep authored coordinates"),
+            ("ORIGIN_GROUND", "Origin Ground", "Center the asset on world origin and place it on the ground plane"),
+            ("CURSOR_GROUND", "Cursor Ground", "Center the asset on the 3D cursor and place it on the cursor ground plane"),
+        ),
+        default="AS_AUTHORED",
+    )
     select_imported_objects: bpy.props.BoolProperty(
         name="Select Imported Objects",
         description="Select created mesh objects after import",
@@ -153,6 +163,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                     collection=context.collection,
                     batch_size=self.progressive_batch_size,
                     focus_mode=self.focus_import,
+                    placement_mode=self.placement,
                     scene_was_empty=scene_was_empty,
                     focus_camera=focus_camera,
                     select_imported=self.select_imported_objects,
@@ -184,6 +195,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 collection=context.collection,
                 batch_size=self.progressive_batch_size,
                 focus_mode=self.focus_import,
+                placement_mode=self.placement,
                 scene_was_empty=scene_was_empty,
                 focus_camera=focus_camera,
                 select_imported=self.select_imported_objects,
@@ -201,6 +213,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 load_options,
                 collection=context.collection,
                 focus_mode=self.focus_import,
+                placement_mode=self.placement,
                 scene_was_empty=scene_was_empty,
                 focus_camera=focus_camera,
                 select_imported=self.select_imported_objects,
@@ -252,6 +265,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         view_box.label(text="View")
         view_box.prop(self, "mesh_shading")
         view_box.prop(self, "focus_import")
+        view_box.prop(self, "placement")
         view_box.prop(self, "replace_startup_cube")
         view_checks = view_box.column()
         view_checks.use_property_split = False
