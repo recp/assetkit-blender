@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from array import array
 
 import bpy
@@ -338,15 +339,69 @@ def _is_startup_light(obj: bpy.types.Object) -> bool:
     return obj.data.type == "POINT"
 
 
+_MATERIAL_VARIANT_ITEMS_CACHE = ()
+
+
+def _material_variant_items(self, context):
+    del self
+
+    global _MATERIAL_VARIANT_ITEMS_CACHE
+
+    names = _material_variant_names(context)
+    items = [("__DEFAULT__", "Default", "Restore default materials")]
+    items.extend(
+        (
+            _material_variant_identifier(name),
+            name,
+            "Apply this AssetKit material variant",
+        )
+        for name in names
+    )
+    _MATERIAL_VARIANT_ITEMS_CACHE = tuple(items)
+    return _MATERIAL_VARIANT_ITEMS_CACHE
+
+
+def _material_variant_name_from_enum(context, identifier: str) -> str:
+    if identifier == "__DEFAULT__":
+        return ""
+    for name in _material_variant_names(context):
+        if _material_variant_identifier(name) == identifier:
+            return name
+    return identifier
+
+
+def _material_variant_names(context) -> list[str]:
+    names = set()
+    objects = getattr(context, "scene", None).objects if getattr(context, "scene", None) else []
+    for obj in objects:
+        count = int(obj.get("assetkit_material_variant_count") or 0)
+        for index in range(count):
+            name = obj.get(f"assetkit_material_variant_{index}_name")
+            if name:
+                names.add(str(name))
+    return sorted(names)
+
+
+def _material_variant_identifier(name: str) -> str:
+    digest = hashlib.sha1(name.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"VARIANT_{digest}"
+
+
 class ASSETKIT_OT_apply_material_variant(bpy.types.Operator):
     bl_idname = "assetkit.apply_material_variant"
     bl_label = "Apply AssetKit Material Variant"
     bl_options = {"REGISTER", "UNDO"}
 
+    variant: bpy.props.EnumProperty(
+        name="Variant",
+        description="Material variant to apply",
+        items=_material_variant_items,
+    )
     variant_name: bpy.props.StringProperty(
         name="Variant",
         description="Material variant name. Leave empty to restore default materials",
         default="",
+        options={"HIDDEN"},
     )
     selected_only: bpy.props.BoolProperty(
         name="Selected Only",
@@ -358,11 +413,12 @@ class ASSETKIT_OT_apply_material_variant(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
-        changed = _apply_material_variant(context, self.variant_name, self.selected_only)
+        variant_name = self.variant_name or _material_variant_name_from_enum(context, self.variant)
+        changed = _apply_material_variant(context, variant_name, self.selected_only)
         if changed == 0:
             self.report({"WARNING"}, "No matching AssetKit material variants found")
         else:
-            label = self.variant_name or "default"
+            label = variant_name or "default"
             self.report({"INFO"}, f"Applied AssetKit material variant '{label}' to {changed} object(s)")
         return {"FINISHED"}
 
