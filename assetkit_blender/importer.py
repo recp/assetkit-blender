@@ -1617,7 +1617,7 @@ def _animation_action_for(
     suffix: str,
     channel: dict | None = None,
 ) -> bpy.types.Action:
-    clip_index = int((channel or {}).get("clip_index") or 0)
+    clip_index, _clip_name = _channel_action_clip(channel)
     key = (owner.as_pointer(), clip_index, suffix)
     action = actions.get(key)
     if action:
@@ -1631,13 +1631,20 @@ def _animation_action_for(
 
 
 def _animation_action_name(base_name: str, suffix: str, channel: dict | None) -> str:
-    clip_index = int((channel or {}).get("clip_index") or 0)
-    clip_name = _safe_action_name(str((channel or {}).get("clip_name") or ""))
+    clip_index, clip_name = _channel_action_clip(channel)
     if clip_name:
         return f"{base_name}_AssetKit_{clip_name}{suffix}"
     if clip_index:
         return f"{base_name}_AssetKit_Animation_{clip_index}{suffix}"
     return f"{base_name}_AssetKit{suffix}"
+
+
+def _channel_action_clip(channel: dict | None) -> tuple[int, str]:
+    clip_index = int((channel or {}).get("clip_index") or 0)
+    clip_name = _safe_action_name(str((channel or {}).get("clip_name") or ""))
+    if not clip_name:
+        clip_index = 0
+    return clip_index, clip_name
 
 
 def _fcurve_write_key(
@@ -1646,9 +1653,10 @@ def _fcurve_write_key(
     data_path: str,
     index: int | None,
 ) -> tuple[int, int, str, int]:
+    clip_index, _clip_name = _channel_action_clip(channel)
     return (
         owner.as_pointer(),
-        int(channel.get("clip_index") or 0),
+        clip_index,
         data_path,
         -1 if index is None else int(index),
     )
@@ -2162,9 +2170,8 @@ def _apply_bone_animations(
 
     scene = bpy.context.scene
     fps = scene.render.fps / scene.render.fps_base
-    action = bpy.data.actions.new(f"{armature.name}_AssetKit")
-    armature.animation_data_create()
-    armature.animation_data.action = action
+    actions: dict[tuple[int, int, str], bpy.types.Action] = {}
+    written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
 
     for index, name in enumerate(joint_names):
@@ -2192,9 +2199,14 @@ def _apply_bone_animations(
             in_tangents, out_tangents = _channel_tangents(channel)
             component_count = 1 if is_partial else min(width - target_offset, value_width)
             data_path = pose_bone.path_from_id(path)
+            action = _animation_action_for(armature, armature, actions, "", channel)
             for component in range(component_count):
                 target_index = target_offset + component
                 value_index = 0 if is_partial else component
+                write_key = _fcurve_write_key(armature, channel, data_path, target_index)
+                if write_key in written_fcurves:
+                    continue
+                written_fcurves.add(write_key)
                 fcurve = _ensure_fcurve(action, armature, data_path, target_index, group_name=name)
                 coords = array("f", [0.0]) * (count * 2)
                 for key_index in range(count):
