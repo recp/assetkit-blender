@@ -1625,7 +1625,9 @@ def _animation_action_for(
 
     owner.animation_data_create()
     action = bpy.data.actions.new(_animation_action_name(obj.name, suffix, channel))
-    owner.animation_data.action = action
+    action.use_fake_user = True
+    if owner.animation_data.action is None or clip_index == 0:
+        owner.animation_data.action = action
     actions[key] = action
     return action
 
