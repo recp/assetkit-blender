@@ -3387,7 +3387,6 @@ def _material_ior(data: MeshPrimitiveData) -> float:
 def _is_double_sided_material(data: MeshPrimitiveData) -> bool:
     return (
         bool(data.double_sided)
-        or int(data.file_type) == _AK_FILE_TYPE_COLLADA
         or float(data.transmission) > 0.0
         or float(data.diffuse_transmission) > 0.0
     )
