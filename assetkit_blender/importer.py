@@ -3669,6 +3669,8 @@ def _raw_texture_infos(raw_infos: dict) -> dict[str, TextureRefData]:
             transform_scale=tuple(info.get("transform_scale") or (1.0, 1.0)),
             transform_rotation=_raw_float(info, "transform_rotation", 0.0),
             transform_slot=int(info.get("transform_slot") if info.get("transform_slot") is not None else -1),
+            texture_extra=info.get("texture_extra"),
+            texref_extra=info.get("texref_extra"),
             image_extra=info.get("image_extra"),
             sampler_extra=info.get("sampler_extra"),
         )
@@ -4892,6 +4894,8 @@ def _texture_infos_cache_key(texture_infos: dict[str, TextureRefData] | None) ->
                 _round_tuple(info.transform_scale),
                 round(float(info.transform_rotation), 6),
                 int(info.transform_slot),
+                _json_cache_key(info.texture_extra),
+                _json_cache_key(info.texref_extra),
                 _json_cache_key(info.image_extra),
                 _json_cache_key(info.sampler_extra),
             )
@@ -5014,6 +5018,8 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         mat[f"{prefix}_mip_filter"] = info.mip_filter
         mat[f"{prefix}_extension"] = _texture_extension(info)
         mat[f"{prefix}_interpolation"] = _texture_interpolation(info)
+        _set_assetkit_json_prop(mat, f"{prefix}_texture_extra_json", info.texture_extra)
+        _set_assetkit_json_prop(mat, f"{prefix}_texref_extra_json", info.texref_extra)
         _set_assetkit_json_prop(mat, f"{prefix}_image_extra_json", info.image_extra)
         _set_assetkit_json_prop(mat, f"{prefix}_sampler_extra_json", info.sampler_extra)
         if info.has_transform:
@@ -6092,6 +6098,8 @@ def _image_texture_node(
         if tex_info.channels:
             tex["assetkit_texture_channels"] = tex_info.channels
         _set_texture_sampler_props(tex, tex_info)
+        _set_assetkit_json_prop(tex, "assetkit_texture_extra_json", tex_info.texture_extra)
+        _set_assetkit_json_prop(tex, "assetkit_texture_ref_extra_json", tex_info.texref_extra)
         _set_assetkit_json_prop(tex, "assetkit_texture_image_extra_json", tex_info.image_extra)
         _set_assetkit_json_prop(tex, "assetkit_texture_sampler_extra_json", tex_info.sampler_extra)
     _configure_texture_node(mat, tex, tex_info)

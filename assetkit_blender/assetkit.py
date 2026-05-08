@@ -249,6 +249,8 @@ class TextureRefData:
     transform_scale: tuple[float, float] = (1.0, 1.0)
     transform_rotation: float = 0.0
     transform_slot: int = -1
+    texture_extra: object | None = None
+    texref_extra: object | None = None
     image_extra: object | None = None
     sampler_extra: object | None = None
 
@@ -877,6 +879,8 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                     else 0.0
                 ),
                 transform_slot=int(info.get("transform_slot") if info.get("transform_slot") is not None else -1),
+                texture_extra=info.get("texture_extra"),
+                texref_extra=info.get("texref_extra"),
                 image_extra=info.get("image_extra"),
                 sampler_extra=info.get("sampler_extra"),
             )

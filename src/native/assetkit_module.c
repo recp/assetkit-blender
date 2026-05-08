@@ -164,6 +164,8 @@ typedef struct AkbLoopFloatAttribute {
 } AkbLoopFloatAttribute;
 
 typedef struct AkbTextureInfo {
+  AkTree *texture_extra;
+  AkTree *texref_extra;
   AkTree *image_extra;
   AkTree *sampler_extra;
   char    role[64];
@@ -1274,6 +1276,8 @@ akb_copy_texture_info(AkDoc *doc,
 
   image = texref->texture ? texref->texture->image : NULL;
   sampler = texref->texture ? texref->texture->sampler : NULL;
+  info->texture_extra = texref->texture ? ak_extra(texref->texture) : NULL;
+  info->texref_extra = ak_extra(texref);
   info->image_extra = image ? ak_extra(image) : NULL;
   info->sampler_extra = sampler ? ak_extra(sampler) : NULL;
   if (image && image->name)
@@ -5473,6 +5477,8 @@ akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
     AKB_TEX_SET_OBJ("min_filter", PyLong_FromLong(infos[i].min_filter));
     AKB_TEX_SET_OBJ("mag_filter", PyLong_FromLong(infos[i].mag_filter));
     AKB_TEX_SET_OBJ("mip_filter", PyLong_FromLong(infos[i].mip_filter));
+    AKB_TEX_SET_OBJ("texture_extra", akb_tree_to_py(infos[i].texture_extra));
+    AKB_TEX_SET_OBJ("texref_extra", akb_tree_to_py(infos[i].texref_extra));
     AKB_TEX_SET_OBJ("image_extra", akb_tree_to_py(infos[i].image_extra));
     AKB_TEX_SET_OBJ("sampler_extra", akb_tree_to_py(infos[i].sampler_extra));
     AKB_TEX_SET_OBJ("has_transform", PyBool_FromLong(infos[i].has_transform));
