@@ -8,7 +8,11 @@ import bpy
 from bpy_extras.io_utils import ImportHelper
 
 from .assetkit import AssetKitError
+from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
 from .importer import import_assetkit_file, import_assetkit_file_auto, import_assetkit_file_progressive
+
+_DEFERRED_BLOCKING_DELAY = 0.05
+_DEFERRED_ASYNC_DELAY = 0.05
 
 
 class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
@@ -93,8 +97,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         name="Build Mode",
         description="How Blender objects are created after AssetKit reads the file",
         items=(
-            ("AUTO", "Auto", "Use progressive building for large object/node counts"),
-            ("BLOCKING", "Blocking", "Build all Blender objects before the import operator returns"),
+            ("AUTO", "Auto", "Keep Blender responsive and stream objects with an adaptive first batch"),
+            ("BLOCKING", "Blocking", "Close the file browser first, then build all Blender objects synchronously"),
             ("PROGRESSIVE", "Progressive", "Load AssetKit in the background and build Blender objects in batches"),
         ),
         default="AUTO",
@@ -168,6 +172,25 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         focus_camera = context.scene.camera if scene_was_empty else None
 
         if self.build_mode == "AUTO":
+            if _should_defer_async_import(context):
+                _schedule_auto_import(
+                    self.filepath,
+                    assetkit_library,
+                    load_options,
+                    context.collection,
+                    self.progressive_batch_size,
+                    self.focus_import,
+                    self.placement,
+                    scene_was_empty,
+                    focus_camera,
+                    self.select_imported_objects,
+                    self.mesh_shading,
+                    self.set_viewport_shading,
+                    self.fit_timeline,
+                )
+                self.report({"INFO"}, "AssetKit import scheduled")
+                return {"FINISHED"}
+
             try:
                 result = import_assetkit_file_auto(
                     self.filepath,
@@ -201,6 +224,25 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             return {"FINISHED"}
 
         if self.build_mode == "PROGRESSIVE":
+            if _should_defer_async_import(context):
+                _schedule_progressive_import(
+                    self.filepath,
+                    assetkit_library,
+                    load_options,
+                    context.collection,
+                    self.progressive_batch_size,
+                    self.focus_import,
+                    self.placement,
+                    scene_was_empty,
+                    focus_camera,
+                    self.select_imported_objects,
+                    self.mesh_shading,
+                    self.set_viewport_shading,
+                    self.fit_timeline,
+                )
+                self.report({"INFO"}, "AssetKit progressive import scheduled")
+                return {"FINISHED"}
+
             import_assetkit_file_progressive(
                 self.filepath,
                 assetkit_library,
@@ -217,6 +259,24 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 fit_timeline=self.fit_timeline,
             )
             self.report({"INFO"}, "AssetKit progressive import started")
+            return {"FINISHED"}
+
+        if _should_defer_blocking_import(context):
+            _schedule_blocking_import(
+                self.filepath,
+                assetkit_library,
+                load_options,
+                context.collection,
+                self.focus_import,
+                self.placement,
+                scene_was_empty,
+                focus_camera,
+                self.select_imported_objects,
+                self.mesh_shading,
+                self.set_viewport_shading,
+                self.fit_timeline,
+            )
+            self.report({"INFO"}, "AssetKit import scheduled")
             return {"FINISHED"}
 
         try:
@@ -265,6 +325,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         mesh_box.prop(self, "generate_normals")
         mesh_box.prop(self, "convert_triangle_strip")
         mesh_box.prop(self, "convert_triangle_fan")
+        mesh_box.separator()
         mesh_box.prop(self, "import_lines")
         line_box = mesh_box.column()
         line_box.enabled = self.import_lines
@@ -308,6 +369,173 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 def _scene_has_no_content(scene: bpy.types.Scene) -> bool:
     content_types = {"ARMATURE", "CURVE", "EMPTY", "FONT", "MESH", "META", "SURFACE"}
     return not any(obj.type in content_types for obj in scene.objects)
+
+
+def _should_defer_blocking_import(context) -> bool:
+    return not bpy.app.background
+
+
+def _should_defer_async_import(context) -> bool:
+    return not bpy.app.background
+
+
+def _schedule_auto_import(
+    filepath: str,
+    assetkit_library: str,
+    load_options: dict,
+    collection: bpy.types.Collection,
+    batch_size: int,
+    focus_mode: str,
+    placement_mode: str,
+    scene_was_empty: bool,
+    focus_camera: bpy.types.Object | None,
+    select_imported: bool,
+    shading_mode: str,
+    set_viewport_shading: bool,
+    fit_timeline: bool,
+) -> None:
+    def run_import() -> None:
+        _set_status("AssetKit is importing...")
+        update_loading_hud("AssetKit is importing")
+        try:
+            import_assetkit_file_auto(
+                filepath,
+                assetkit_library,
+                load_options,
+                collection=collection,
+                batch_size=batch_size,
+                focus_mode=focus_mode,
+                placement_mode=placement_mode,
+                scene_was_empty=scene_was_empty,
+                focus_camera=focus_camera,
+                select_imported=select_imported,
+                shading_mode=shading_mode,
+                set_viewport_shading=set_viewport_shading,
+                fit_timeline=fit_timeline,
+            )
+        except (AssetKitError, OSError) as exc:
+            print(f"AssetKit import failed: {exc}")
+            _show_import_error(str(exc))
+            _set_status(None)
+            finish_loading_hud()
+        return None
+
+    start_loading_hud("AssetKit is importing", delay=0.0)
+    _set_status("AssetKit is importing...")
+    bpy.app.timers.register(run_import, first_interval=_DEFERRED_ASYNC_DELAY)
+
+
+def _schedule_progressive_import(
+    filepath: str,
+    assetkit_library: str,
+    load_options: dict,
+    collection: bpy.types.Collection,
+    batch_size: int,
+    focus_mode: str,
+    placement_mode: str,
+    scene_was_empty: bool,
+    focus_camera: bpy.types.Object | None,
+    select_imported: bool,
+    shading_mode: str,
+    set_viewport_shading: bool,
+    fit_timeline: bool,
+) -> None:
+    def run_import() -> None:
+        _set_status("AssetKit is importing...")
+        update_loading_hud("AssetKit is importing")
+        try:
+            import_assetkit_file_progressive(
+                filepath,
+                assetkit_library,
+                load_options,
+                collection=collection,
+                batch_size=batch_size,
+                focus_mode=focus_mode,
+                placement_mode=placement_mode,
+                scene_was_empty=scene_was_empty,
+                focus_camera=focus_camera,
+                select_imported=select_imported,
+                shading_mode=shading_mode,
+                set_viewport_shading=set_viewport_shading,
+                fit_timeline=fit_timeline,
+            )
+        except (AssetKitError, OSError) as exc:
+            print(f"AssetKit import failed: {exc}")
+            _show_import_error(str(exc))
+            _set_status(None)
+            finish_loading_hud()
+        return None
+
+    start_loading_hud("AssetKit is importing", delay=0.0)
+    _set_status("AssetKit is importing...")
+    bpy.app.timers.register(run_import, first_interval=_DEFERRED_ASYNC_DELAY)
+
+
+def _schedule_blocking_import(
+    filepath: str,
+    assetkit_library: str,
+    load_options: dict,
+    collection: bpy.types.Collection,
+    focus_mode: str,
+    placement_mode: str,
+    scene_was_empty: bool,
+    focus_camera: bpy.types.Object | None,
+    select_imported: bool,
+    shading_mode: str,
+    set_viewport_shading: bool,
+    fit_timeline: bool,
+) -> None:
+    def run_import() -> None:
+        _set_status("AssetKit is importing...")
+        update_loading_hud("AssetKit is importing")
+        try:
+            objects = import_assetkit_file(
+                filepath,
+                assetkit_library,
+                load_options,
+                collection=collection,
+                focus_mode=focus_mode,
+                placement_mode=placement_mode,
+                scene_was_empty=scene_was_empty,
+                focus_camera=focus_camera,
+                select_imported=select_imported,
+                shading_mode=shading_mode,
+                set_viewport_shading=set_viewport_shading,
+                fit_timeline=fit_timeline,
+            )
+            if objects:
+                print(f"AssetKit imported {len(objects)} object(s)")
+            else:
+                print("AssetKit loaded the file but no importable objects were found")
+        except (AssetKitError, OSError) as exc:
+            print(f"AssetKit import failed: {exc}")
+            _show_import_error(str(exc))
+        finally:
+            _set_status(None)
+            finish_loading_hud()
+        return None
+
+    start_loading_hud("AssetKit is importing", delay=0.0)
+    bpy.app.timers.register(run_import, first_interval=_DEFERRED_BLOCKING_DELAY)
+
+
+def _set_status(text: str | None) -> None:
+    try:
+        workspace = bpy.context.workspace
+        if workspace:
+            workspace.status_text_set(text)
+    except Exception:
+        pass
+
+
+def _show_import_error(message: str) -> None:
+    def draw(self, _context):
+        self.layout.label(text=message)
+
+    try:
+        bpy.context.window_manager.popup_menu(draw, title="AssetKit Import Error", icon="ERROR")
+    except Exception:
+        pass
 
 
 def _remove_default_cube(scene: bpy.types.Scene, remove_startup_camera_light: bool = True) -> bool:

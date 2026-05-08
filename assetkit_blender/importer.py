@@ -26,6 +26,7 @@ from .assetkit import (
     native_load_meshes,
     native_open_scene_stream,
 )
+from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
 
 _ANIM_TRANSLATION = 1
 _ANIM_ROTATION_QUAT = 2
@@ -121,9 +122,8 @@ _GLTF_SETTINGS_SOCKETS = (
     ("Iridescence Thickness Minimum", 100.0),
 )
 _PROGRESSIVE_BATCH_SIZE = 128
+_PROGRESSIVE_FIRST_BATCH_SIZE = 8
 _PROGRESSIVE_TIME_BUDGET = 0.025
-_AUTO_PROGRESSIVE_MESH_COUNT = 128
-_AUTO_PROGRESSIVE_NODE_COUNT = 512
 _ACTIVE_IMPORT_JOBS: list["_ProgressiveImportJob"] = []
 
 
@@ -225,90 +225,23 @@ def import_assetkit_file_auto(
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object] | "_ProgressiveImportJob":
     active_collection = collection or bpy.context.collection
-    existing_actions = _snapshot_actions(fit_timeline)
-    if library_path:
-        return import_assetkit_file(
-            filepath,
-            library_path,
-            load_options,
-            active_collection,
-            focus_mode,
-            placement_mode,
-            scene_was_empty,
-            focus_camera,
-            select_imported,
-            shading_mode,
-            set_viewport_shading,
-            fit_timeline,
-        )
-
-    stream = native_open_scene_stream(filepath, load_options)
-    if stream is None:
-        return import_assetkit_file(
-            filepath,
-            library_path,
-            load_options,
-            active_collection,
-            focus_mode,
-            placement_mode,
-            scene_was_empty,
-            focus_camera,
-            select_imported,
-            shading_mode,
-            set_viewport_shading,
-            fit_timeline,
-        )
-
-    use_progressive = (
-        stream.mesh_count >= _AUTO_PROGRESSIVE_MESH_COUNT
-        or len(stream.nodes) >= _AUTO_PROGRESSIVE_NODE_COUNT
-    )
-    if use_progressive:
-        job = _ProgressiveImportJob(
-            filepath,
-            library_path,
-            load_options,
-            active_collection,
-            max(1, batch_size),
-            focus_mode,
-            placement_mode,
-            scene_was_empty,
-            focus_camera,
-            select_imported,
-            shading_mode,
-            set_viewport_shading,
-            existing_actions,
-            stream=stream,
-        )
-        job.start()
-        return job
-
-    primitives = stream.read_mesh_batch(0, stream.mesh_count)
-    state = _begin_scene_build(
-        primitives,
-        stream.nodes,
+    job = _ProgressiveImportJob(
+        filepath,
+        library_path,
+        load_options,
         active_collection,
-        stream.doc_extra,
-        stream.scene_extra,
-        _scene_info_from_loaded(stream),
-        stream.images,
-    )
-    objects: list[bpy.types.Object] = []
-    for primitive in primitives:
-        objects.extend(_create_import_object(primitive, state, active_collection, shading_mode))
-    _finish_import(
-        objects,
+        max(1, batch_size),
         focus_mode,
         placement_mode,
-        state["root_objects"],
         scene_was_empty,
-        active_collection,
         focus_camera,
         select_imported,
+        shading_mode,
         set_viewport_shading,
-        existing_actions,
+        _snapshot_actions(fit_timeline),
     )
-    return _import_result_objects(objects, state)
+    job.start()
+    return job
 
 
 def _load_assetkit_scene(
@@ -1175,6 +1108,7 @@ class _ProgressiveImportJob:
         self.doc_images: list[dict] = list(getattr(stream, "images", []) or [])
         self.mesh_count = 0
         self.pending_primitives: deque[MeshPrimitiveData] = deque()
+        self.deferred_primitives: deque[MeshPrimitiveData] = deque()
         self.objects: list[bpy.types.Object] = []
         self.state: dict | None = None
         self.error: BaseException | None = None
@@ -1191,6 +1125,9 @@ class _ProgressiveImportJob:
     def start(self) -> None:
         self.load_started_at = time.perf_counter()
         _ACTIVE_IMPORT_JOBS.append(self)
+        self._progress_begin()
+        self._status_set("AssetKit is importing...")
+        start_loading_hud("AssetKit is importing", delay=0.0)
         self._thread.start()
         bpy.app.timers.register(self._timer, first_interval=0.001)
 
@@ -1208,7 +1145,7 @@ class _ProgressiveImportJob:
                     start = 0
                     producer_batch_size = max(self.batch_size * 4, 256)
                     while start < stream.mesh_count:
-                        count = self.batch_size if start == 0 else producer_batch_size
+                        count = min(_PROGRESSIVE_FIRST_BATCH_SIZE, self.batch_size) if start == 0 else producer_batch_size
                         batch = stream.read_mesh_batch(start, count)
                         if batch:
                             self._queue.put(batch)
@@ -1251,10 +1188,12 @@ class _ProgressiveImportJob:
             return None
 
         if self.state is None:
-            if not self.pending_primitives and not self.producer_done:
+            if not self.pending_primitives and not self.deferred_primitives and not self.producer_done:
+                self._status_set("AssetKit is reading the scene...")
+                update_loading_hud("AssetKit is reading the scene")
                 return 0.01
             self.build_started_at = time.perf_counter()
-            coord_probe = [self.pending_primitives[0]] if self.pending_primitives else []
+            coord_probe = [self.pending_primitives[0]] if self.pending_primitives else list(self.deferred_primitives)[:1]
             self.state = _begin_scene_build(
                 coord_probe,
                 self.scene_nodes,
@@ -1264,16 +1203,28 @@ class _ProgressiveImportJob:
                 self.scene_info,
                 self.doc_images,
             )
-            self._progress_begin()
-            if not self.pending_primitives and self.producer_done:
+            self._status_set("AssetKit is building Blender objects...")
+            update_loading_hud("AssetKit is building Blender objects")
+            if not self.pending_primitives and not self.deferred_primitives and self.producer_done:
                 self._finish_success()
                 return None
 
+        if not self.pending_primitives and self.deferred_primitives and not self.producer_done:
+            self._status_set("AssetKit is waiting for mesh geometry...")
+            update_loading_hud("AssetKit is waiting for mesh geometry")
+            self._drain_queue()
+            return 0.005
+
         created_this_step = 0
         slice_started_at = time.perf_counter()
-        while self.pending_primitives and created_this_step < self.batch_size:
+        while (self.pending_primitives or self.deferred_primitives) and created_this_step < self.batch_size:
+            primitive = (
+                self.pending_primitives.popleft()
+                if self.pending_primitives
+                else self.deferred_primitives.popleft()
+            )
             created_objects = _create_import_object(
-                self.pending_primitives.popleft(),
+                primitive,
                 self.state,
                 self.collection,
                 self.shading_mode,
@@ -1287,7 +1238,7 @@ class _ProgressiveImportJob:
                 break
 
         self._drain_queue()
-        if self.producer_done and not self.pending_primitives:
+        if self.producer_done and not self.pending_primitives and not self.deferred_primitives:
             self._finish_success()
             return None
 
@@ -1300,7 +1251,11 @@ class _ProgressiveImportJob:
                 batch = self._queue.get_nowait()
             except queue.Empty:
                 return
-            self.pending_primitives.extend(batch)
+            for primitive in batch:
+                if primitive.primitive_type in {AK_PRIMITIVE_LINES, AK_PRIMITIVE_POINTS}:
+                    self.deferred_primitives.append(primitive)
+                else:
+                    self.pending_primitives.append(primitive)
 
     def _finish_success(self) -> None:
         _finish_import(
@@ -1329,10 +1284,14 @@ class _ProgressiveImportJob:
 
     def _finish(self) -> None:
         self._progress_end()
+        self._status_clear()
+        finish_loading_hud()
         if self in _ACTIVE_IMPORT_JOBS:
             _ACTIVE_IMPORT_JOBS.remove(self)
 
     def _progress_begin(self) -> None:
+        if self.progress_active:
+            return
         try:
             bpy.context.window_manager.progress_begin(0, max(1, self.mesh_count or len(self.pending_primitives)))
             self.progress_active = True
@@ -1355,6 +1314,22 @@ class _ProgressiveImportJob:
         except Exception:
             pass
         self.progress_active = False
+
+    def _status_set(self, text: str) -> None:
+        try:
+            workspace = bpy.context.workspace
+            if workspace:
+                workspace.status_text_set(text)
+        except Exception:
+            pass
+
+    def _status_clear(self) -> None:
+        try:
+            workspace = bpy.context.workspace
+            if workspace:
+                workspace.status_text_set(None)
+        except Exception:
+            pass
 
 
 def _create_mesh_object(
