@@ -193,9 +193,9 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 
             if isinstance(result, list):
                 if not result:
-                    self.report({"WARNING"}, "AssetKit loaded the file but no importable mesh primitives were found")
+                    self.report({"WARNING"}, "AssetKit loaded the file but no importable objects were found")
                 else:
-                    self.report({"INFO"}, f"Imported {len(result)} mesh object(s) through AssetKit")
+                    self.report({"INFO"}, f"Imported {len(result)} object(s) through AssetKit")
             else:
                 self.report({"INFO"}, "AssetKit progressive import started")
             return {"FINISHED"}
@@ -242,10 +242,10 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             return {"CANCELLED"}
 
         if not objects:
-            self.report({"WARNING"}, "AssetKit loaded the file but no importable mesh primitives were found")
+            self.report({"WARNING"}, "AssetKit loaded the file but no importable objects were found")
             return {"FINISHED"}
 
-        self.report({"INFO"}, f"Imported {len(objects)} mesh object(s) through AssetKit")
+        self.report({"INFO"}, f"Imported {len(objects)} object(s) through AssetKit")
         return {"FINISHED"}
 
     def draw(self, _context):

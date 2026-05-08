@@ -172,7 +172,7 @@ def import_assetkit_file(
         set_viewport_shading,
         existing_actions,
     )
-    return objects
+    return _import_result_objects(objects, state)
 
 
 def import_assetkit_file_progressive(
@@ -308,7 +308,7 @@ def import_assetkit_file_auto(
         set_viewport_shading,
         existing_actions,
     )
-    return objects
+    return _import_result_objects(objects, state)
 
 
 def _load_assetkit_scene(
@@ -593,6 +593,18 @@ def _create_import_object(
     )
 
 
+def _import_result_objects(mesh_objects: list[bpy.types.Object], state: dict) -> list[bpy.types.Object]:
+    if mesh_objects:
+        return mesh_objects
+
+    node_objects = state.get("node_objects") or {}
+    return [
+        obj
+        for obj in node_objects.values()
+        if getattr(obj, "type", "") in {"CAMERA", "LIGHT"}
+    ]
+
+
 def _select_imported_objects(objects: list[bpy.types.Object]) -> None:
     if not objects:
         return
@@ -874,12 +886,22 @@ def _unique_objects(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
 def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | None:
     minimum: Vector | None = None
     maximum: Vector | None = None
+    try:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        depsgraph = None
 
     for obj in objects:
         if obj.type != "MESH" or not obj.bound_box or _is_hidden_for_bounds(obj):
             continue
-        matrix = obj.matrix_world
-        for corner in obj.bound_box:
+        eval_obj = obj
+        if depsgraph is not None:
+            try:
+                eval_obj = obj.evaluated_get(depsgraph)
+            except Exception:
+                eval_obj = obj
+        matrix = eval_obj.matrix_world
+        for corner in eval_obj.bound_box:
             point = matrix @ Vector(corner)
             if minimum is None:
                 minimum = point.copy()
@@ -900,12 +922,13 @@ def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | N
 def _is_hidden_for_bounds(obj: bpy.types.Object) -> bool:
     current = obj
     while current is not None:
+        helper_hidden = bool(current.get("assetkit_helper_hidden"))
         try:
-            if current.hide_get():
+            if current.hide_get() and not helper_hidden:
                 return True
         except Exception:
             pass
-        if current.hide_viewport or current.hide_render:
+        if (current.hide_viewport or current.hide_render) and not helper_hidden:
             return True
         current = current.parent
     return False
@@ -1243,7 +1266,7 @@ class _ProgressiveImportJob:
             )
             self._progress_begin()
             if not self.pending_primitives and self.producer_done:
-                self._finish()
+                self._finish_success()
                 return None
 
         created_this_step = 0
@@ -1298,7 +1321,7 @@ class _ProgressiveImportJob:
         first_object_seconds = self.first_object_at - self.load_started_at if self.first_object_at else 0.0
         print(
             "AssetKit progressive import finished: "
-            f"{len(self.objects)} mesh object(s), "
+            f"{len(_import_result_objects(self.objects, self.state or {}))} object(s), "
             f"first_object={first_object_seconds:.3f}s, "
             f"load={load_seconds:.3f}s, build={build_seconds:.3f}s, total={finished_at - self.load_started_at:.3f}s"
         )
@@ -2098,10 +2121,16 @@ def _set_node_visibility(obj: bpy.types.Object, visible: bool) -> None:
     obj.hide_render = hidden
 
 
-def _hide_helper_object(obj: bpy.types.Object) -> None:
+def _hide_helper_object(obj: bpy.types.Object, hide_empty: bool = False) -> None:
+    obj["assetkit_helper_object"] = True
     if obj.type == "EMPTY":
         obj.hide_select = False
         obj.empty_display_size = max(0.1, min(obj.empty_display_size, 0.35))
+        if hide_empty:
+            obj.hide_select = True
+            obj.hide_viewport = True
+            obj.hide_render = True
+            obj["assetkit_helper_hidden"] = True
         return
 
     obj.hide_select = True
@@ -2111,6 +2140,7 @@ def _hide_helper_object(obj: bpy.types.Object) -> None:
 
     obj.hide_viewport = True
     obj.hide_render = True
+    obj["assetkit_helper_hidden"] = True
 
 
 def _create_coord_root(
@@ -2773,8 +2803,49 @@ def _apply_skin(
     modifier = obj.modifiers.new("AssetKit Skin", "ARMATURE")
     modifier.object = armature
     modifier.use_vertex_groups = True
+    _hide_skin_node_helpers(joint_nodes, node_objects, node_data)
     if _skin_uses_bind_pose_armature(data):
         _parent_skinned_mesh_to_armature(obj, armature)
+
+
+def _hide_skin_node_helpers(
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+) -> None:
+    node_indices = _skin_helper_node_indices(joint_nodes, node_data)
+    for node_index in node_indices:
+        node = node_objects.get(node_index)
+        if node and node.type == "EMPTY":
+            _hide_helper_object(node, hide_empty=True)
+
+
+def _skin_helper_node_indices(
+    joint_nodes: memoryview,
+    node_data: dict[int, SceneNodeData],
+) -> set[int]:
+    helpers = {
+        int(joint_nodes[index])
+        for index in range(len(joint_nodes))
+        if int(joint_nodes[index]) >= 0
+    }
+    if not helpers:
+        return helpers
+
+    children_by_parent: dict[int, list[int]] = {}
+    for node_index, node in node_data.items():
+        children_by_parent.setdefault(int(node.parent_index), []).append(node_index)
+
+    stack = list(helpers)
+    while stack:
+        node_index = stack.pop()
+        for child_index in children_by_parent.get(node_index, ()):
+            if child_index in helpers:
+                continue
+            helpers.add(child_index)
+            stack.append(child_index)
+
+    return helpers
 
 
 def _apply_skin_bind_shape(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> None:
@@ -2935,7 +3006,7 @@ def _create_skin_armature(
     elif not _bind_bones_to_nodes(armature, bone_names_by_node, node_objects):
         _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
     if _skin_uses_bind_pose_armature(data):
-        _parent_bind_pose_armature_to_coord_root(armature, node_objects, node_data)
+        _match_object_space(armature, armature_source)
     else:
         _match_object_space(armature, armature_source)
     _hide_helper_object(armature)
@@ -2992,34 +3063,6 @@ def _parent_skinned_mesh_to_armature(
         bpy.context.view_layer.update()
     except Exception:
         pass
-
-
-def _parent_bind_pose_armature_to_coord_root(
-    armature: bpy.types.Object,
-    node_objects: dict[int, bpy.types.Object],
-    node_data: dict[int, SceneNodeData],
-) -> None:
-    armature.parent = _scene_coord_root_for_nodes(node_objects, node_data)
-    armature.matrix_parent_inverse.identity()
-    armature.matrix_local = Matrix.Identity(4)
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
-
-
-def _scene_coord_root_for_nodes(
-    node_objects: dict[int, bpy.types.Object],
-    node_data: dict[int, SceneNodeData],
-) -> bpy.types.Object | None:
-    node_object_set = set(node_objects.values())
-    for index, node in node_data.items():
-        if node.parent_index >= 0:
-            continue
-        obj = node_objects.get(index)
-        if obj and obj.parent and obj.parent not in node_object_set:
-            return obj.parent
-    return None
 
 
 def _skin_bone_names_by_node(
@@ -4634,11 +4677,7 @@ def _material_ior(data: MeshPrimitiveData) -> float:
 
 
 def _is_double_sided_material(data: MeshPrimitiveData) -> bool:
-    return (
-        bool(data.double_sided)
-        or float(data.transmission) > 0.0
-        or float(data.diffuse_transmission) > 0.0
-    )
+    return bool(data.double_sided)
 
 
 def _set_transparency_overlap(mat: bpy.types.Material, enabled: bool) -> None:
