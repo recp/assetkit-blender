@@ -7,5 +7,6 @@ __pycache__/
 build/
 assetkit_blender/_assetkit_blender*.so
 assetkit_blender/_assetkit_blender*.pyd
-assetkit_blender/libassetkit_ktx2.*
+assetkit_blender/libassetkit_*.*
 build-blender/
+build-*/

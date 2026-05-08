@@ -3,6 +3,7 @@ project(assetkit_blender_native LANGUAGES C)
 
 set(ASSETKIT_ROOT "" CACHE PATH "AssetKit source or install root")
 set(ASSETKIT_BLENDER_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assetkit_blender" CACHE PATH "Output directory for the native Python module")
+set(ASSETKIT_BLENDER_PYTHON_SOABI "" CACHE STRING "Override Python extension ABI tag, for example cpython-313-darwin")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 
@@ -46,6 +47,15 @@ find_library(ASSETKIT_LIBRARY
 find_library(ASSETKIT_KTX2_LIBRARY
   NAMES assetkit_ktx2 libassetkit_ktx2
   HINTS ${ASSETKIT_LIBRARY_HINTS})
+find_library(ASSETKIT_MESHOPTIMIZER_LIBRARY
+  NAMES assetkit_meshoptimizer libassetkit_meshoptimizer
+  HINTS ${ASSETKIT_LIBRARY_HINTS})
+find_library(ASSETKIT_DRACO_LIBRARY
+  NAMES assetkit_draco libassetkit_draco
+  HINTS ${ASSETKIT_LIBRARY_HINTS})
+find_library(ASSETKIT_SPZ_LIBRARY
+  NAMES assetkit_spz libassetkit_spz
+  HINTS ${ASSETKIT_LIBRARY_HINTS})
 
 if(NOT ASSETKIT_INCLUDE_DIR)
   message(FATAL_ERROR "AssetKit headers not found. Set ASSETKIT_ROOT.")
@@ -58,6 +68,11 @@ if(NOT CGLM_INCLUDE_DIR)
 endif()
 
 Python3_add_library(_assetkit_blender MODULE src/native/assetkit_module.c WITH_SOABI)
+if(ASSETKIT_BLENDER_PYTHON_SOABI)
+  string(REGEX REPLACE "^\\." "" ASSETKIT_BLENDER_PYTHON_SOABI_CLEAN "${ASSETKIT_BLENDER_PYTHON_SOABI}")
+  set_target_properties(_assetkit_blender PROPERTIES
+    SUFFIX ".${ASSETKIT_BLENDER_PYTHON_SOABI_CLEAN}${CMAKE_SHARED_MODULE_SUFFIX}")
+endif()
 target_include_directories(_assetkit_blender PRIVATE "${ASSETKIT_INCLUDE_DIR}" "${CGLM_INCLUDE_DIR}")
 target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_LIBRARY}")
 if(UNIX AND NOT APPLE)
@@ -82,12 +97,19 @@ elseif(UNIX)
 endif()
 
 message(STATUS "AssetKit library: ${ASSETKIT_LIBRARY}")
-if(ASSETKIT_KTX2_LIBRARY)
-  get_filename_component(ASSETKIT_KTX2_LIBRARY_NAME "${ASSETKIT_KTX2_LIBRARY}" NAME)
+function(assetkit_blender_copy_decoder decoder_library decoder_label)
+  if(NOT decoder_library)
+    return()
+  endif()
+  get_filename_component(ASSETKIT_DECODER_LIBRARY_NAME "${decoder_library}" NAME)
   add_custom_command(TARGET _assetkit_blender POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${ASSETKIT_KTX2_LIBRARY}"
-            "${ASSETKIT_BLENDER_PACKAGE_DIR}/${ASSETKIT_KTX2_LIBRARY_NAME}")
-  message(STATUS "AssetKit KTX2 decoder: ${ASSETKIT_KTX2_LIBRARY}")
-endif()
+            "${decoder_library}"
+            "${ASSETKIT_BLENDER_PACKAGE_DIR}/${ASSETKIT_DECODER_LIBRARY_NAME}")
+  message(STATUS "AssetKit ${decoder_label} decoder: ${decoder_library}")
+endfunction()
+assetkit_blender_copy_decoder("${ASSETKIT_KTX2_LIBRARY}" "KTX2")
+assetkit_blender_copy_decoder("${ASSETKIT_MESHOPTIMIZER_LIBRARY}" "meshoptimizer")
+assetkit_blender_copy_decoder("${ASSETKIT_DRACO_LIBRARY}" "Draco")
+assetkit_blender_copy_decoder("${ASSETKIT_SPZ_LIBRARY}" "SPZ")
 message(STATUS "Python extension output: ${ASSETKIT_BLENDER_PACKAGE_DIR}")

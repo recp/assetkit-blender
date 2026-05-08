@@ -5,16 +5,34 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <limits.h>
+#include <errno.h>
 #if defined(_WIN32)
 #include <windows.h>
+#include <direct.h>
 #else
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #endif
 
 #include "cglm/struct.h"
 
 #include "ak/assetkit.h"
 #include "ak/options.h"
+#include "ak/path.h"
+
+struct FListItem {
+  struct FListItem *next;
+  void             *data;
+};
+typedef struct FListItem FListItem;
+
+#ifndef PATH_MAX
+#  define PATH_MAX 4096
+#endif
 
 #define AKB_GEOMETRY_MESH AK_GEOMETRY_MESH
 #define AKB_PRIMITIVE_LINES AK_PRIMITIVE_LINES
@@ -146,8 +164,14 @@ typedef struct AkbLoopFloatAttribute {
 } AkbLoopFloatAttribute;
 
 typedef struct AkbTextureInfo {
+  AkTree *image_extra;
+  AkTree *sampler_extra;
   char    role[64];
   char    path[1024];
+  char    image_name[512];
+  char    sampler_name[512];
+  char    color_space[32];
+  char    channels[16];
   char    texcoord[64];
   char    coord_input_name[64];
   float   transform_offset[2];
@@ -171,6 +195,14 @@ typedef struct AkbMaterialVariantMap {
   uint32_t variant_index;
 } AkbMaterialVariantMap;
 
+typedef struct AkbGaussianSplatInfo {
+  uint32_t kernel;
+  uint32_t color_space;
+  uint32_t projection;
+  uint32_t sorting_method;
+  uint32_t decoded_count;
+} AkbGaussianSplatInfo;
+
 typedef struct AkbPrimitive {
   struct AkbSharedDoc *doc_owner;
   struct AkbAnimation *animation;
@@ -182,10 +214,12 @@ typedef struct AkbPrimitive {
   AkTree *material_extra;
   AkTree *effect_extra;
   AkbMorphTarget *morph_targets;
+  AkMorphPreset *morph_presets;
   AkbLoopFloatAttribute *uv_sets;
   AkbLoopFloatAttribute *color_sets;
   AkbLoopFloatAttribute *point_attrs;
   AkbMaterialVariantMap *material_variants;
+  AkbGaussianSplatInfo gsplat;
   AkbTextureInfo texture_infos[AKB_TEXTURE_INFO_MAX];
   AkNode   **skin_joint_sources;
   AkNode    *skin_root_source;
@@ -274,6 +308,7 @@ typedef struct AkbPrimitive {
   uint32_t point_attr_count;
   uint32_t texture_info_count;
   uint32_t morph_target_count;
+  uint32_t morph_preset_count;
   uint32_t material_variant_count;
   uint32_t material_type;
   uint32_t file_type;
@@ -291,6 +326,8 @@ typedef struct AkbPrimitive {
   uint8_t  transparent_opaque;
   uint8_t  has_node;
   uint8_t  has_coord_matrix;
+  uint8_t  has_gsplat;
+  uint8_t  skin_mesh_in_bind_pose;
   uint8_t  borrowed_vertices;
   uint8_t  borrowed_indices;
   uint8_t  zero_copy_flags;
@@ -305,6 +342,10 @@ typedef struct AkbPrimitiveList {
 typedef struct AkbSceneNode {
   struct AkbAnimation *animation;
   AkNode   *source;
+  AkTree   *camera_extra;
+  AkTree   *camera_imager_extra;
+  AkTree   *light_extra;
+  AkStringArray *layers;
   char     name[512];
   char     camera_name[512];
   char     light_name[512];
@@ -340,11 +381,13 @@ typedef struct AkbCoordContext {
 
 typedef struct AkbLoadOptions {
   AkCoordSys *target_coord;
+  int32_t     scene_index;
   uint8_t     coord_conversion;
   uint8_t     triangulate;
   uint8_t     gen_normals;
   uint8_t     cvt_triangle_strip;
   uint8_t     cvt_triangle_fan;
+  uint8_t     import_lines;
   uint8_t     cvt_line_loop;
   uint8_t     cvt_line_strip;
   uint8_t     use_mmap;
@@ -504,11 +547,13 @@ static void
 akb_load_options_default(AkbLoadOptions *options) {
   memset(options, 0, sizeof(*options));
   options->target_coord = AK_ZUP;
+  options->scene_index = -1;
   options->coord_conversion = AKB_COORD_TRANSFORM;
   options->triangulate = 1;
   options->gen_normals = 0;
   options->cvt_triangle_strip = 1;
   options->cvt_triangle_fan = 1;
+  options->import_lines = 1;
   options->cvt_line_loop = 1;
   options->cvt_line_strip = 1;
   options->use_mmap = 0;
@@ -534,6 +579,14 @@ akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
   if (value && PyUnicode_Check(value))
     options->coord_conversion = akb_conversion_from_name(PyUnicode_AsUTF8(value));
 
+  value = PyDict_GetItemString(dict, "scene_index");
+  if (value && value != Py_None) {
+    long index = PyLong_AsLong(value);
+    if (PyErr_Occurred())
+      return 0;
+    options->scene_index = (int32_t)index;
+  }
+
   value = PyDict_GetItemString(dict, "triangulate");
   if (value)
     options->triangulate = PyObject_IsTrue(value) ? 1 : 0;
@@ -549,6 +602,10 @@ akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
   value = PyDict_GetItemString(dict, "convert_triangle_fan");
   if (value)
     options->cvt_triangle_fan = PyObject_IsTrue(value) ? 1 : 0;
+
+  value = PyDict_GetItemString(dict, "import_lines");
+  if (value)
+    options->import_lines = PyObject_IsTrue(value) ? 1 : 0;
 
   value = PyDict_GetItemString(dict, "convert_line_loop");
   if (value)
@@ -822,10 +879,201 @@ akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord) 
 }
 
 static void
-akb_copy_texture_path(AkDoc *doc, AkTextureRef *texref, char *dest, size_t capacity) {
-  AkImage *image;
+akb_path_join(char *dest, size_t capacity, const char *dir, const char *name) {
+  size_t len;
+
+  if (!dest || capacity == 0)
+    return;
+
+  if (!dir || !dir[0]) {
+    snprintf(dest, capacity, "%s", name ? name : "");
+    return;
+  }
+
+  len = strlen(dir);
+  if (len > 0 && (dir[len - 1] == '/' || dir[len - 1] == '\\'))
+    snprintf(dest, capacity, "%s%s", dir, name ? name : "");
+  else
+    snprintf(dest, capacity, "%s/%s", dir, name ? name : "");
+}
+
+static int
+akb_mkdir_if_needed(const char *path) {
+  if (!path || !path[0])
+    return 0;
+
+#if defined(_WIN32)
+  if (_mkdir(path) == 0 || errno == EEXIST)
+    return 1;
+#else
+  if (mkdir(path, 0700) == 0 || errno == EEXIST)
+    return 1;
+#endif
+
+  return 0;
+}
+
+static uint64_t
+akb_fnv1a64(const unsigned char *data, size_t length) {
+  uint64_t hash;
+  size_t i;
+
+  hash = UINT64_C(1469598103934665603);
+  for (i = 0; i < length; i++) {
+    hash ^= data[i];
+    hash *= UINT64_C(1099511628211);
+  }
+
+  return hash;
+}
+
+static const char *
+akb_embedded_image_extension(const unsigned char *data, size_t length, const char *mime) {
+  if (mime) {
+    if (strstr(mime, "png"))
+      return "png";
+    if (strstr(mime, "jpeg") || strstr(mime, "jpg"))
+      return "jpg";
+    if (strstr(mime, "webp"))
+      return "webp";
+    if (strstr(mime, "ktx2"))
+      return "ktx2";
+  }
+
+  if (data && length >= 8
+      && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G')
+    return "png";
+  if (data && length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF)
+    return "jpg";
+  if (data && length >= 12
+      && memcmp(data, "RIFF", 4) == 0
+      && memcmp(data + 8, "WEBP", 4) == 0)
+    return "webp";
+  if (data && length >= 12
+      && data[0] == 0xAB && data[1] == 'K' && data[2] == 'T' && data[3] == 'X'
+      && data[4] == ' ' && data[5] == '2')
+    return "ktx2";
+
+  return "bin";
+}
+
+static int
+akb_file_has_size(const char *path, size_t length) {
+#if defined(_WIN32)
+  struct _stat st;
+  if (_stat(path, &st) != 0)
+    return 0;
+#else
+  struct stat st;
+  if (stat(path, &st) != 0)
+    return 0;
+#endif
+
+  return (size_t)st.st_size == length;
+}
+
+static int
+akb_write_file_once(const char *path, const unsigned char *data, size_t length) {
+  FILE *file;
+  size_t written;
+
+  if (akb_file_has_size(path, length))
+    return 1;
+
+  file = fopen(path, "wb");
+  if (!file)
+    return 0;
+
+  written = fwrite(data, 1, length, file);
+  if (fclose(file) != 0 || written != length) {
+    remove(path);
+    return 0;
+  }
+
+  return 1;
+}
+
+static int
+akb_copy_embedded_texture_path(AkImage *image, char *dest, size_t capacity) {
+  AkInitFrom *init_from;
+  AkBuffer *buff;
+  const unsigned char *data;
+  const char *tmpdir;
+  const char *ext;
+  char dir[PATH_MAX];
+  char filename[128];
+  uint64_t hash;
+  size_t length;
+
+  if (!image || !dest || capacity == 0)
+    return 0;
+
+  init_from = image->initFrom;
+  buff = init_from ? init_from->buff : NULL;
+  data = buff ? (const unsigned char *)buff->data : NULL;
+  length = buff ? buff->length : 0;
+  if (!data || length == 0)
+    return 0;
+
+  tmpdir = getenv("TMPDIR");
+  if (!tmpdir || !tmpdir[0])
+    tmpdir = "/tmp";
+
+  akb_path_join(dir, sizeof(dir), tmpdir, "assetkit_blender");
+  if (!akb_mkdir_if_needed(dir))
+    return 0;
+
+  hash = akb_fnv1a64(data, length);
+  ext = akb_embedded_image_extension(data, length, init_from->buffMime);
+  snprintf(filename,
+           sizeof(filename),
+           "texture_%016llx.%s",
+           (unsigned long long)hash,
+           ext);
+  akb_path_join(dest, capacity, dir, filename);
+
+  if (!akb_write_file_once(dest, data, length)) {
+    dest[0] = '\0';
+    return 0;
+  }
+
+  return 1;
+}
+
+static void
+akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
   AkInitFrom *init_from;
   const char *path;
+  char resolved[PATH_MAX];
+
+  if (!dest || capacity == 0)
+    return;
+  dest[0] = '\0';
+
+  if (!image)
+    return;
+
+  init_from = image->initFrom;
+  if (!init_from)
+    return;
+
+  path = init_from->resolvedFullPath ? init_from->resolvedFullPath : init_from->ref;
+  if (!path || !path[0]) {
+    akb_copy_embedded_texture_path(image, dest, capacity);
+    return;
+  }
+
+  if (path[0] == '/' || !doc || !doc->inf || !doc->inf->dir) {
+    snprintf(dest, capacity, "%s", path);
+  } else {
+    snprintf(dest, capacity, "%s", ak_fullpath(doc, path, resolved));
+  }
+
+}
+
+static void
+akb_copy_texture_path(AkDoc *doc, AkTextureRef *texref, char *dest, size_t capacity) {
+  AkImage *image;
 
   if (!dest || capacity == 0)
     return;
@@ -834,18 +1082,7 @@ akb_copy_texture_path(AkDoc *doc, AkTextureRef *texref, char *dest, size_t capac
   if (!texref || !texref->texture || !(image = texref->texture->image))
     return;
 
-  init_from = image->initFrom;
-  if (!init_from)
-    return;
-
-  path = init_from->resolvedFullPath ? init_from->resolvedFullPath : init_from->ref;
-  if (!path || !path[0])
-    return;
-
-  if (path[0] == '/' || !doc || !doc->inf || !doc->inf->dir)
-    snprintf(dest, capacity, "%s", path);
-  else
-    snprintf(dest, capacity, "%s/%s", doc->inf->dir, path);
+  akb_copy_image_path(doc, image, dest, capacity);
 }
 
 static AkbTextureInfo *
@@ -893,6 +1130,110 @@ akb_texref_slot(AkTextureRef *texref, AkInstanceMaterial *inst_mat) {
   return slot >= 0 ? slot : 0;
 }
 
+static const char *
+akb_texture_role_color_space(const char *role) {
+  if (!role)
+    return "Non-Color";
+
+  if (strcmp(role, "base_color") == 0
+      || strcmp(role, "emissive") == 0
+      || strcmp(role, "specular_color") == 0
+      || strcmp(role, "sheen_color") == 0
+      || strcmp(role, "diffuse_transmission_color") == 0)
+    return "sRGB";
+
+  return "Non-Color";
+}
+
+static void
+akb_texture_ref_color_space(AkTextureRef *texref,
+                            const char *role,
+                            char *dest,
+                            size_t capacity) {
+  AkTextureColorSpace color_space;
+  const char *name;
+
+  if (!dest || capacity == 0)
+    return;
+
+  color_space = texref ? texref->colorSpace : AK_TEXTURE_COLORSPACE_UNSPECIFIED;
+  if (color_space == AK_TEXTURE_COLORSPACE_SRGB)
+    name = "sRGB";
+  else if (color_space == AK_TEXTURE_COLORSPACE_LINEAR)
+    name = "Non-Color";
+  else
+    name = akb_texture_role_color_space(role);
+
+  snprintf(dest, capacity, "%s", name);
+}
+
+static const char *
+akb_texture_role_channels(const char *role) {
+  if (!role)
+    return "";
+
+  if (strcmp(role, "occlusion") == 0
+      || strcmp(role, "clearcoat") == 0
+      || strcmp(role, "transmission") == 0
+      || strcmp(role, "iridescence") == 0)
+    return "R";
+  if (strcmp(role, "metallic_roughness") == 0)
+    return "GB";
+  if (strcmp(role, "clearcoat_roughness") == 0
+      || strcmp(role, "iridescence_thickness") == 0
+      || strcmp(role, "volume_thickness") == 0)
+    return "G";
+  if (strcmp(role, "specular") == 0
+      || strcmp(role, "diffuse_transmission") == 0)
+    return "A";
+  if (strcmp(role, "base_color") == 0
+      || strcmp(role, "emissive") == 0
+      || strcmp(role, "normal") == 0
+      || strcmp(role, "clearcoat_normal") == 0
+      || strcmp(role, "specular_color") == 0
+      || strcmp(role, "sheen_color") == 0
+      || strcmp(role, "diffuse_transmission_color") == 0)
+    return "RGB";
+  if (strcmp(role, "anisotropy") == 0)
+    return "RGB";
+
+  return "";
+}
+
+static void
+akb_texture_ref_channels(AkTextureRef *texref,
+                         const char *role,
+                         char *dest,
+                         size_t capacity) {
+  AkTextureChannels channels;
+  size_t i;
+
+  if (!dest || capacity == 0)
+    return;
+
+  channels = texref ? texref->channels : AK_TEXTURE_CHANNEL_NONE;
+  if (channels == AK_TEXTURE_CHANNEL_NONE) {
+    snprintf(dest, capacity, "%s", akb_texture_role_channels(role));
+    return;
+  }
+
+  i = 0;
+#define AKB_APPEND_CHANNEL(CHANNEL, LETTER) do {      \
+    if ((channels & (CHANNEL)) && i + 1 < capacity) { \
+      dest[i++] = (LETTER);                           \
+    }                                                 \
+  } while (0)
+
+  AKB_APPEND_CHANNEL(AK_TEXTURE_CHANNEL_R, 'R');
+  AKB_APPEND_CHANNEL(AK_TEXTURE_CHANNEL_G, 'G');
+  AKB_APPEND_CHANNEL(AK_TEXTURE_CHANNEL_B, 'B');
+  AKB_APPEND_CHANNEL(AK_TEXTURE_CHANNEL_A, 'A');
+
+#undef AKB_APPEND_CHANNEL
+
+  dest[i] = '\0';
+}
+
 static void
 akb_copy_texture_info(AkDoc *doc,
                       AkTextureRef *texref,
@@ -902,6 +1243,7 @@ akb_copy_texture_info(AkDoc *doc,
                       size_t capacity,
                       AkbPrimitive *out) {
   AkbTextureInfo *info;
+  AkImage *image;
   AkSampler *sampler;
   AkTextureTransform *transform;
 
@@ -915,6 +1257,14 @@ akb_copy_texture_info(AkDoc *doc,
 
   memset(info->path, 0, sizeof(info->path));
   snprintf(info->path, sizeof(info->path), "%s", dest);
+  akb_texture_ref_color_space(texref,
+                              role,
+                              info->color_space,
+                              sizeof(info->color_space));
+  akb_texture_ref_channels(texref,
+                           role,
+                           info->channels,
+                           sizeof(info->channels));
   info->slot = akb_texref_slot(texref, inst_mat);
 
   if (texref->texcoord)
@@ -922,7 +1272,14 @@ akb_copy_texture_info(AkDoc *doc,
   if (texref->coordInputName)
     snprintf(info->coord_input_name, sizeof(info->coord_input_name), "%s", texref->coordInputName);
 
+  image = texref->texture ? texref->texture->image : NULL;
   sampler = texref->texture ? texref->texture->sampler : NULL;
+  info->image_extra = image ? ak_extra(image) : NULL;
+  info->sampler_extra = sampler ? ak_extra(sampler) : NULL;
+  if (image && image->name)
+    snprintf(info->image_name, sizeof(info->image_name), "%s", image->name);
+  if (sampler && sampler->name)
+    snprintf(info->sampler_name, sizeof(info->sampler_name), "%s", sampler->name);
   info->wrap_s = sampler ? sampler->wrapS : AK_WRAP_MODE_WRAP;
   info->wrap_t = sampler ? sampler->wrapT : AK_WRAP_MODE_WRAP;
   info->wrap_p = sampler ? sampler->wrapP : AK_WRAP_MODE_WRAP;
@@ -1808,10 +2165,14 @@ akb_point_attr_candidate(AkInput *input, uint32_t primitive_type) {
       || akb_raw_semantic_starts_with(input, "KHR_"))
     return 1;
 
-  if (primitive_type != AKB_PRIMITIVE_POINTS)
-    return 0;
   if (input->semantic == AK_INPUT_COLOR)
-    return 1;
+    return primitive_type == AKB_PRIMITIVE_POINTS
+           || primitive_type == AKB_PRIMITIVE_LINES;
+  if (primitive_type != AKB_PRIMITIVE_POINTS
+      && primitive_type != AKB_PRIMITIVE_LINES)
+    return 0;
+  if (primitive_type == AKB_PRIMITIVE_LINES)
+    return akb_raw_semantic_starts_with(input, "COLOR");
   if (input->semantic != AK_INPUT_OTHER)
     return 0;
 
@@ -2060,6 +2421,9 @@ akb_extract_morph_targets(AkbPrimitive *out,
       || !morph->targetCount || !out->vertices || !out->vertex_count)
     return 1;
 
+  out->morph_presets = morph->presets;
+  out->morph_preset_count = morph->presetCount;
+
   view = morph->inspectResult;
   if (!view) {
     if (ak_morphInspect(geom, morph, desired, 1, false, true) != AK_OK)
@@ -2146,12 +2510,45 @@ akb_skin_joint_width(AkSkin *skin) {
 }
 
 static int
+akb_node_is_skin_joint(AkNode *node, AkNode **joints, size_t count) {
+  size_t i;
+
+  if (!node || !joints)
+    return 0;
+
+  for (i = 0; i < count; i++) {
+    if (joints[i] == node)
+      return 1;
+  }
+
+  return 0;
+}
+
+static AkNode *
+akb_skin_armature_root(AkNode *root, AkNode **joints, size_t count) {
+  if (root) {
+    if (akb_node_is_skin_joint(root, joints, count) && root->parent)
+      return root->parent;
+    return root;
+  }
+
+  if (joints && count && joints[0]) {
+    if (joints[0]->parent)
+      return joints[0]->parent;
+    return joints[0];
+  }
+
+  return NULL;
+}
+
+static int
 akb_extract_skin(AkbPrimitive *out,
                  AkbSceneNodeList *nodes,
                  AkMeshPrimitive *prim,
                  uint32_t prim_index,
                  AkInstanceSkin *skinner) {
   AkSkin *skin;
+  AkNode *root;
   AkNode **joints;
   AkNode **joint_sources;
   uint16_t *joint_indices;
@@ -2234,12 +2631,269 @@ akb_extract_skin(AkbPrimitive *out,
   memcpy(out->skin_bind_shape_matrix,
          skin->bindShapeMatrix,
          sizeof(out->skin_bind_shape_matrix));
-  out->skin_root_source = skin->skeleton;
-  out->skin_root_node_index = akb_scene_node_index_for(nodes, skin->skeleton);
+  root = akb_skin_armature_root(skin->skeleton, joint_sources, skin->nJoints);
+  out->skin_root_source = root;
+  out->skin_root_node_index = akb_scene_node_index_for(nodes, root);
   out->skin_vertex_count = (uint32_t)filled_count;
   out->skin_joint_count = (uint32_t)skin->nJoints;
   out->skin_joint_width = joint_width;
   out->has_skin = 1;
+  return 1;
+}
+
+static void
+akb_mat4_identity(float m[16]) {
+  memset(m, 0, 16 * sizeof(float));
+  m[0] = 1.0f;
+  m[5] = 1.0f;
+  m[10] = 1.0f;
+  m[15] = 1.0f;
+}
+
+static void
+akb_mat4_mul(const float a[16], const float b[16], float out[16]) {
+  float r[16];
+  int col, row;
+
+  for (col = 0; col < 4; col++) {
+    for (row = 0; row < 4; row++) {
+      r[col * 4 + row] = a[row]      * b[col * 4]
+                       + a[4 + row]  * b[col * 4 + 1]
+                       + a[8 + row]  * b[col * 4 + 2]
+                       + a[12 + row] * b[col * 4 + 3];
+    }
+  }
+
+  memcpy(out, r, sizeof(r));
+}
+
+static void
+akb_mat4_inv(const float m[16], float out[16]) {
+  CGLM_ALIGN_MAT mat4 in;
+  CGLM_ALIGN_MAT mat4 inv;
+
+  memcpy(in, m, 16 * sizeof(float));
+  glm_mat4_inv(in, inv);
+  memcpy(out, inv, 16 * sizeof(float));
+}
+
+static void
+akb_node_world_matrix(AkNode *node, float out[16]) {
+  if (!node) {
+    akb_mat4_identity(out);
+    return;
+  }
+
+  ak_transformCombineWorld(node, out);
+}
+
+static int
+akb_ensure_owned_vertices(AkbPrimitive *out) {
+  float *copy;
+
+  if (!out || !out->vertices || !out->vertex_count || !out->borrowed_vertices)
+    return 1;
+
+  copy = (float *)malloc((size_t)out->vertex_count * 3 * sizeof(*copy));
+  if (!copy)
+    return 0;
+
+  memcpy(copy, out->vertices, (size_t)out->vertex_count * 3 * sizeof(*copy));
+  out->vertices = copy;
+  out->borrowed_vertices = 0;
+  out->zero_copy_flags &= (uint8_t)~1u;
+  return 1;
+}
+
+static void
+akb_mat4_mul_point3(const float m[16], float v[3]) {
+  float x = v[0];
+  float y = v[1];
+  float z = v[2];
+  float w;
+
+  v[0] = m[0] * x + m[4] * y + m[8]  * z + m[12];
+  v[1] = m[1] * x + m[5] * y + m[9]  * z + m[13];
+  v[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+  w    = m[3] * x + m[7] * y + m[11] * z + m[15];
+  if (w != 0.0f && w != 1.0f) {
+    v[0] /= w;
+    v[1] /= w;
+    v[2] /= w;
+  }
+}
+
+static void
+akb_mat4_mul_vec3_normalize(const float m[16], float v[3]) {
+  float x = v[0];
+  float y = v[1];
+  float z = v[2];
+  float len;
+
+  v[0] = m[0] * x + m[4] * y + m[8]  * z;
+  v[1] = m[1] * x + m[5] * y + m[9]  * z;
+  v[2] = m[2] * x + m[6] * y + m[10] * z;
+
+  len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (len > 1.0e-8f) {
+    v[0] /= len;
+    v[1] /= len;
+    v[2] /= len;
+  }
+}
+
+static void
+akb_skin_vertex_matrix(const AkbPrimitive *out,
+                       const float *joint_mats,
+                       uint32_t vertex_index,
+                       float matrix[16]) {
+  uint32_t slot, index;
+  uint32_t i;
+  float weight, weight_sum;
+
+  memset(matrix, 0, 16 * sizeof(float));
+  weight_sum = 0.0f;
+
+  for (slot = 0; slot < out->skin_joint_width; slot++) {
+    index = out->skin_joints[(size_t)vertex_index * out->skin_joint_width + slot];
+    weight = out->skin_weights[(size_t)vertex_index * out->skin_joint_width + slot];
+    if (weight <= 0.0f || index >= out->skin_joint_count)
+      continue;
+
+    for (i = 0; i < 16; i++)
+      matrix[i] += joint_mats[(size_t)index * 16 + i] * weight;
+    weight_sum += weight;
+  }
+
+  if (weight_sum > 1.0e-8f) {
+    weight = 1.0f / weight_sum;
+    for (slot = 0; slot < 16; slot++)
+      matrix[slot] *= weight;
+  } else {
+    memcpy(matrix, joint_mats, 16 * sizeof(float));
+  }
+}
+
+static int
+akb_skin_bind_pose_joint_matrices(AkbPrimitive *out, float **joint_mats_out) {
+  float *joint_mats;
+  float root_world[16];
+  float root_inv[16];
+  float bind_world[16];
+  float bind_arma[16];
+  uint32_t i;
+
+  if (!out || !out->skin_joint_count || !joint_mats_out)
+    return 0;
+
+  joint_mats = (float *)malloc((size_t)out->skin_joint_count * 16 * sizeof(*joint_mats));
+  if (!joint_mats)
+    return 0;
+
+  akb_node_world_matrix(out->skin_root_source, root_world);
+  akb_mat4_inv(root_world, root_inv);
+
+  for (i = 0; i < out->skin_joint_count; i++) {
+    if (out->skin_inverse_bind_matrices) {
+      if (out->skin_joint_sources && out->skin_joint_sources[i])
+        akb_node_world_matrix(out->skin_joint_sources[i], bind_world);
+      else
+        akb_mat4_inv(out->skin_inverse_bind_matrices + (size_t)i * 16, bind_world);
+      akb_mat4_mul(root_inv, bind_world, bind_arma);
+      akb_mat4_mul(bind_arma,
+                   out->skin_inverse_bind_matrices + (size_t)i * 16,
+                   joint_mats + (size_t)i * 16);
+    } else {
+      akb_node_world_matrix(out->skin_joint_sources ? out->skin_joint_sources[i] : NULL,
+                            bind_world);
+      akb_mat4_mul(root_inv, bind_world, joint_mats + (size_t)i * 16);
+    }
+  }
+
+  *joint_mats_out = joint_mats;
+  return 1;
+}
+
+static void
+akb_skin_bind_pose_apply_loop_vectors(AkbPrimitive *out, const float *vertex_mats) {
+  uint32_t loop_index;
+  uint32_t vertex_index;
+
+  if (!out || !vertex_mats || !out->indices)
+    return;
+
+  if (out->normals) {
+    for (loop_index = 0; loop_index < out->loop_count; loop_index++) {
+      vertex_index = out->indices[loop_index];
+      if (vertex_index >= out->vertex_count)
+        continue;
+      akb_mat4_mul_vec3_normalize(vertex_mats + (size_t)vertex_index * 16,
+                                  out->normals + (size_t)loop_index * 3);
+    }
+  }
+
+  if (out->tangents) {
+    for (loop_index = 0; loop_index < out->loop_count; loop_index++) {
+      vertex_index = out->indices[loop_index];
+      if (vertex_index >= out->vertex_count)
+        continue;
+      akb_mat4_mul_vec3_normalize(vertex_mats + (size_t)vertex_index * 16,
+                                  out->tangents + (size_t)loop_index * 4);
+    }
+  }
+}
+
+static int
+akb_skin_into_bind_pose(AkbPrimitive *out) {
+  float *joint_mats;
+  float *vertex_mats;
+  AkbMorphTarget *target;
+  uint32_t vertex_index;
+  uint32_t target_index;
+
+  if (!out || !out->has_skin)
+    return 1;
+  if (!out->skin_joints || !out->skin_weights || !out->skin_joint_count
+      || !out->skin_joint_width || out->skin_vertex_count != out->vertex_count
+      || !out->skin_inverse_bind_matrices || !out->skin_joint_sources
+      || !out->skin_root_source)
+    return 1;
+
+  if (!akb_ensure_owned_vertices(out))
+    return 0;
+  if (!akb_skin_bind_pose_joint_matrices(out, &joint_mats))
+    return 0;
+
+  vertex_mats = (float *)malloc((size_t)out->vertex_count * 16 * sizeof(*vertex_mats));
+  if (!vertex_mats) {
+    free(joint_mats);
+    return 0;
+  }
+
+  for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
+    akb_skin_vertex_matrix(out,
+                           joint_mats,
+                           vertex_index,
+                           vertex_mats + (size_t)vertex_index * 16);
+    akb_mat4_mul_point3(vertex_mats + (size_t)vertex_index * 16,
+                        out->vertices + (size_t)vertex_index * 3);
+  }
+
+  for (target_index = 0; target_index < out->morph_target_count; target_index++) {
+    target = &out->morph_targets[target_index];
+    if (!target->positions || target->vertex_count != out->vertex_count)
+      continue;
+    for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
+      akb_mat4_mul_point3(vertex_mats + (size_t)vertex_index * 16,
+                          target->positions + (size_t)vertex_index * 3);
+    }
+  }
+
+  akb_skin_bind_pose_apply_loop_vectors(out, vertex_mats);
+
+  out->skin_mesh_in_bind_pose = 1;
+  free(vertex_mats);
+  free(joint_mats);
   return 1;
 }
 
@@ -3678,6 +4332,8 @@ akb_extract_node_camera(AkbSceneNode *out, AkNode *node) {
     return;
 
   projection = camera->optics->tcommon;
+  out->camera_extra = ak_extra(camera);
+  out->camera_imager_extra = camera->imager ? ak_extra(camera->imager) : NULL;
   out->camera_type = (uint8_t)projection->type + 1;
   snprintf(out->camera_name,
            sizeof(out->camera_name),
@@ -3718,6 +4374,7 @@ akb_extract_node_light(AkbSceneNode *out, AkNode *node) {
     return;
 
   base = light->tcommon;
+  out->light_extra = ak_extra(light);
   out->light_type = (uint8_t)base->type;
   snprintf(out->light_name,
            sizeof(out->light_name),
@@ -3758,6 +4415,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   snprintf(out.name, sizeof(out.name), "%s", akb_name(node->name, "AssetKitNode"));
   out.parent_index = parent_index;
   out.visible = node->visible ? 1 : 0;
+  out.layers = node->layer;
   ak_transformCombine(node->transform, out.matrix);
   out.has_transform = 1;
   akb_extract_node_camera(&out, node);
@@ -3777,15 +4435,16 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
 }
 
 static int
-akb_primitive_supported(AkMeshPrimitive *prim) {
+akb_primitive_supported(AkMeshPrimitive *prim, const AkbLoadOptions *options) {
   if (!prim)
     return 0;
 
   switch (prim->type) {
     case AKB_PRIMITIVE_TRIANGLES:
-    case AKB_PRIMITIVE_LINES:
     case AKB_PRIMITIVE_POINTS:
       return 1;
+    case AKB_PRIMITIVE_LINES:
+      return options ? options->import_lines : 1;
     default:
       return 0;
   }
@@ -3874,6 +4533,14 @@ akb_extract_primitive(AkbPrimitiveList *list,
   out.primitive_extra = ak_extra(prim);
   out.mesh_extra = ak_extra(mesh);
   out.geometry_extra = ak_extra(geom);
+  if (prim->gsplat) {
+    out.has_gsplat = 1;
+    out.gsplat.kernel = (uint32_t)prim->gsplat->kernel;
+    out.gsplat.color_space = (uint32_t)prim->gsplat->colorSpace;
+    out.gsplat.projection = (uint32_t)prim->gsplat->projection;
+    out.gsplat.sorting_method = (uint32_t)prim->gsplat->sortingMethod;
+    out.gsplat.decoded_count = prim->gsplat->decodedCount;
+  }
   akb_extract_material(doc,
                        prim,
                        node && node->geometry ? node->geometry->bindMaterial : NULL,
@@ -4078,6 +4745,13 @@ akb_extract_primitive(AkbPrimitiveList *list,
         akb_primitive_free(&out);
         return 0;
       }
+      if (node->geometry->skinner->skin
+          && node->geometry->skinner->skin->joints
+          && !node->geometry->skinner->overrideJoints
+          && !akb_skin_into_bind_pose(&out)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
     }
   }
 
@@ -4104,7 +4778,8 @@ akb_extract_mesh(AkbPrimitiveList *list,
                  AkbAnimation *morph_animation,
                  AkNode *node,
                  int32_t node_index,
-                 AkGeometry *geom) {
+                 AkGeometry *geom,
+                 const AkbLoadOptions *options) {
   AkObject *gdata;
   AkMesh *mesh;
   AkMeshPrimitive *prim;
@@ -4118,7 +4793,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
     return 1;
 
   for (prim = mesh->primitive; prim; prim = prim->next, prim_index++) {
-    if (!akb_primitive_supported(prim))
+    if (!akb_primitive_supported(prim, options))
       continue;
     if (!akb_extract_primitive(list,
                                nodes,
@@ -4145,6 +4820,7 @@ akb_extract_node(AkbPrimitiveList *list,
                  AkbSharedDoc *doc_owner,
                  AkNode *node,
                  const AkbCoordContext *coord,
+                 const AkbLoadOptions *options,
                  int32_t parent_index) {
   AkNode *child;
   AkNode *inst_node;
@@ -4193,7 +4869,8 @@ akb_extract_node(AkbPrimitiveList *list,
                           morph_animation,
                           node,
                           node_index,
-                          geom)) {
+                          geom,
+                          options)) {
       akb_animation_release(animation);
       akb_animation_release(morph_animation);
       return 0;
@@ -4203,7 +4880,7 @@ akb_extract_node(AkbPrimitiveList *list,
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(list, nodes, doc, doc_owner, child, coord, node_index))
+    if (!akb_extract_node(list, nodes, doc, doc_owner, child, coord, options, node_index))
       return 0;
   }
 
@@ -4211,11 +4888,44 @@ akb_extract_node(AkbPrimitiveList *list,
     inst_node = (AkNode *)ak_instanceObject(inst);
     if (!inst_node || inst_node == node)
       continue;
-    if (!akb_extract_node(list, nodes, doc, doc_owner, inst_node, coord, node_index))
+    if (!akb_extract_node(list, nodes, doc, doc_owner, inst_node, coord, options, node_index))
       return 0;
   }
 
   return 1;
+}
+
+static AkVisualScene *
+akb_default_visual_scene(AkDoc *doc) {
+  if (!doc || !doc->scene.visualScene)
+    return NULL;
+  return (AkVisualScene *)ak_instanceObject(doc->scene.visualScene);
+}
+
+static AkVisualScene *
+akb_visual_scene_by_index(AkDoc *doc, int32_t scene_index) {
+  AkVisualScene *scene;
+  int32_t index;
+
+  if (!doc || scene_index < 0 || !doc->lib.visualScenes)
+    return NULL;
+
+  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld, index = 0;
+       scene;
+       scene = (AkVisualScene *)scene->base.next, index++) {
+    if (index == scene_index)
+      return scene;
+  }
+
+  return NULL;
+}
+
+static AkVisualScene *
+akb_selected_visual_scene(AkDoc *doc, const AkbLoadOptions *options) {
+  AkVisualScene *scene;
+
+  scene = options ? akb_visual_scene_by_index(doc, options->scene_index) : NULL;
+  return scene ? scene : akb_default_visual_scene(doc);
 }
 
 static int
@@ -4223,27 +4933,28 @@ akb_extract_scene(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
                   AkbPrimitiveList *list,
                   AkbSceneNodeList *nodes,
-                  const AkbCoordContext *coord) {
+                  const AkbCoordContext *coord,
+                  const AkbLoadOptions *options) {
   AkVisualScene *scene;
   AkInstanceBase *inst;
   AkNode *node;
 
-  if (!doc || !doc->scene.visualScene)
+  if (!doc)
     return 1;
 
-  scene = (AkVisualScene *)ak_instanceObject(doc->scene.visualScene);
+  scene = akb_selected_visual_scene(doc, options);
   if (!scene || !scene->node)
     return 1;
 
   if (scene->node->node) {
     for (inst = &scene->node->node->base; inst; inst = inst->next) {
       node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, -1))
+      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, options, -1))
         return 0;
     }
   } else {
     for (node = scene->node; node; node = node->next) {
-      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, -1))
+      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, options, -1))
         return 0;
     }
   }
@@ -4266,7 +4977,8 @@ akb_extract_doc(AkDoc *doc,
                          doc_owner,
                          &import->primitives,
                          &import->nodes,
-                         &coord))
+                         &coord,
+                         options))
     return 0;
 
   akb_resolve_skin_joint_nodes(&import->primitives, &import->nodes);
@@ -4278,7 +4990,16 @@ akb_extract_doc(AkDoc *doc,
 
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
-      if (!akb_extract_mesh(&import->primitives, &import->nodes, doc, doc_owner, NULL, NULL, NULL, -1, geom))
+      if (!akb_extract_mesh(&import->primitives,
+                            &import->nodes,
+                            doc,
+                            doc_owner,
+                            NULL,
+                            NULL,
+                            NULL,
+                            -1,
+                            geom,
+                            options))
         return 0;
     }
   }
@@ -4434,6 +5155,159 @@ akb_tree_to_py(const AkTree *tree) {
 }
 
 static PyObject *
+akb_image_to_py(AkDoc *doc, AkImage *image, size_t index) {
+  AkInitFrom *init_from;
+  AkImageBase *base;
+  PyObject *dict;
+  char path[PATH_MAX];
+
+  dict = PyDict_New();
+  if (!dict)
+    return NULL;
+
+  init_from = image ? image->initFrom : NULL;
+  base = image ? image->image : NULL;
+  akb_copy_image_path(doc, image, path, sizeof(path));
+
+#define AKB_IMAGE_SET_OBJ(KEY, VALUE) do {        \
+    if (!akb_py_dict_set_owned(dict, (KEY), (VALUE))) { \
+      Py_DECREF(dict);                            \
+      return NULL;                                \
+    }                                             \
+  } while (0)
+
+  AKB_IMAGE_SET_OBJ("index", PyLong_FromSize_t(index));
+  AKB_IMAGE_SET_OBJ("name", akb_unicode_from_cstr(image ? image->name : NULL));
+  AKB_IMAGE_SET_OBJ("path", akb_unicode_from_cstr(path));
+  AKB_IMAGE_SET_OBJ("mime_type", akb_unicode_from_cstr(init_from ? init_from->buffMime : NULL));
+  AKB_IMAGE_SET_OBJ("type", PyLong_FromLong(base ? (long)base->type : 0));
+  AKB_IMAGE_SET_OBJ("embedded",
+                    PyBool_FromLong(init_from && init_from->buff && init_from->buff->data));
+  AKB_IMAGE_SET_OBJ("face", PyLong_FromLong(init_from ? (long)init_from->face : 0));
+  AKB_IMAGE_SET_OBJ("mip_index", PyLong_FromUnsignedLong(init_from ? init_from->mipIndex : 0));
+  AKB_IMAGE_SET_OBJ("array_index", PyLong_FromLong(init_from ? (long)init_from->arrayIndex : -1));
+  AKB_IMAGE_SET_OBJ("depth", PyLong_FromUnsignedLong(init_from ? init_from->depth : 0));
+  AKB_IMAGE_SET_OBJ("extra", akb_tree_to_py(image ? ak_extra(image) : NULL));
+
+#undef AKB_IMAGE_SET_OBJ
+
+  return dict;
+}
+
+static PyObject *
+akb_doc_images_to_py(AkDoc *doc) {
+  FListItem *item;
+  PyObject *list;
+  PyObject *image_obj;
+  size_t index;
+
+  list = PyList_New(0);
+  if (!list)
+    return NULL;
+
+  if (!doc)
+    return list;
+
+  index = 0;
+  for (item = doc->lib.images; item; item = item->next) {
+    image_obj = akb_image_to_py(doc, (AkImage *)item->data, index++);
+    if (!image_obj || PyList_Append(list, image_obj) < 0) {
+      Py_XDECREF(image_obj);
+      Py_DECREF(list);
+      return NULL;
+    }
+    Py_DECREF(image_obj);
+  }
+
+  return list;
+}
+
+static size_t
+akb_visual_scene_count(AkDoc *doc) {
+  AkVisualScene *scene;
+  size_t count = 0;
+
+  if (!doc || !doc->lib.visualScenes)
+    return 0;
+
+  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld;
+       scene;
+       scene = (AkVisualScene *)scene->base.next)
+    count++;
+
+  return count;
+}
+
+static int32_t
+akb_visual_scene_index(AkDoc *doc, AkVisualScene *selected) {
+  AkVisualScene *scene;
+  int32_t index = 0;
+
+  if (!doc || !doc->lib.visualScenes || !selected)
+    return -1;
+
+  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld;
+       scene;
+       scene = (AkVisualScene *)scene->base.next, index++) {
+    if (scene == selected)
+      return index;
+  }
+
+  return -1;
+}
+
+static PyObject *
+akb_visual_scene_names_to_py(AkDoc *doc) {
+  AkVisualScene *scene;
+  PyObject *list;
+  PyObject *item;
+
+  list = PyList_New(0);
+  if (!list)
+    return NULL;
+
+  if (!doc || !doc->lib.visualScenes)
+    return list;
+
+  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld;
+       scene;
+       scene = (AkVisualScene *)scene->base.next) {
+    item = akb_unicode_from_cstr(scene->name);
+    if (!item || PyList_Append(list, item) < 0) {
+      Py_XDECREF(item);
+      Py_DECREF(list);
+      return NULL;
+    }
+    Py_DECREF(item);
+  }
+
+  return list;
+}
+
+static int
+akb_set_scene_info(PyObject *out, AkDoc *doc, const AkbLoadOptions *options) {
+  AkVisualScene *scene;
+
+  scene = akb_selected_visual_scene(doc, options);
+
+  return akb_py_dict_set_owned(out,
+                               "scene_count",
+                               PyLong_FromSize_t(akb_visual_scene_count(doc)))
+         && akb_py_dict_set_owned(out,
+                                  "scene_index",
+                                  PyLong_FromLong(akb_visual_scene_index(doc, scene)))
+         && akb_py_dict_set_owned(out,
+                                  "scene_name",
+                                  akb_unicode_from_cstr(scene ? scene->name : NULL))
+         && akb_py_dict_set_owned(out,
+                                  "scene_names",
+                                  akb_visual_scene_names_to_py(doc))
+         && akb_py_dict_set_owned(out,
+                                  "scene_extra",
+                                  akb_tree_to_py(scene ? ak_extra(scene) : NULL));
+}
+
+static PyObject *
 akb_anim_channels_to_py(AkbAnimation *animation) {
   PyObject *list;
   PyObject *dict;
@@ -4586,6 +5460,10 @@ akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
     }
 
     AKB_TEX_SET_OBJ("path", akb_unicode_from_cstr(infos[i].path));
+    AKB_TEX_SET_OBJ("image_name", akb_unicode_from_cstr(infos[i].image_name));
+    AKB_TEX_SET_OBJ("sampler_name", akb_unicode_from_cstr(infos[i].sampler_name));
+    AKB_TEX_SET_OBJ("color_space", akb_unicode_from_cstr(infos[i].color_space));
+    AKB_TEX_SET_OBJ("channels", akb_unicode_from_cstr(infos[i].channels));
     AKB_TEX_SET_OBJ("texcoord", akb_unicode_from_cstr(infos[i].texcoord));
     AKB_TEX_SET_OBJ("coord_input_name", akb_unicode_from_cstr(infos[i].coord_input_name));
     AKB_TEX_SET_OBJ("slot", PyLong_FromLong(infos[i].slot));
@@ -4595,6 +5473,8 @@ akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
     AKB_TEX_SET_OBJ("min_filter", PyLong_FromLong(infos[i].min_filter));
     AKB_TEX_SET_OBJ("mag_filter", PyLong_FromLong(infos[i].mag_filter));
     AKB_TEX_SET_OBJ("mip_filter", PyLong_FromLong(infos[i].mip_filter));
+    AKB_TEX_SET_OBJ("image_extra", akb_tree_to_py(infos[i].image_extra));
+    AKB_TEX_SET_OBJ("sampler_extra", akb_tree_to_py(infos[i].sampler_extra));
     AKB_TEX_SET_OBJ("has_transform", PyBool_FromLong(infos[i].has_transform));
     AKB_TEX_SET_OBJ("transform_offset", Py_BuildValue("(ff)",
                                                       infos[i].transform_offset[0],
@@ -4736,6 +5616,84 @@ akb_morph_targets_to_py(AkbPrimitive *prim) {
 }
 
 static PyObject *
+akb_float_array_to_py(const float *values, uint32_t count) {
+  PyObject *list;
+  PyObject *item;
+  uint32_t i;
+
+  list = PyList_New((Py_ssize_t)count);
+  if (!list)
+    return NULL;
+
+  for (i = 0; i < count; i++) {
+    item = PyFloat_FromDouble(values ? values[i] : 0.0f);
+    if (!item) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, (Py_ssize_t)i, item);
+  }
+
+  return list;
+}
+
+static PyObject *
+akb_morph_presets_to_py(AkbPrimitive *prim) {
+  AkMorphPreset *preset;
+  PyObject *list;
+  PyObject *dict;
+  PyObject *value;
+  uint32_t i;
+
+  if (!prim || !prim->morph_presets || !prim->morph_preset_count)
+    return PyList_New(0);
+
+  list = PyList_New((Py_ssize_t)prim->morph_preset_count);
+  if (!list)
+    return NULL;
+
+#define AKB_MP_SET_OBJ(KEY, OBJ) do {              \
+    value = (OBJ);                                 \
+    if (!value) { Py_DECREF(dict); Py_DECREF(list); return NULL; } \
+    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
+      Py_DECREF(value);                            \
+      Py_DECREF(dict);                             \
+      Py_DECREF(list);                             \
+      return NULL;                                 \
+    }                                              \
+    Py_DECREF(value);                              \
+  } while (0)
+
+  for (i = 0; i < prim->morph_preset_count; i++) {
+    preset = &prim->morph_presets[i];
+    dict = PyDict_New();
+    if (!dict) {
+      Py_DECREF(list);
+      return NULL;
+    }
+
+    AKB_MP_SET_OBJ("name", akb_unicode_from_cstr(preset->name));
+    AKB_MP_SET_OBJ("weight_count",
+                   PyLong_FromUnsignedLong(preset->weights
+                                           ? preset->weights->count
+                                           : 0));
+    AKB_MP_SET_OBJ("weights",
+                   akb_float_array_to_py(preset->weights
+                                         ? preset->weights->items
+                                         : NULL,
+                                         preset->weights
+                                         ? preset->weights->count
+                                         : 0));
+
+    PyList_SET_ITEM(list, (Py_ssize_t)i, dict);
+  }
+
+#undef AKB_MP_SET_OBJ
+
+  return list;
+}
+
+static PyObject *
 akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   PyObject *dict;
   PyObject *value;
@@ -4834,12 +5792,19 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
   AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
   AKB_SET_OBJ("instance_count", PyLong_FromUnsignedLong(prim->instance_count));
+  AKB_SET_OBJ("has_gsplat", PyBool_FromLong(prim->has_gsplat));
+  AKB_SET_OBJ("gsplat_kernel", PyLong_FromUnsignedLong(prim->gsplat.kernel));
+  AKB_SET_OBJ("gsplat_color_space", PyLong_FromUnsignedLong(prim->gsplat.color_space));
+  AKB_SET_OBJ("gsplat_projection", PyLong_FromUnsignedLong(prim->gsplat.projection));
+  AKB_SET_OBJ("gsplat_sorting_method", PyLong_FromUnsignedLong(prim->gsplat.sorting_method));
+  AKB_SET_OBJ("gsplat_decoded_count", PyLong_FromUnsignedLong(prim->gsplat.decoded_count));
   AKB_SET_OBJ("has_skin", PyBool_FromLong(prim->has_skin));
   AKB_SET_OBJ("has_sheen", PyBool_FromLong(prim->has_sheen));
   AKB_SET_OBJ("skin_vertex_count", PyLong_FromUnsignedLong(prim->skin_vertex_count));
   AKB_SET_OBJ("skin_joint_count", PyLong_FromUnsignedLong(prim->skin_joint_count));
   AKB_SET_OBJ("skin_joint_width", PyLong_FromUnsignedLong(prim->skin_joint_width));
   AKB_SET_OBJ("skin_root_node_index", PyLong_FromLong(prim->skin_root_node_index));
+  AKB_SET_OBJ("skin_mesh_in_bind_pose", PyBool_FromLong(prim->skin_mesh_in_bind_pose));
   AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
   AKB_SET_OBJ("uv_set_count", PyLong_FromUnsignedLong(prim->uv_set_count));
   AKB_SET_OBJ("color_set_count", PyLong_FromUnsignedLong(prim->color_set_count));
@@ -4851,6 +5816,8 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("anim_channels", akb_anim_channels_to_py(prim->animation));
   AKB_SET_OBJ("morph_target_count", PyLong_FromUnsignedLong(prim->morph_target_count));
   AKB_SET_OBJ("morph_targets", akb_morph_targets_to_py(prim));
+  AKB_SET_OBJ("morph_preset_count", PyLong_FromUnsignedLong(prim->morph_preset_count));
+  AKB_SET_OBJ("morph_presets", akb_morph_presets_to_py(prim));
   AKB_SET_OBJ("morph_anim_count",
               PyLong_FromUnsignedLong(prim->morph_animation
                                       ? (unsigned long)prim->morph_animation->count
@@ -4965,6 +5932,31 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
 }
 
 static PyObject *
+akb_string_array_to_py(AkStringArray *array) {
+  PyObject *list;
+  PyObject *item;
+  size_t i;
+
+  if (!array || !array->count)
+    return PyList_New(0);
+
+  list = PyList_New((Py_ssize_t)array->count);
+  if (!list)
+    return NULL;
+
+  for (i = 0; i < array->count; i++) {
+    item = akb_unicode_from_cstr(array->items[i]);
+    if (!item) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, (Py_ssize_t)i, item);
+  }
+
+  return list;
+}
+
+static PyObject *
 akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
   PyObject *dict;
   PyObject *value;
@@ -4992,8 +5984,11 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
   AKB_NODE_SET_OBJ("name", akb_unicode_from_cstr(node->name));
   AKB_NODE_SET_OBJ("parent_index", PyLong_FromLong(node->parent_index));
   AKB_NODE_SET_OBJ("visible", PyBool_FromLong(node->visible));
+  AKB_NODE_SET_OBJ("layers", akb_string_array_to_py(node->layers));
   AKB_NODE_SET_OBJ("camera_type", PyLong_FromUnsignedLong(node->camera_type));
   AKB_NODE_SET_OBJ("camera_name", akb_unicode_from_cstr(node->camera_name));
+  AKB_NODE_SET_OBJ("camera_extra", akb_tree_to_py(node->camera_extra));
+  AKB_NODE_SET_OBJ("camera_imager_extra", akb_tree_to_py(node->camera_imager_extra));
   AKB_NODE_SET_OBJ("camera_values", Py_BuildValue("(ffffff)",
                                                   node->camera_values[0],
                                                   node->camera_values[1],
@@ -5003,6 +5998,7 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
                                                   node->camera_values[5]));
   AKB_NODE_SET_OBJ("light_type", PyLong_FromUnsignedLong(node->light_type));
   AKB_NODE_SET_OBJ("light_name", akb_unicode_from_cstr(node->light_name));
+  AKB_NODE_SET_OBJ("light_extra", akb_tree_to_py(node->light_extra));
   AKB_NODE_SET_OBJ("light_color", Py_BuildValue("(fff)",
                                                 node->light_color[0],
                                                 node->light_color[1],
@@ -5195,6 +6191,27 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   }
   Py_DECREF(item);
 
+  item = akb_doc_images_to_py(doc);
+  if (!item || PyDict_SetItemString(out, "images", item) < 0) {
+    Py_XDECREF(item);
+    Py_DECREF(node_list);
+    Py_DECREF(mesh_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(item);
+
+  if (!akb_set_scene_info(out, doc, &options)) {
+    Py_DECREF(node_list);
+    Py_DECREF(mesh_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+
   Py_DECREF(node_list);
   Py_DECREF(mesh_list);
   Py_DECREF(owner);
@@ -5343,6 +6360,25 @@ akb_open_scene(PyObject *self, PyObject *args) {
     return NULL;
   }
   Py_DECREF(item);
+
+  item = akb_doc_images_to_py(doc);
+  if (!item || PyDict_SetItemString(out, "images", item) < 0) {
+    Py_XDECREF(item);
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(item);
+
+  if (!akb_set_scene_info(out, doc, &options)) {
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
 
   Py_DECREF(node_list);
   Py_DECREF(owner);

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from array import array
 
 import bpy
@@ -73,6 +74,11 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         description="Convert triangle fan primitives to triangles",
         default=True,
     )
+    import_lines: bpy.props.BoolProperty(
+        name="Import Lines",
+        description="Import authored line primitives as Blender edge meshes",
+        default=True,
+    )
     convert_line_loop: bpy.props.BoolProperty(
         name="Convert Line Loops",
         description="Convert line loop primitives to Blender line edges",
@@ -99,6 +105,12 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         default=128,
         min=1,
         max=512,
+    )
+    scene_index: bpy.props.IntProperty(
+        name="Scene Index",
+        description="AssetKit visual scene index to import. Use -1 for the authored default scene",
+        default=-1,
+        min=-1,
     )
     focus_import: bpy.props.EnumProperty(
         name="Focus Imported",
@@ -147,7 +159,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     )
 
     def execute(self, context):
-        prefs = context.preferences.addons[__package__].preferences
+        addon = context.preferences.addons.get(__package__)
+        assetkit_library = addon.preferences.assetkit_library if addon else ""
         load_options = self._load_options()
         if self.replace_startup_cube in {"DEFAULT_CUBE", "STARTUP_SCENE"}:
             _remove_default_cube(context.scene, remove_startup_camera_light=self.replace_startup_cube == "STARTUP_SCENE")
@@ -158,7 +171,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             try:
                 result = import_assetkit_file_auto(
                     self.filepath,
-                    prefs.assetkit_library,
+                    assetkit_library,
                     load_options,
                     collection=context.collection,
                     batch_size=self.progressive_batch_size,
@@ -190,7 +203,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         if self.build_mode == "PROGRESSIVE":
             import_assetkit_file_progressive(
                 self.filepath,
-                prefs.assetkit_library,
+                assetkit_library,
                 load_options,
                 collection=context.collection,
                 batch_size=self.progressive_batch_size,
@@ -209,7 +222,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         try:
             objects = import_assetkit_file(
                 self.filepath,
-                prefs.assetkit_library,
+                assetkit_library,
                 load_options,
                 collection=context.collection,
                 focus_mode=self.focus_import,
@@ -252,11 +265,15 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         mesh_box.prop(self, "generate_normals")
         mesh_box.prop(self, "convert_triangle_strip")
         mesh_box.prop(self, "convert_triangle_fan")
-        mesh_box.prop(self, "convert_line_loop")
-        mesh_box.prop(self, "convert_line_strip")
+        mesh_box.prop(self, "import_lines")
+        line_box = mesh_box.column()
+        line_box.enabled = self.import_lines
+        line_box.prop(self, "convert_line_loop")
+        line_box.prop(self, "convert_line_strip")
 
         load_box = layout.box()
         load_box.label(text="Loading")
+        load_box.prop(self, "scene_index")
         load_box.prop(self, "build_mode")
         if self.build_mode in {"AUTO", "PROGRESSIVE"}:
             load_box.prop(self, "progressive_batch_size")
@@ -277,10 +294,12 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         return {
             "coordinate_conversion": self.coordinate_conversion,
             "coordinate_system": self.coordinate_system,
+            "scene_index": self.scene_index,
             "triangulate": self.triangulate,
             "generate_normals": self.generate_normals,
             "convert_triangle_strip": self.convert_triangle_strip,
             "convert_triangle_fan": self.convert_triangle_fan,
+            "import_lines": self.import_lines,
             "convert_line_loop": self.convert_line_loop,
             "convert_line_strip": self.convert_line_strip,
         }
@@ -472,3 +491,132 @@ def _set_material_slot(obj: bpy.types.Object, slot: int) -> None:
     values = array("i", [obj.active_material_index]) * len(obj.data.polygons)
     obj.data.polygons.foreach_set("material_index", values)
     obj.data.update()
+
+
+_MORPH_PRESET_ITEMS_CACHE = ()
+
+
+def _morph_preset_items(self, context):
+    del self
+
+    global _MORPH_PRESET_ITEMS_CACHE
+
+    names = _morph_preset_names(context)
+    items = [("__RESET__", "Reset", "Set all AssetKit morph weights to zero")]
+    items.extend(
+        (
+            _morph_preset_identifier(name),
+            name,
+            "Apply this AssetKit morph preset",
+        )
+        for name in names
+    )
+    _MORPH_PRESET_ITEMS_CACHE = tuple(items)
+    return _MORPH_PRESET_ITEMS_CACHE
+
+
+def _morph_preset_name_from_enum(context, identifier: str) -> str:
+    if identifier == "__RESET__":
+        return ""
+    for name in _morph_preset_names(context):
+        if _morph_preset_identifier(name) == identifier:
+            return name
+    return identifier
+
+
+def _morph_preset_names(context) -> list[str]:
+    names = set()
+    objects = getattr(context, "scene", None).objects if getattr(context, "scene", None) else []
+    for obj in objects:
+        count = int(obj.get("assetkit_morph_preset_count") or 0)
+        for index in range(count):
+            name = obj.get(f"assetkit_morph_preset_{index}_name")
+            if name:
+                names.add(str(name))
+    return sorted(names)
+
+
+def _morph_preset_identifier(name: str) -> str:
+    digest = hashlib.sha1(name.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"MORPH_PRESET_{digest}"
+
+
+class ASSETKIT_OT_apply_morph_preset(bpy.types.Operator):
+    bl_idname = "assetkit.apply_morph_preset"
+    bl_label = "Apply AssetKit Morph Preset"
+    bl_options = {"REGISTER", "UNDO"}
+
+    preset: bpy.props.EnumProperty(
+        name="Preset",
+        description="Morph preset to apply",
+        items=_morph_preset_items,
+    )
+    preset_name: bpy.props.StringProperty(
+        name="Preset",
+        description="Morph preset name. Leave empty to reset morph weights",
+        default="",
+        options={"HIDDEN"},
+    )
+    selected_only: bpy.props.BoolProperty(
+        name="Selected Only",
+        description="Apply the morph preset only to selected objects",
+        default=False,
+    )
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        preset_name = self.preset_name or _morph_preset_name_from_enum(context, self.preset)
+        changed = _apply_morph_preset(context, preset_name, self.selected_only)
+        if changed == 0:
+            self.report({"WARNING"}, "No matching AssetKit morph presets found")
+        else:
+            label = preset_name or "reset"
+            self.report({"INFO"}, f"Applied AssetKit morph preset '{label}' to {changed} object(s)")
+        return {"FINISHED"}
+
+
+def _apply_morph_preset(context, preset_name: str, selected_only: bool) -> int:
+    objects = context.selected_objects if selected_only else context.scene.objects
+    changed = 0
+    for obj in objects:
+        if obj.type != "MESH" or not obj.data or not obj.data.shape_keys:
+            continue
+        weights = _morph_preset_weights(obj, preset_name)
+        if weights is None:
+            continue
+        _set_shape_key_weights(obj, weights)
+        changed += 1
+    return changed
+
+
+def _morph_preset_weights(obj: bpy.types.Object, preset_name: str) -> list[float] | None:
+    key_count = max(0, len(obj.data.shape_keys.key_blocks) - 1) if obj.data.shape_keys else 0
+    if key_count <= 0:
+        return None
+    if not preset_name:
+        return [0.0] * key_count
+
+    count = int(obj.get("assetkit_morph_preset_count") or 0)
+    for index in range(count):
+        prefix = f"assetkit_morph_preset_{index}"
+        if obj.get(f"{prefix}_name") != preset_name:
+            continue
+        try:
+            raw = json.loads(obj.get(f"{prefix}_weights_json") or "[]")
+        except (TypeError, ValueError):
+            return None
+        weights = [float(value) for value in raw[:key_count]]
+        if len(weights) < key_count:
+            weights.extend([0.0] * (key_count - len(weights)))
+        return weights
+    return None
+
+
+def _set_shape_key_weights(obj: bpy.types.Object, weights: list[float]) -> None:
+    shape_keys = obj.data.shape_keys
+    for index, value in enumerate(weights, start=1):
+        if index >= len(shape_keys.key_blocks):
+            break
+        shape_keys.key_blocks[index].value = value

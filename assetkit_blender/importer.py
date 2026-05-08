@@ -13,7 +13,7 @@ import traceback
 
 import bpy
 from bpy_extras.object_utils import world_to_camera_view
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 from .assetkit import (
     AK_PRIMITIVE_LINES,
@@ -108,7 +108,6 @@ _AK_MATERIAL_BLINN = 2
 _AK_MATERIAL_LAMBERT = 3
 _AK_MATERIAL_CONSTANT = 4
 _AK_MATERIAL_SPECULAR_GLOSSINESS = 6
-_AK_FILE_TYPE_COLLADA = 1
 _AK_OPAQUE_A_ONE = 1
 _AK_OPAQUE_A_ZERO = 2
 _AK_OPAQUE_RGB_ONE = 3
@@ -143,8 +142,20 @@ def import_assetkit_file(
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
     existing_actions = _snapshot_actions(fit_timeline)
-    primitives, scene_nodes, doc_extra = _load_assetkit_scene(filepath, library_path, load_options)
-    state = _begin_scene_build(primitives, scene_nodes, collection or bpy.context.collection, doc_extra)
+    primitives, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
+        filepath,
+        library_path,
+        load_options,
+    )
+    state = _begin_scene_build(
+        primitives,
+        scene_nodes,
+        collection or bpy.context.collection,
+        doc_extra,
+        scene_extra,
+        scene_info,
+        doc_images,
+    )
     objects: list[bpy.types.Object] = []
     for primitive in primitives:
         objects.extend(_create_import_object(primitive, state, collection or bpy.context.collection, shading_mode))
@@ -273,7 +284,15 @@ def import_assetkit_file_auto(
         return job
 
     primitives = stream.read_mesh_batch(0, stream.mesh_count)
-    state = _begin_scene_build(primitives, stream.nodes, active_collection, stream.doc_extra)
+    state = _begin_scene_build(
+        primitives,
+        stream.nodes,
+        active_collection,
+        stream.doc_extra,
+        stream.scene_extra,
+        _scene_info_from_loaded(stream),
+        stream.images,
+    )
     objects: list[bpy.types.Object] = []
     for primitive in primitives:
         objects.extend(_create_import_object(primitive, state, active_collection, shading_mode))
@@ -296,15 +315,33 @@ def _load_assetkit_scene(
     filepath: str,
     library_path: str = "",
     load_options: dict | None = None,
-) -> tuple[list[MeshPrimitiveData], list[SceneNodeData], object | None]:
+) -> tuple[list[MeshPrimitiveData], list[SceneNodeData], object | None, object | None, dict, list[dict]]:
     loaded = native_load_meshes(filepath, load_options) if not library_path else None
     if loaded is None:
         kit = AssetKit(library_path or None)
         loaded = kit.load_meshes(filepath)
 
     if isinstance(loaded, AssetKitSceneData):
-        return loaded.meshes, loaded.nodes, loaded.doc_extra
-    return loaded, [], None
+        return (
+            loaded.meshes,
+            loaded.nodes,
+            loaded.doc_extra,
+            loaded.scene_extra,
+            _scene_info_from_loaded(loaded),
+            list(loaded.images or []),
+        )
+    return loaded, [], None, None, {}, []
+
+
+def _scene_info_from_loaded(loaded: object | None) -> dict:
+    if not loaded:
+        return {}
+    return {
+        "index": int(getattr(loaded, "scene_index", -1)),
+        "count": int(getattr(loaded, "scene_count", 0)),
+        "name": str(getattr(loaded, "scene_name", "") or ""),
+        "names": list(getattr(loaded, "scene_names", []) or []),
+    }
 
 
 def _begin_scene_build(
@@ -312,18 +349,209 @@ def _begin_scene_build(
     scene_nodes: list[SceneNodeData],
     collection: bpy.types.Collection,
     doc_extra: object | None = None,
+    scene_extra: object | None = None,
+    scene_info: dict | None = None,
+    doc_images: list[dict] | None = None,
 ) -> dict:
-    _set_assetkit_json_prop(collection, "assetkit_document_extra_json", doc_extra)
+    _set_document_extra_props(collection, doc_extra, scene_extra, scene_info, doc_images)
     coord_root = _create_coord_root(primitives, collection)
-    node_objects = _create_scene_nodes(scene_nodes, coord_root, collection)
+    node_visibility = _effective_static_node_visibility_map(scene_nodes)
+    node_object_visibility = _node_object_visibility_map(scene_nodes, node_visibility)
+    node_objects = _create_scene_nodes(scene_nodes, coord_root, collection, node_object_visibility)
     return {
         "coord_root": coord_root,
         "root_objects": _scene_root_objects(scene_nodes, coord_root, node_objects),
         "node_objects": node_objects,
         "node_data": {index: node for index, node in enumerate(scene_nodes)},
+        "node_visibility": node_visibility,
         "material_cache": {},
         "skin_cache": {},
     }
+
+
+def _set_document_extra_props(
+    collection: bpy.types.Collection,
+    doc_extra: object | None,
+    scene_extra: object | None = None,
+    scene_info: dict | None = None,
+    doc_images: list[dict] | None = None,
+) -> None:
+    _set_assetkit_json_prop(collection, "assetkit_document_extra_json", doc_extra)
+    _set_assetkit_json_prop(bpy.context.scene, "assetkit_document_extra_json", doc_extra)
+    _set_assetkit_json_prop(collection, "assetkit_document_images_json", doc_images)
+    _set_assetkit_json_prop(bpy.context.scene, "assetkit_document_images_json", doc_images)
+    _set_scene_props(collection, scene_extra, scene_info)
+    _set_scene_props(bpy.context.scene, scene_extra, scene_info)
+    world = _assetkit_document_world(doc_extra, doc_images)
+    if world:
+        _set_assetkit_json_prop(world, "assetkit_document_extra_json", doc_extra)
+        _set_assetkit_json_prop(world, "assetkit_document_images_json", doc_images)
+
+
+def _set_scene_props(target, scene_extra: object | None, scene_info: dict | None) -> None:
+    info = scene_info or {}
+    if not scene_extra and not info:
+        return
+
+    _set_assetkit_json_prop(target, "assetkit_scene_extra_json", scene_extra)
+    target["assetkit_scene_index"] = int(info.get("index", -1))
+    target["assetkit_scene_count"] = int(info.get("count", 0))
+    target["assetkit_scene_name"] = str(info.get("name", "") or "")
+    _set_assetkit_json_prop(target, "assetkit_scene_names_json", info.get("names"))
+
+
+def _assetkit_document_world(
+    doc_extra: object | None,
+    doc_images: list[dict] | None = None,
+) -> bpy.types.World | None:
+    scene = bpy.context.scene
+    world = scene.world
+    if world is None and _document_image_based_light(doc_extra):
+        world = bpy.data.worlds.new("AssetKit World")
+        scene.world = world
+    if world:
+        _apply_document_image_based_light(world, doc_extra, doc_images)
+    return world
+
+
+def _document_image_based_light(doc_extra: object | None) -> object | None:
+    ext = _assetkit_extra_path(doc_extra, "extensions", "EXT_lights_image_based")
+    lights = _assetkit_extra_child(ext, "lights")
+    if not isinstance(lights, dict):
+        return None
+    for child in lights.get("children") or ():
+        if isinstance(child, dict):
+            return child
+    return None
+
+
+def _apply_document_image_based_light(
+    world: bpy.types.World,
+    doc_extra: object | None,
+    doc_images: list[dict] | None = None,
+) -> None:
+    light = _document_image_based_light(doc_extra)
+    if not light:
+        return
+
+    intensity = max(0.0, _assetkit_extra_float(_assetkit_extra_child(light, "intensity"), 1.0))
+    color = _image_based_light_color(light)
+    if not color:
+        return
+
+    world.color = color
+    world["assetkit_environment_intensity"] = intensity
+    world["assetkit_environment_color"] = color
+    world["assetkit_environment_type"] = "EXT_lights_image_based"
+    _set_image_based_light_props(world, light, doc_images)
+
+    try:
+        world.use_nodes = True
+    except Exception:
+        return
+
+    background = world.node_tree.nodes.get("Background") if world.node_tree else None
+    if not background:
+        return
+    color_socket = background.inputs.get("Color")
+    strength_socket = background.inputs.get("Strength")
+    if color_socket:
+        color_socket.default_value = (*color, 1.0)
+    if strength_socket:
+        strength_socket.default_value = min(max(intensity, 0.0), 10.0)
+
+
+def _set_image_based_light_props(
+    world: bpy.types.World,
+    light: object,
+    doc_images: list[dict] | None = None,
+) -> None:
+    payload = _assetkit_extra_plain_value(light)
+    if not isinstance(payload, dict):
+        return
+
+    name = payload.get("name")
+    if name:
+        world["assetkit_environment_name"] = str(name)
+
+    specular_size = payload.get("specularImageSize")
+    if specular_size is not None:
+        try:
+            world["assetkit_environment_specular_image_size"] = int(specular_size)
+        except (TypeError, ValueError):
+            pass
+
+    rotation = payload.get("rotation")
+    if isinstance(rotation, list) and len(rotation) == 4:
+        try:
+            world["assetkit_environment_rotation_xyzw"] = tuple(float(value) for value in rotation)
+        except (TypeError, ValueError):
+            pass
+
+    _set_assetkit_json_prop(
+        world,
+        "assetkit_environment_irradiance_coefficients_json",
+        payload.get("irradianceCoefficients"),
+    )
+    _set_assetkit_json_prop(
+        world,
+        "assetkit_environment_specular_images_json",
+        payload.get("specularImages"),
+    )
+    _set_assetkit_json_prop(
+        world,
+        "assetkit_environment_specular_image_paths_json",
+        _image_based_light_specular_paths(payload.get("specularImages"), doc_images),
+    )
+
+
+def _image_based_light_specular_paths(
+    specular_images: object | None,
+    doc_images: list[dict] | None,
+) -> list[list[str]] | None:
+    if not isinstance(specular_images, list) or not doc_images:
+        return None
+
+    paths = []
+    for mip in specular_images:
+        if not isinstance(mip, list):
+            continue
+        row = []
+        for index in mip:
+            try:
+                image = doc_images[int(index)]
+            except (TypeError, ValueError, IndexError):
+                row.append("")
+                continue
+            row.append(str(image.get("path") or "") if isinstance(image, dict) else "")
+        paths.append(row)
+
+    return paths or None
+
+
+def _image_based_light_color(light: object | None) -> tuple[float, float, float] | None:
+    coeffs = _assetkit_extra_child(light, "irradianceCoefficients")
+    if not isinstance(coeffs, dict):
+        return None
+
+    payload = _assetkit_extra_plain_value(coeffs)
+    if isinstance(payload, list) and payload and isinstance(payload[0], list):
+        try:
+            values = tuple(float(value) for value in payload[0][:3])
+        except (TypeError, ValueError):
+            values = ()
+    else:
+        first = None
+        for child in coeffs.get("children") or ():
+            if isinstance(child, dict):
+                first = child
+                break
+        values = _assetkit_extra_float_array(first, 3)
+    if len(values) != 3:
+        return None
+    positives = [max(0.0, float(value)) for value in values]
+    scale = max(max(positives), 1.0)
+    return tuple(max(0.0, min(value / scale, 1.0)) for value in positives)
 
 
 def _scene_root_objects(
@@ -355,6 +583,7 @@ def _create_import_object(
         parent,
         node_objects=node_objects,
         node_data=state["node_data"],
+        node_visibility=state["node_visibility"],
         material_cache=state["material_cache"],
         skin_cache=state["skin_cache"],
         apply_transform=not use_node_parent,
@@ -468,6 +697,7 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
     scene = bpy.context.scene
     scene.frame_start = int(math.floor(max(0.0, min_frame)))
     scene.frame_end = max(scene.frame_start + 1, int(math.ceil(max_frame)))
+    scene.frame_set(scene.frame_start)
 
 
 def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
@@ -646,7 +876,7 @@ def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | N
     maximum: Vector | None = None
 
     for obj in objects:
-        if obj.type != "MESH" or not obj.bound_box:
+        if obj.type != "MESH" or not obj.bound_box or _is_hidden_for_bounds(obj):
             continue
         matrix = obj.matrix_world
         for corner in obj.bound_box:
@@ -667,6 +897,20 @@ def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | N
     return minimum, maximum
 
 
+def _is_hidden_for_bounds(obj: bpy.types.Object) -> bool:
+    current = obj
+    while current is not None:
+        try:
+            if current.hide_get():
+                return True
+        except Exception:
+            pass
+        if current.hide_viewport or current.hide_render:
+            return True
+        current = current.parent
+    return False
+
+
 def _bounds_corners(bounds: tuple[Vector, Vector]) -> list[Vector]:
     minimum, maximum = bounds
     return [
@@ -683,7 +927,7 @@ def _frame_viewports(
 ) -> None:
     window_manager = bpy.context.window_manager
     minimum, maximum = bounds
-    radius = max((maximum - minimum).length * 0.5, 0.5)
+    radius = max((maximum - minimum).length * 0.5, 1.0e-6)
     selection = _temporary_selection(objects) if objects else None
     for window in getattr(window_manager, "windows", []):
         screen = window.screen
@@ -706,9 +950,8 @@ def _frame_viewports(
 
 
 def _set_viewport_clip(space: bpy.types.SpaceView3D, radius: float) -> None:
-    clip_end = max(space.clip_end, radius * 24.0, 1000.0)
-    space.clip_end = min(clip_end, 10_000_000.0)
-    space.clip_start = min(space.clip_start, max(radius / 100_000.0, 0.001))
+    space.clip_start = _clip_start_for_radius(radius)
+    space.clip_end = _clip_end_for_radius(radius)
 
 
 def _set_view_distance(
@@ -723,13 +966,15 @@ def _set_view_distance(
         minimum, maximum = bounds
         region_3d.view_location = (minimum + maximum) * 0.5
         target = radius * _viewport_distance_factor(radius)
-        region_3d.view_distance = target
+        current = float(getattr(region_3d, "view_distance", 0.0) or 0.0)
+        if current <= 0.0 or current > target * 2.0 or current < target * 0.35:
+            region_3d.view_distance = target
     except Exception:
         pass
 
 
 def _viewport_distance_factor(radius: float) -> float:
-    return 2.4 + 2.8 / (1.0 + radius / 8.0)
+    return 1.9 + 2.0 / (1.0 + radius / 8.0)
 
 
 def _frame_camera(
@@ -749,7 +994,7 @@ def _frame_camera(
     minimum, maximum = bounds
     center = (minimum + maximum) * 0.5
     size = maximum - minimum
-    radius = max(size.length * 0.5, 0.5)
+    radius = max(size.length * 0.5, 1.0e-6)
     direction = Vector((1.6, -2.2, 1.25)).normalized()
 
     camera = camera_obj.data
@@ -850,14 +1095,22 @@ def _set_camera_clip(
     depths = [(corner - camera_obj.location).dot(forward) for corner in _bounds_corners(bounds)]
     positive_depths = [depth for depth in depths if depth > 0.0]
     if not positive_depths:
-        camera.clip_start = min(camera.clip_start, max(radius / 100_000.0, 0.001))
-        camera.clip_end = max(camera.clip_end, radius * 24.0)
+        camera.clip_start = _clip_start_for_radius(radius)
+        camera.clip_end = _clip_end_for_radius(radius)
         return
 
-    near_depth = max(min(positive_depths) - radius * 4.0, max(radius / 100_000.0, 0.001))
-    far_depth = max(positive_depths) + radius * 8.0
-    camera.clip_start = min(camera.clip_start, near_depth)
-    camera.clip_end = max(camera.clip_end, far_depth, radius * 24.0)
+    near_depth = max(min(positive_depths) * 0.25, _clip_start_for_radius(radius))
+    far_depth = max(max(positive_depths) + radius * 2.0, _clip_end_for_radius(radius))
+    camera.clip_start = min(near_depth, 10_000.0)
+    camera.clip_end = min(far_depth, 10_000_000.0)
+
+
+def _clip_start_for_radius(radius: float) -> float:
+    return max(radius / 100_000.0, 0.001)
+
+
+def _clip_end_for_radius(radius: float) -> float:
+    return min(max(radius * 32.0, 1000.0), 10_000_000.0)
 
 
 class _ProgressiveImportJob:
@@ -894,6 +1147,9 @@ class _ProgressiveImportJob:
         self.stream = stream
         self.scene_nodes: list[SceneNodeData] = []
         self.doc_extra: object | None = getattr(stream, "doc_extra", None)
+        self.scene_extra: object | None = getattr(stream, "scene_extra", None)
+        self.scene_info: dict = _scene_info_from_loaded(stream)
+        self.doc_images: list[dict] = list(getattr(stream, "images", []) or [])
         self.mesh_count = 0
         self.pending_primitives: deque[MeshPrimitiveData] = deque()
         self.objects: list[bpy.types.Object] = []
@@ -922,6 +1178,9 @@ class _ProgressiveImportJob:
                 if stream is not None:
                     self.scene_nodes = stream.nodes
                     self.doc_extra = stream.doc_extra
+                    self.scene_extra = stream.scene_extra
+                    self.doc_images = list(stream.images or [])
+                    self.scene_info = _scene_info_from_loaded(stream)
                     self.mesh_count = stream.mesh_count
                     start = 0
                     producer_batch_size = max(self.batch_size * 4, 256)
@@ -933,13 +1192,16 @@ class _ProgressiveImportJob:
                         start += count
                     return
 
-            primitives, scene_nodes, doc_extra = _load_assetkit_scene(
+            primitives, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
                 self.filepath,
                 self.library_path,
                 self.load_options,
             )
             self.scene_nodes = scene_nodes
             self.doc_extra = doc_extra
+            self.scene_extra = scene_extra
+            self.scene_info = scene_info
+            self.doc_images = doc_images
             self.mesh_count = len(primitives)
             if primitives:
                 self._queue.put(primitives)
@@ -970,7 +1232,15 @@ class _ProgressiveImportJob:
                 return 0.01
             self.build_started_at = time.perf_counter()
             coord_probe = [self.pending_primitives[0]] if self.pending_primitives else []
-            self.state = _begin_scene_build(coord_probe, self.scene_nodes, self.collection, self.doc_extra)
+            self.state = _begin_scene_build(
+                coord_probe,
+                self.scene_nodes,
+                self.collection,
+                self.doc_extra,
+                self.scene_extra,
+                self.scene_info,
+                self.doc_images,
+            )
             self._progress_begin()
             if not self.pending_primitives and self.producer_done:
                 self._finish()
@@ -1070,6 +1340,7 @@ def _create_mesh_object(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
+    node_visibility: dict[int, bool] | None = None,
     material_cache: dict[object, bpy.types.Material] | None = None,
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
@@ -1083,6 +1354,7 @@ def _create_mesh_object(
             parent,
             node_objects=node_objects,
             node_data=node_data,
+            node_visibility=node_visibility,
             material_cache=material_cache,
             skin_cache=skin_cache,
             apply_transform=apply_transform,
@@ -1107,6 +1379,7 @@ def _create_mesh_object(
         parent,
         node_objects=node_objects,
         node_data=node_data,
+        node_visibility=node_visibility,
         material_cache=material_cache,
         skin_cache=skin_cache,
         apply_transform=apply_transform,
@@ -1121,6 +1394,7 @@ def _create_mesh_object_bulk(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
+    node_visibility: dict[int, bool] | None = None,
     material_cache: dict[object, bpy.types.Material] | None = None,
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
@@ -1134,6 +1408,7 @@ def _create_mesh_object_bulk(
             parent,
             node_objects=node_objects,
             node_data=node_data,
+            node_visibility=node_visibility,
             material_cache=material_cache,
             skin_cache=skin_cache,
             apply_transform=apply_transform,
@@ -1146,6 +1421,7 @@ def _create_mesh_object_bulk(
             parent,
             node_objects=node_objects,
             node_data=node_data,
+            node_visibility=node_visibility,
             material_cache=material_cache,
             skin_cache=skin_cache,
             apply_transform=apply_transform,
@@ -1209,8 +1485,8 @@ def _create_mesh_object_bulk(
     if data.tangents_f32:
         tangents = _buffer_view(data.tangents_f32, "f")
         if tangents is not None:
-            tangent_attr = mesh.attributes.new(name="assetkit_tangent", type="FLOAT_COLOR", domain="CORNER")
-            tangent_attr.data.foreach_set("color", tangents)
+            if not _apply_vector_attribute(mesh, "assetkit_tangent", tangents, "FLOAT4", "CORNER"):
+                _apply_split_attribute(mesh, "assetkit_tangent", tangents, ("x", "y", "z", "w"), "CORNER")
 
     mesh.update(calc_edges=True)
 
@@ -1221,6 +1497,7 @@ def _create_mesh_object_bulk(
         parent,
         node_objects=node_objects,
         node_data=node_data,
+        node_visibility=node_visibility,
         material_cache=material_cache,
         skin_cache=skin_cache,
         apply_transform=apply_transform,
@@ -1235,6 +1512,7 @@ def _create_line_mesh_object_bulk(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
+    node_visibility: dict[int, bool] | None = None,
     material_cache: dict[object, bpy.types.Material] | None = None,
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
@@ -1264,6 +1542,7 @@ def _create_line_mesh_object_bulk(
         parent,
         node_objects=node_objects,
         node_data=node_data,
+        node_visibility=node_visibility,
         material_cache=material_cache,
         skin_cache=skin_cache,
         apply_transform=apply_transform,
@@ -1278,6 +1557,7 @@ def _create_point_mesh_object_bulk(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
+    node_visibility: dict[int, bool] | None = None,
     material_cache: dict[object, bpy.types.Material] | None = None,
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
@@ -1301,6 +1581,7 @@ def _create_point_mesh_object_bulk(
         parent,
         node_objects=node_objects,
         node_data=node_data,
+        node_visibility=node_visibility,
         material_cache=material_cache,
         skin_cache=skin_cache,
         apply_transform=apply_transform,
@@ -1316,6 +1597,7 @@ def _finish_mesh_object(
     *,
     node_objects: dict[int, bpy.types.Object] | None = None,
     node_data: dict[int, SceneNodeData] | None = None,
+    node_visibility: dict[int, bool] | None = None,
     material_cache: dict[object, bpy.types.Material] | None = None,
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
@@ -1326,6 +1608,8 @@ def _finish_mesh_object(
     active_collection = collection or bpy.context.collection
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
+    if node_visibility is not None and data.node_index >= 0:
+        _set_node_visibility(obj, node_visibility.get(data.node_index, True))
     if apply_transform:
         _apply_matrix(obj, data)
     active_collection.objects.link(obj)
@@ -1335,9 +1619,14 @@ def _finish_mesh_object(
     _apply_assetkit_extra_props(obj, data)
     _apply_material_variants(obj, data, material_cache)
     _apply_shape_keys(obj, data)
-    _apply_skin(obj, data, node_objects or {}, node_data or {}, active_collection, skin_cache)
+    _apply_morph_presets(obj, data)
+    node_lookup = node_data or {}
+    _apply_skin(obj, data, node_objects or {}, node_lookup, active_collection, skin_cache)
+    has_node_visibility_animation = _node_has_effective_visibility_animation(data.node_index, node_lookup)
     if apply_animation:
-        _apply_animation(obj, data)
+        _apply_animation(obj, data, skip_visibility=has_node_visibility_animation)
+    if has_node_visibility_animation:
+        _apply_effective_node_visibility_animation(obj, data.node_index, node_lookup)
 
     return _apply_instancing(obj, data, active_collection)
 
@@ -1357,30 +1646,76 @@ def _apply_point_attributes(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> No
             blender_attr = mesh.attributes.new(name=name, type="FLOAT", domain="POINT")
             blender_attr.data.foreach_set("value", values)
         elif width == 2:
-            _apply_split_point_attribute(mesh, name, values, ("x", "y"))
+            if not _apply_vector_attribute(mesh, name, values, "FLOAT2", "POINT"):
+                _apply_split_attribute(mesh, name, values, ("x", "y"), "POINT")
         elif width == 3:
             blender_attr = mesh.attributes.new(name=name, type="FLOAT_VECTOR", domain="POINT")
             blender_attr.data.foreach_set("vector", values)
         elif width == 4:
-            blender_attr = mesh.color_attributes.new(name=name, type="FLOAT_COLOR", domain="POINT")
-            blender_attr.data.foreach_set("color", values)
-            if name == "Color":
-                _set_render_color_index(mesh)
+            if _is_color_attribute_name(name):
+                blender_attr = mesh.color_attributes.new(name=name, type="FLOAT_COLOR", domain="POINT")
+                blender_attr.data.foreach_set("color", values)
+                if name == "Color":
+                    _set_render_color_index(mesh)
+            elif not _apply_vector_attribute(mesh, name, values, "FLOAT4", "POINT"):
+                _apply_split_attribute(mesh, name, values, ("x", "y", "z", "w"), "POINT")
 
 
-def _apply_split_point_attribute(
+def _is_color_attribute_name(name: str) -> bool:
+    return name == "Color" or name.startswith("Color.")
+
+
+def _apply_vector_attribute(
+    mesh: bpy.types.Mesh,
+    name: str,
+    values,
+    data_type: str,
+    domain: str,
+) -> bool:
+    try:
+        blender_attr = mesh.attributes.new(name=name, type=data_type, domain=domain)
+    except TypeError:
+        return False
+    except RuntimeError:
+        return False
+
+    try:
+        blender_attr.data.foreach_set("vector", values)
+    except Exception:
+        try:
+            mesh.attributes.remove(blender_attr)
+        except Exception:
+            pass
+        return False
+    return True
+
+
+def _apply_split_attribute(
     mesh: bpy.types.Mesh,
     name: str,
     values,
     suffixes: tuple[str, ...],
+    domain: str,
 ) -> None:
-    count = len(mesh.vertices)
+    count = _domain_element_count(mesh, domain)
     for component, suffix in enumerate(suffixes):
         out = array("f", [0.0]) * count
         for index in range(count):
             out[index] = values[index * len(suffixes) + component]
-        blender_attr = mesh.attributes.new(name=f"{name}_{suffix}", type="FLOAT", domain="POINT")
+        blender_attr = mesh.attributes.new(name=f"{name}_{suffix}", type="FLOAT", domain=domain)
         blender_attr.data.foreach_set("value", out)
+
+
+def _domain_element_count(mesh: bpy.types.Mesh, domain: str) -> int:
+    if domain == "POINT":
+        return len(mesh.vertices)
+    if domain == "CORNER":
+        return len(mesh.loops)
+    if domain == "EDGE":
+        return len(mesh.edges)
+    if domain == "FACE":
+        return len(mesh.polygons)
+    return 0
 
 
 def _apply_shading(
@@ -1432,11 +1767,13 @@ def _create_scene_nodes(
     nodes: list[SceneNodeData],
     coord_root: bpy.types.Object | None,
     collection: bpy.types.Collection,
+    node_visibility: dict[int, bool] | None = None,
 ) -> dict[int, bpy.types.Object]:
     objects: dict[int, bpy.types.Object] = {}
+    node_lookup = {index: node for index, node in enumerate(nodes)}
 
     for index, node in enumerate(nodes):
-        obj = _new_scene_node_object(node, index)
+        obj = _new_scene_node_object(node, index, (node_visibility or {}).get(index, node.visible))
         collection.objects.link(obj)
         objects[index] = obj
 
@@ -1445,38 +1782,276 @@ def _create_scene_nodes(
         parent = objects.get(node.parent_index) if node.parent_index >= 0 else coord_root
         _set_parent(obj, parent)
         _apply_matrix_buffer(obj, node.matrix_f32)
-        _apply_animation(obj, node)
+        has_visibility_animation = _node_has_effective_visibility_animation(index, node_lookup)
+        _apply_animation(obj, node, skip_visibility=has_visibility_animation)
+        if has_visibility_animation:
+            _apply_effective_node_visibility_animation(obj, index, node_lookup)
         if obj.type == "EMPTY":
             _hide_helper_object(obj)
 
     return objects
 
 
-def _new_scene_node_object(node: SceneNodeData, index: int) -> bpy.types.Object:
+def _effective_static_node_visibility_map(nodes: list[SceneNodeData]) -> dict[int, bool]:
+    visibility: dict[int, bool] = {}
+    animated = [_node_has_visibility_animation(node) for node in nodes]
+    count = len(nodes)
+
+    for index in range(count):
+        if index in visibility:
+            continue
+
+        stack: list[int] = []
+        seen: set[int] = set()
+        current = index
+        while 0 <= current < count and current not in visibility and current not in seen:
+            seen.add(current)
+            stack.append(current)
+            current = nodes[current].parent_index
+
+        inherited = visibility.get(current, True) if 0 <= current < count else True
+        while stack:
+            node_index = stack.pop()
+            if not animated[node_index]:
+                inherited = inherited and bool(nodes[node_index].visible)
+            visibility[node_index] = inherited
+
+    return visibility
+
+
+def _node_object_visibility_map(
+    nodes: list[SceneNodeData],
+    static_visibility: dict[int, bool],
+) -> dict[int, bool]:
+    visibility: dict[int, bool] = {}
+    for index, node in enumerate(nodes):
+        inherited = static_visibility.get(index, True)
+        visibility[index] = inherited and bool(node.visible) if _node_has_visibility_animation(node) else inherited
+    return visibility
+
+
+def _node_has_visibility_animation(node: SceneNodeData) -> bool:
+    for channel in node.anim_channels or ():
+        if int(channel.get("target") or 0) == _ANIM_VISIBILITY:
+            return True
+    return False
+
+
+def _node_has_effective_visibility_animation(
+    node_index: int,
+    node_data: dict[int, SceneNodeData],
+) -> bool:
+    if node_index < 0 or not node_data:
+        return False
+    for ancestor_index in _node_ancestor_chain(node_index, node_data):
+        node = node_data.get(ancestor_index)
+        if node and _node_has_visibility_animation(node):
+            return True
+    return False
+
+
+def _apply_effective_node_visibility_animation(
+    obj: bpy.types.Object,
+    node_index: int,
+    node_data: dict[int, SceneNodeData],
+) -> None:
+    if node_index < 0 or not node_data:
+        return
+
+    chain = _node_ancestor_chain(node_index, node_data)
+    channels_by_clip = _visibility_channels_by_clip(chain, node_data)
+    if not channels_by_clip:
+        return
+
+    scene = bpy.context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    end_frame = scene.frame_end
+    actions: list[bpy.types.Action] = []
+
+    for clip_key, node_channels in channels_by_clip.items():
+        channels = [channel for channel_list in node_channels.values() for channel in channel_list]
+        key_times = _animation_key_times(channels)
+        if not key_times:
+            continue
+        if key_times[0] > 0.0:
+            key_times.insert(0, 0.0)
+
+        action = _visibility_action_for(obj, channels[0])
+        actions.append(action)
+        coords = array("f", [0.0]) * (len(key_times) * 2)
+        for key_index, time_value in enumerate(key_times):
+            coords[key_index * 2] = time_value * fps
+            coords[key_index * 2 + 1] = 0.0 if _effective_visibility_at_time(
+                chain,
+                node_data,
+                node_channels,
+                time_value,
+            ) else 1.0
+
+        for path in ("hide_viewport", "hide_render"):
+            _remove_fcurves(action, path)
+            fcurve = _ensure_fcurve(action, obj, path, None, group_name="Visibility")
+            _write_fcurve_points(fcurve, coords, "CONSTANT")
+
+        end_frame = max(end_frame, int(key_times[-1] * fps + 0.5))
+
+    for action in actions:
+        _stash_animation_action(obj, action)
+    if end_frame > scene.frame_end:
+        scene.frame_end = end_frame
+
+
+def _node_ancestor_chain(
+    node_index: int,
+    node_data: dict[int, SceneNodeData],
+) -> list[int]:
+    chain: list[int] = []
+    seen: set[int] = set()
+    current = node_index
+    while current >= 0 and current in node_data and current not in seen:
+        seen.add(current)
+        chain.append(current)
+        current = node_data[current].parent_index
+    chain.reverse()
+    return chain
+
+
+def _visibility_channels_by_clip(
+    chain: list[int],
+    node_data: dict[int, SceneNodeData],
+) -> dict[tuple[int, str], dict[int, list[dict]]]:
+    clips: dict[tuple[int, str], dict[int, list[dict]]] = {}
+    for node_index in chain:
+        node = node_data.get(node_index)
+        if not node:
+            continue
+        for channel in node.anim_channels or ():
+            if int(channel.get("target") or 0) != _ANIM_VISIBILITY:
+                continue
+            clip_key = _channel_action_clip(channel)
+            clips.setdefault(clip_key, {}).setdefault(node_index, []).append(channel)
+    return clips
+
+
+def _effective_visibility_at_time(
+    chain: list[int],
+    node_data: dict[int, SceneNodeData],
+    channels_by_node: dict[int, list[dict]],
+    time_value: float,
+) -> bool:
+    for node_index in chain:
+        node = node_data.get(node_index)
+        if not node:
+            continue
+        channels = channels_by_node.get(node_index)
+        if channels:
+            visible = _visibility_channels_value(channels, node.visible, time_value)
+        else:
+            visible = bool(node.visible)
+        if not visible:
+            return False
+    return True
+
+
+def _visibility_channels_value(
+    channels: list[dict],
+    fallback: bool,
+    time_value: float,
+) -> bool:
+    value = 1.0 if fallback else 0.0
+    for channel in channels:
+        count = int(channel.get("count") or 0)
+        value_width = int(channel.get("value_width") or 0)
+        times = _buffer_view(channel.get("times_f32") or b"", "f")
+        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        if count <= 0 or value_width <= 0 or times is None or values is None:
+            continue
+        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        value = _sample_anim_scalar(times, values, count, value_width, 0, time_value, interpolation)
+    return value >= 0.5
+
+
+def _visibility_action_for(obj: bpy.types.Object, channel: dict) -> bpy.types.Action:
+    action = _existing_action_for_clip(obj, "", channel)
+    if action:
+        return action
+
+    obj.animation_data_create()
+    action = bpy.data.actions.new(_animation_action_name(obj.name, "", channel))
+    action.use_fake_user = True
+    clip_index, _clip_name = _channel_action_clip(channel)
+    if obj.animation_data.action is None or clip_index == 0:
+        obj.animation_data.action = action
+    return action
+
+
+def _existing_action_for_clip(
+    obj: bpy.types.Object,
+    suffix: str,
+    channel: dict,
+) -> bpy.types.Action | None:
+    if not obj.animation_data:
+        return None
+
+    name = _animation_action_name(obj.name, suffix, channel)
+    active = obj.animation_data.action
+    if active and _action_name_matches(active.name, name):
+        return active
+
+    for track in obj.animation_data.nla_tracks:
+        for strip in track.strips:
+            action = strip.action
+            if action and _action_name_matches(action.name, name):
+                return action
+    return None
+
+
+def _action_name_matches(candidate: str, expected: str) -> bool:
+    return candidate == expected or candidate.startswith(f"{expected}.")
+
+
+def _remove_fcurves(action: bpy.types.Action, data_path: str) -> None:
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is None:
+        return
+    for fcurve in list(fcurves):
+        if fcurve.data_path == data_path:
+            fcurves.remove(fcurve)
+
+
+def _new_scene_node_object(node: SceneNodeData, index: int, visible: bool) -> bpy.types.Object:
     name = node.name or f"AssetKitNode_{index}"
 
     if node.camera_type:
         camera = bpy.data.cameras.new(node.camera_name or name)
         _configure_camera(camera, node)
+        _set_assetkit_json_prop(camera, "assetkit_camera_extra_json", node.camera_extra)
+        _set_assetkit_json_prop(camera, "assetkit_camera_imager_extra_json", node.camera_imager_extra)
         obj = bpy.data.objects.new(name, camera)
-        _set_node_visibility(obj, node.visible)
-        _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
+        _set_node_visibility(obj, visible)
+        _set_assetkit_node_props(obj, node)
         return obj
 
     if node.light_type:
         light = bpy.data.lights.new(node.light_name or name, _blender_light_type(node.light_type))
         _configure_light(light, node)
+        _set_assetkit_json_prop(light, "assetkit_light_extra_json", node.light_extra)
         obj = bpy.data.objects.new(name, light)
-        _set_node_visibility(obj, node.visible)
-        _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
+        _set_node_visibility(obj, visible)
+        _set_assetkit_node_props(obj, node)
         return obj
 
     obj = bpy.data.objects.new(name, None)
     obj.empty_display_type = "PLAIN_AXES"
     obj.empty_display_size = 0.35
-    _set_node_visibility(obj, node.visible)
-    _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
+    _set_node_visibility(obj, visible)
+    _set_assetkit_node_props(obj, node)
     return obj
+
+
+def _set_assetkit_node_props(obj: bpy.types.Object, node: SceneNodeData) -> None:
+    _set_assetkit_json_prop(obj, "assetkit_node_extra_json", node.extra)
+    _set_assetkit_json_prop(obj, "assetkit_node_layers_json", node.layers)
 
 
 def _configure_camera(camera: bpy.types.Camera, node: SceneNodeData) -> None:
@@ -1524,10 +2099,12 @@ def _set_node_visibility(obj: bpy.types.Object, visible: bool) -> None:
 
 
 def _hide_helper_object(obj: bpy.types.Object) -> None:
-    obj.hide_select = True
     if obj.type == "EMPTY":
-        obj.empty_display_size = 0.0
+        obj.hide_select = False
+        obj.empty_display_size = max(0.1, min(obj.empty_display_size, 0.35))
+        return
 
+    obj.hide_select = True
     action = obj.animation_data.action if obj.animation_data else None
     if action and any(fcurve.data_path in {"hide_viewport", "hide_render"} for fcurve in _iter_action_fcurves(action)):
         return
@@ -1640,7 +2217,12 @@ def _buffer_view(buffer: object, fmt: str) -> memoryview | None:
     return view.cast(fmt)
 
 
-def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+def _apply_animation(
+    obj: bpy.types.Object,
+    data: MeshPrimitiveData,
+    *,
+    skip_visibility: bool = False,
+) -> None:
     channels = data.anim_channels or []
     if not channels:
         return
@@ -1655,10 +2237,23 @@ def _apply_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
     actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
+    converted_targets, cone_end_frame = _apply_light_spot_cone_animations(
+        obj,
+        channels,
+        actions,
+        written_fcurves,
+        fps,
+        start_frame,
+    )
+    end_frame = max(end_frame, cone_end_frame)
 
     for channel in channels:
         target = int(channel.get("target") or 0)
+        if target in converted_targets:
+            continue
         if target == _ANIM_VISIBILITY:
+            if skip_visibility:
+                continue
             action = _animation_action_for(obj, obj, actions, "", channel)
             end_frame = max(end_frame, _apply_visibility_animation_channel(obj, action, channel, fps, start_frame))
             continue
@@ -1835,6 +2430,109 @@ def _set_nla_strip_action_slot(strip, action: bpy.types.Action, owner: bpy.types
         strip.action_slot = slot
     except Exception:
         pass
+
+
+def _apply_light_spot_cone_animations(
+    obj: bpy.types.Object,
+    channels: list[dict],
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]],
+    written_fcurves: set[tuple[int, int, str, int]],
+    fps: float,
+    start_frame: float,
+) -> tuple[set[int], int]:
+    data = getattr(obj, "data", None)
+    if obj.type != "LIGHT" or not data or getattr(data, "type", "") != "SPOT":
+        return set(), bpy.context.scene.frame_end
+    if not hasattr(data, "spot_size") or not hasattr(data, "spot_blend"):
+        return set(), bpy.context.scene.frame_end
+
+    cone_channels = {
+        _ANIM_LIGHT_SPOT_INNER: [
+            channel for channel in channels
+            if int(channel.get("target") or 0) == _ANIM_LIGHT_SPOT_INNER
+        ],
+        _ANIM_LIGHT_SPOT_OUTER: [
+            channel for channel in channels
+            if int(channel.get("target") or 0) == _ANIM_LIGHT_SPOT_OUTER
+        ],
+    }
+    if not cone_channels[_ANIM_LIGHT_SPOT_INNER] and not cone_channels[_ANIM_LIGHT_SPOT_OUTER]:
+        return set(), bpy.context.scene.frame_end
+
+    key_times = _animation_key_times(cone_channels[_ANIM_LIGHT_SPOT_INNER] + cone_channels[_ANIM_LIGHT_SPOT_OUTER])
+    if not key_times:
+        return set(), bpy.context.scene.frame_end
+
+    outer_fallback = max(float(data.spot_size) * 0.5, 1.0e-6)
+    inner_fallback = outer_fallback * max(0.0, min(1.0, 1.0 - float(data.spot_blend)))
+    first_channel = cone_channels[_ANIM_LIGHT_SPOT_OUTER][0] if cone_channels[_ANIM_LIGHT_SPOT_OUTER] else cone_channels[_ANIM_LIGHT_SPOT_INNER][0]
+    action = _animation_action_for(obj, data, actions, "_Data", first_channel)
+    interpolation = _merged_animation_interpolation(cone_channels[_ANIM_LIGHT_SPOT_INNER] + cone_channels[_ANIM_LIGHT_SPOT_OUTER])
+    converted: set[int] = set()
+
+    if cone_channels[_ANIM_LIGHT_SPOT_OUTER]:
+        coords = array("f", [0.0]) * (len(key_times) * 2)
+        for key_index, time_value in enumerate(key_times):
+            outer = _animation_sample_scalar(cone_channels[_ANIM_LIGHT_SPOT_OUTER], outer_fallback, time_value)
+            coords[key_index * 2] = start_frame + time_value * fps
+            coords[key_index * 2 + 1] = max(0.0, float(outer)) * 2.0
+        write_key = _fcurve_write_key(data, first_channel, "spot_size", None)
+        if write_key not in written_fcurves:
+            written_fcurves.add(write_key)
+            fcurve = _ensure_fcurve(action, data, "spot_size", None, group_name="Light")
+            _write_fcurve_points(fcurve, coords, interpolation)
+        converted.add(_ANIM_LIGHT_SPOT_OUTER)
+
+    coords = array("f", [0.0]) * (len(key_times) * 2)
+    for key_index, time_value in enumerate(key_times):
+        inner = _animation_sample_scalar(cone_channels[_ANIM_LIGHT_SPOT_INNER], inner_fallback, time_value)
+        outer = _animation_sample_scalar(cone_channels[_ANIM_LIGHT_SPOT_OUTER], outer_fallback, time_value)
+        coords[key_index * 2] = start_frame + time_value * fps
+        coords[key_index * 2 + 1] = _spot_blend_from_angles(inner, outer)
+    write_key = _fcurve_write_key(data, first_channel, "spot_blend", None)
+    if write_key not in written_fcurves:
+        written_fcurves.add(write_key)
+        fcurve = _ensure_fcurve(action, data, "spot_blend", None, group_name="Light")
+        _write_fcurve_points(fcurve, coords, interpolation)
+    converted.add(_ANIM_LIGHT_SPOT_INNER)
+
+    return converted, int(start_frame + key_times[-1] * fps + 0.5)
+
+
+def _spot_blend_from_angles(inner: float, outer: float) -> float:
+    outer = max(float(outer), 1.0e-6)
+    inner = max(0.0, min(float(inner), outer))
+    return max(0.0, min(1.0, 1.0 - inner / outer))
+
+
+def _animation_key_times(channels: list[dict]) -> list[float]:
+    values: set[float] = set()
+    for channel in channels:
+        count = int(channel.get("count") or 0)
+        times = _buffer_view(channel.get("times_f32") or b"", "f")
+        if count <= 0 or times is None:
+            continue
+        for index in range(min(count, len(times))):
+            values.add(float(times[index]))
+    return sorted(values)
+
+
+def _merged_animation_interpolation(channels: list[dict]) -> str:
+    for channel in channels:
+        if _blender_interpolation(int(channel.get("interpolation") or 0)) != "CONSTANT":
+            return "LINEAR"
+    return "CONSTANT"
+
+
+def _animation_sample_scalar(
+    channels: list[dict],
+    fallback: float,
+    time_value: float,
+) -> float:
+    values = [float(fallback)]
+    for channel in channels:
+        _texture_transform_sample_into(values, channel, time_value)
+    return values[0]
 
 
 def _anim_channel_target(
@@ -2015,6 +2713,34 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
         scene.frame_end = end_frame
 
 
+def _apply_morph_presets(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    presets = data.morph_presets or []
+    shape_keys = obj.data.shape_keys if obj.data else None
+    if not presets or not shape_keys or len(shape_keys.key_blocks) <= 1:
+        return
+
+    target_count = len(shape_keys.key_blocks) - 1
+    written = 0
+    for preset in presets:
+        name = str(preset.get("name") or f"Preset {written + 1}")
+        weights = [float(value) for value in preset.get("weights") or ()]
+        if not weights:
+            continue
+
+        prefix = f"assetkit_morph_preset_{written}"
+        obj[f"{prefix}_name"] = name
+        obj[f"{prefix}_weights_json"] = json.dumps(
+            weights[:target_count],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        obj[f"{prefix}_target_count"] = min(target_count, len(weights))
+        written += 1
+
+    if written:
+        obj["assetkit_morph_preset_count"] = written
+
+
 def _apply_skin(
     obj: bpy.types.Object,
     data: MeshPrimitiveData,
@@ -2047,6 +2773,8 @@ def _apply_skin(
     modifier = obj.modifiers.new("AssetKit Skin", "ARMATURE")
     modifier.object = armature
     modifier.use_vertex_groups = True
+    if _skin_uses_bind_pose_armature(data):
+        _parent_skinned_mesh_to_armature(obj, armature)
 
 
 def _apply_skin_bind_shape(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> None:
@@ -2101,6 +2829,7 @@ def _create_skin_vertex_groups(
         groups.append(group)
 
     group_count = len(groups)
+    assignments: list[dict[float, list[int]] | None] = [None] * group_count
     for vertex_index in range(vertex_count):
         base = vertex_index * width
         for slot in range(width):
@@ -2109,7 +2838,18 @@ def _create_skin_vertex_groups(
                 continue
             joint_index = int(joints[base + slot])
             if 0 <= joint_index < group_count:
-                groups[joint_index].add((vertex_index,), weight, "REPLACE")
+                group_assignments = assignments[joint_index]
+                if group_assignments is None:
+                    group_assignments = {}
+                    assignments[joint_index] = group_assignments
+                group_assignments.setdefault(float(weight), []).append(vertex_index)
+
+    for joint_index, group_assignments in enumerate(assignments):
+        if not group_assignments:
+            continue
+        group = groups[joint_index]
+        for weight, indices in group_assignments.items():
+            group.add(indices, weight, "REPLACE")
 
     return [group.name for group in groups]
 
@@ -2129,7 +2869,8 @@ def _create_skin_armature(
     armature_data = bpy.data.armatures.new(f"{obj.name}_Armature")
     armature = bpy.data.objects.new(f"{obj.name}_Armature", armature_data)
     collection.objects.link(armature)
-    _match_object_space(armature, obj)
+    armature_source = _skin_armature_source(data, joint_nodes, node_objects, node_data) or obj
+    _match_object_space(armature, armature_source)
 
     previous_active = bpy.context.view_layer.objects.active
     previous_selection = list(bpy.context.selected_objects)
@@ -2142,50 +2883,61 @@ def _create_skin_armature(
     bpy.ops.object.mode_set(mode="EDIT")
 
     edit_bones = armature_data.edit_bones
-    rest_matrices = _joint_rest_matrices(data, joint_nodes, armature)
-    positions = (
-        [matrix.to_translation() for matrix in rest_matrices]
-        if rest_matrices
-        else _joint_positions(joint_nodes, node_objects, armature)
-    )
+    bone_node_indices = _skin_bone_node_indices(data, joint_nodes, node_data)
     node_to_joint = {
         int(joint_nodes[index]): index
         for index in range(min(len(joint_nodes), len(joint_names)))
         if int(joint_nodes[index]) >= 0
     }
+    bone_names_by_node = _skin_bone_names_by_node(bone_node_indices, node_objects, node_to_joint, joint_names)
+    rest_matrices_by_node = _skin_rest_matrices_by_node(
+        data,
+        joint_nodes,
+        node_objects,
+        node_data,
+        armature,
+        bone_node_indices,
+    )
 
-    for index, name in enumerate(joint_names):
+    for node_index in bone_node_indices:
+        name = bone_names_by_node.get(node_index)
+        if not name:
+            continue
         bone = edit_bones.new(name)
-        if rest_matrices:
-            _set_bone_from_rest_matrix(
-                bone,
-                rest_matrices[index],
-                _joint_length(index, joint_nodes, node_objects, node_to_joint, positions),
-            )
-        else:
-            head = positions[index]
-            tail = _joint_tail(index, joint_nodes, node_objects, node_to_joint, positions)
-            bone.head = head
-            bone.tail = tail
+        matrix = rest_matrices_by_node.get(node_index)
+        if matrix is None:
+            matrix = _node_rest_matrix(node_index, node_objects, armature)
+        _set_bone_from_rest_matrix(
+            bone,
+            matrix,
+            _skin_bone_length(node_index, bone_node_indices, node_data, rest_matrices_by_node),
+        )
 
-    for index, name in enumerate(joint_names):
-        node_index = int(joint_nodes[index]) if index < len(joint_nodes) else -1
-        node = node_objects.get(node_index)
-        parent = node.parent if node else None
+    for node_index, name in bone_names_by_node.items():
         parent_joint = None
-        while parent and parent_joint is None:
-            for candidate_node_index, candidate_joint in node_to_joint.items():
-                if node_objects.get(candidate_node_index) == parent:
-                    parent_joint = candidate_joint
-                    break
-            parent = parent.parent
-        if parent_joint is not None and parent_joint < len(joint_names):
-            edit_bones[name].parent = edit_bones[joint_names[parent_joint]]
+        parent_index = node_data.get(node_index).parent_index if node_data.get(node_index) else -1
+        while parent_index >= 0 and parent_joint is None:
+            parent_name = bone_names_by_node.get(parent_index)
+            if parent_name:
+                parent_joint = parent_name
+                break
+            parent_node = node_data.get(parent_index)
+            parent_index = parent_node.parent_index if parent_node else -1
+        if parent_joint is not None and parent_joint in edit_bones:
+            edit_bones[name].parent = edit_bones[parent_joint]
 
     bpy.ops.object.mode_set(mode="OBJECT")
-    if not _bind_pose_bones_to_nodes(armature, joint_names, joint_nodes, node_objects):
+    if _skin_uses_bind_pose_armature(data):
+        root_node = node_data.get(int(data.skin_root_node_index))
+        if root_node:
+            _apply_animation(armature, root_node)
         _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
-    _match_object_space(armature, obj)
+    elif not _bind_bones_to_nodes(armature, bone_names_by_node, node_objects):
+        _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
+    if _skin_uses_bind_pose_armature(data):
+        _parent_bind_pose_armature_to_coord_root(armature, node_objects, node_data)
+    else:
+        _match_object_space(armature, armature_source)
     _hide_helper_object(armature)
 
     bpy.ops.object.select_all(action="DESELECT")
@@ -2195,23 +2947,196 @@ def _create_skin_armature(
     return armature
 
 
-def _joint_rest_matrices(
+def _skin_bone_node_indices(
     data: MeshPrimitiveData,
     joint_nodes: memoryview,
+    node_data: dict[int, SceneNodeData],
+) -> list[int]:
+    joint_indices = [int(joint_nodes[index]) for index in range(len(joint_nodes)) if int(joint_nodes[index]) >= 0]
+    return joint_indices
+
+
+def _skin_uses_bind_pose_armature(data: MeshPrimitiveData) -> bool:
+    return bool(data.skin_mesh_in_bind_pose)
+
+
+def _skin_armature_source(
+    data: MeshPrimitiveData,
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+) -> bpy.types.Object | None:
+    root_index = int(data.skin_root_node_index)
+    if root_index >= 0 and root_index in node_objects:
+        return node_objects[root_index]
+
+    if len(joint_nodes) == 0:
+        return None
+
+    first_index = int(joint_nodes[0])
+    first_node = node_data.get(first_index)
+    parent_index = first_node.parent_index if first_node else -1
+    if parent_index >= 0 and parent_index in node_objects:
+        return node_objects[parent_index]
+    return node_objects.get(first_index)
+
+
+def _parent_skinned_mesh_to_armature(
+    obj: bpy.types.Object,
     armature: bpy.types.Object,
-) -> list[Matrix]:
+) -> None:
+    obj.parent = armature
+    obj.matrix_parent_inverse.identity()
+    obj.matrix_local = Matrix.Identity(4)
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
+
+
+def _parent_bind_pose_armature_to_coord_root(
+    armature: bpy.types.Object,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+) -> None:
+    armature.parent = _scene_coord_root_for_nodes(node_objects, node_data)
+    armature.matrix_parent_inverse.identity()
+    armature.matrix_local = Matrix.Identity(4)
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
+
+
+def _scene_coord_root_for_nodes(
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+) -> bpy.types.Object | None:
+    node_object_set = set(node_objects.values())
+    for index, node in node_data.items():
+        if node.parent_index >= 0:
+            continue
+        obj = node_objects.get(index)
+        if obj and obj.parent and obj.parent not in node_object_set:
+            return obj.parent
+    return None
+
+
+def _skin_bone_names_by_node(
+    bone_node_indices: list[int],
+    node_objects: dict[int, bpy.types.Object],
+    node_to_joint: dict[int, int],
+    joint_names: list[str],
+) -> dict[int, str]:
+    names: dict[int, str] = {}
+    for node_index in bone_node_indices:
+        joint_index = node_to_joint.get(node_index)
+        if joint_index is not None and joint_index < len(joint_names):
+            names[node_index] = joint_names[joint_index]
+            continue
+        node = node_objects.get(node_index)
+        names[node_index] = node.name if node else f"AssetKitBone_{node_index}"
+    return names
+
+
+def _skin_rest_matrices_by_node(
+    data: MeshPrimitiveData,
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+    armature: bpy.types.Object,
+    bone_node_indices: list[int],
+) -> dict[int, Matrix]:
+    if _skin_uses_bind_pose_armature(data):
+        return _skin_rest_matrices_from_assetkit_nodes(data, node_data, bone_node_indices)
+
+    matrices = {node_index: _node_rest_matrix(node_index, node_objects, armature) for node_index in bone_node_indices}
     values = _buffer_view(data.skin_inverse_bind_matrices_f32, "f")
     if values is None or len(values) < len(joint_nodes) * 16:
-        return []
+        return matrices
 
     coord_matrix = _matrix_from_buffer(data.coord_matrix_f32) or Matrix.Identity(4)
+    bind_coord_matrix = coord_matrix
     world_to_armature = armature.matrix_world.inverted_safe()
-    matrices = []
     for index in range(len(joint_nodes)):
+        node_index = int(joint_nodes[index])
+        if node_index < 0:
+            continue
         inverse_bind = _matrix_from_values(values, index * 16)
-        bind_world = coord_matrix @ inverse_bind.inverted_safe()
-        matrices.append(world_to_armature @ bind_world)
+        matrices[node_index] = world_to_armature @ (bind_coord_matrix @ inverse_bind.inverted_safe())
     return matrices
+
+
+def _skin_rest_matrices_from_assetkit_nodes(
+    data: MeshPrimitiveData,
+    node_data: dict[int, SceneNodeData],
+    bone_node_indices: list[int],
+) -> dict[int, Matrix]:
+    cache: dict[int, Matrix] = {}
+    root_index = int(data.skin_root_node_index)
+    root_world = _node_static_world_matrix(root_index, node_data, cache) if root_index >= 0 else Matrix.Identity(4)
+    root_inverse = root_world.inverted_safe()
+    return {
+        node_index: root_inverse @ _node_static_world_matrix(node_index, node_data, cache)
+        for node_index in bone_node_indices
+    }
+
+
+def _node_static_world_matrix(
+    node_index: int,
+    node_data: dict[int, SceneNodeData],
+    cache: dict[int, Matrix],
+) -> Matrix:
+    cached = cache.get(node_index)
+    if cached is not None:
+        return cached
+
+    stack: list[int] = []
+    current = node_index
+    while current >= 0 and current not in cache:
+        stack.append(current)
+        node = node_data.get(current)
+        current = node.parent_index if node else -1
+
+    matrix = cache.get(current, Matrix.Identity(4))
+    for index in reversed(stack):
+        node = node_data.get(index)
+        local = _matrix_from_buffer(node.matrix_f32) if node else None
+        matrix = matrix @ (local or Matrix.Identity(4))
+        cache[index] = matrix
+    return cache.get(node_index, Matrix.Identity(4))
+
+
+def _node_rest_matrix(
+    node_index: int,
+    node_objects: dict[int, bpy.types.Object],
+    armature: bpy.types.Object,
+) -> Matrix:
+    node = node_objects.get(node_index)
+    if not node:
+        return Matrix.Identity(4)
+    return armature.matrix_world.inverted_safe() @ node.matrix_world
+
+
+def _skin_bone_length(
+    node_index: int,
+    bone_node_indices: list[int],
+    node_data: dict[int, SceneNodeData],
+    rest_matrices_by_node: dict[int, Matrix],
+) -> float:
+    matrix = rest_matrices_by_node.get(node_index)
+    if matrix is None:
+        return 0.05
+    head = matrix.to_translation()
+    for child_index in bone_node_indices:
+        child = node_data.get(child_index)
+        if child and child.parent_index == node_index:
+            child_matrix = rest_matrices_by_node.get(child_index)
+            if child_matrix:
+                length = (child_matrix.to_translation() - head).length
+                if length > 1.0e-5:
+                    return length
+    return 0.05
 
 
 def _set_bone_from_rest_matrix(
@@ -2234,16 +3159,15 @@ def _set_bone_from_rest_matrix(
             pass
 
 
-def _bind_pose_bones_to_nodes(
+def _bind_bones_to_nodes(
     armature: bpy.types.Object,
-    joint_names: list[str],
-    joint_nodes: memoryview,
+    bone_names_by_node: dict[int, str],
     node_objects: dict[int, bpy.types.Object],
 ) -> bool:
     bound_any = False
-    for index, name in enumerate(joint_names):
+    for node_index, name in bone_names_by_node.items():
         pose_bone = armature.pose.bones.get(name)
-        node = node_objects.get(int(joint_nodes[index]) if index < len(joint_nodes) else -1)
+        node = node_objects.get(node_index)
         if not pose_bone or not node:
             continue
         constraint = pose_bone.constraints.new(type="COPY_TRANSFORMS")
@@ -2265,60 +3189,41 @@ def _match_object_space(target: bpy.types.Object, source: bpy.types.Object) -> N
         pass
 
 
-def _joint_positions(
-    joint_nodes: memoryview,
-    node_objects: dict[int, bpy.types.Object],
-    armature: bpy.types.Object,
-) -> list[Vector]:
-    positions = []
-    world_to_armature = armature.matrix_world.inverted_safe()
-    for index in range(len(joint_nodes)):
-        node = node_objects.get(int(joint_nodes[index]))
-        if node:
-            positions.append(world_to_armature @ node.matrix_world.to_translation())
-        else:
-            positions.append(Vector((0.0, float(index) * 0.05, 0.0)))
-    return positions
+def _pose_bone_edit_local_matrix(pose_bone: bpy.types.PoseBone) -> Matrix:
+    matrix = pose_bone.bone.matrix_local.copy()
+    parent = pose_bone.parent
+    if parent:
+        return parent.bone.matrix_local.inverted_safe() @ matrix
+    return matrix
 
 
-def _joint_length(
-    joint_index: int,
-    joint_nodes: memoryview,
-    node_objects: dict[int, bpy.types.Object],
-    node_to_joint: dict[int, int],
-    positions: list[Vector],
-) -> float:
-    head = positions[joint_index]
-    node = node_objects.get(int(joint_nodes[joint_index])) if joint_index < len(joint_nodes) else None
-    if node:
-        length: float | None = None
-        for child_node_index, child_joint_index in node_to_joint.items():
-            child = node_objects.get(child_node_index)
-            if child and child.parent == node and child_joint_index < len(positions):
-                child_length = (positions[child_joint_index] - head).length
-                if child_length > 1.0e-5:
-                    length = child_length if length is None else min(length, child_length)
-        if length is not None:
-            return length
-    return 0.05
+def _bone_anim_sample(
+    pose_bone: bpy.types.PoseBone,
+    target: int,
+    values: memoryview,
+    value_width: int,
+    key_index: int,
+) -> tuple[float, ...] | None:
+    base = key_index * value_width
+    edit_matrix = _pose_bone_edit_local_matrix(pose_bone)
+    edit_translation = edit_matrix.to_translation()
+    edit_rotation_inv = edit_matrix.to_quaternion().conjugated()
 
+    if target == _ANIM_TRANSLATION and value_width >= 3:
+        translation = Vector((values[base], values[base + 1], values[base + 2]))
+        corrected = edit_rotation_inv @ (translation - edit_translation)
+        return corrected.x, corrected.y, corrected.z
 
-def _joint_tail(
-    joint_index: int,
-    joint_nodes: memoryview,
-    node_objects: dict[int, bpy.types.Object],
-    node_to_joint: dict[int, int],
-    positions: list[Vector],
-) -> Vector:
-    node = node_objects.get(int(joint_nodes[joint_index])) if joint_index < len(joint_nodes) else None
-    if node:
-        for child_node_index, child_joint_index in node_to_joint.items():
-            child = node_objects.get(child_node_index)
-            if child and child.parent == node and child_joint_index < len(positions):
-                tail = positions[child_joint_index]
-                if (tail - positions[joint_index]).length > 1.0e-5:
-                    return tail
-    return positions[joint_index] + Vector((0.0, 0.05, 0.0))
+    if target == _ANIM_ROTATION_QUAT and value_width >= 4:
+        rotation = Quaternion((values[base], values[base + 1], values[base + 2], values[base + 3]))
+        corrected = edit_rotation_inv @ rotation
+        corrected.normalize()
+        return corrected.w, corrected.x, corrected.y, corrected.z
+
+    if target == _ANIM_SCALE and value_width >= 3:
+        return values[base], values[base + 1], values[base + 2]
+
+    return None
 
 
 def _apply_bone_animations(
@@ -2381,8 +3286,17 @@ def _apply_bone_animations(
                 fcurve = _ensure_fcurve(action, armature, data_path, target_index, group_name=name)
                 coords = array("f", [0.0]) * (count * 2)
                 for key_index in range(count):
+                    sample = (
+                        None
+                        if is_partial
+                        else _bone_anim_sample(pose_bone, target, values, value_width, key_index)
+                    )
                     coords[key_index * 2] = times[key_index] * fps
-                    coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
+                    coords[key_index * 2 + 1] = (
+                        sample[target_index]
+                        if sample is not None and target_index < len(sample)
+                        else values[key_index * value_width + value_index]
+                    )
 
                 _write_fcurve_points(
                     fcurve,
@@ -2390,8 +3304,8 @@ def _apply_bone_animations(
                     interpolation,
                     times=times,
                     fps=fps,
-                    in_tangents=in_tangents,
-                    out_tangents=out_tangents,
+                    in_tangents=None if not is_partial else in_tangents,
+                    out_tangents=None if not is_partial else out_tangents,
                     value_width=value_width,
                     value_index=value_index,
                 )
@@ -2419,6 +3333,13 @@ def _ensure_fcurve(
     ensure = getattr(action, "fcurve_ensure_for_datablock", None)
     if not ensure:
         raise RuntimeError("Blender Action API does not expose fcurve creation")
+
+    try:
+        obj.animation_data_create()
+        if obj.animation_data.action != action:
+            obj.animation_data.action = action
+    except Exception:
+        pass
 
     if index is None:
         fcurve = ensure(obj, data_path, group_name=group_name)
@@ -2650,7 +3571,7 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
         "has_sheen": bool(raw.get("has_sheen", data.has_sheen)),
         "material_type": _raw_int(raw, "material_type", data.material_type),
         "file_type": _raw_int(raw, "file_type", data.file_type),
-        "texture_infos": _raw_texture_infos(raw.get("texture_infos") or {}),
+        "texture_infos": _variant_texture_infos(data.texture_infos, raw.get("texture_infos") or {}),
         "material_extra": raw.get("material_extra"),
         "effect_extra": raw.get("effect_extra"),
     }
@@ -2687,6 +3608,10 @@ def _raw_texture_infos(raw_infos: dict) -> dict[str, TextureRefData]:
         texture_infos[str(role)] = TextureRefData(
             role=str(role),
             path=info.get("path") or "",
+            image_name=info.get("image_name") or "",
+            sampler_name=info.get("sampler_name") or "",
+            color_space=info.get("color_space") or "",
+            channels=info.get("channels") or "",
             texcoord=info.get("texcoord") or "",
             coord_input_name=info.get("coord_input_name") or "",
             slot=int(info.get("slot") or 0),
@@ -2701,14 +3626,81 @@ def _raw_texture_infos(raw_infos: dict) -> dict[str, TextureRefData]:
             transform_scale=tuple(info.get("transform_scale") or (1.0, 1.0)),
             transform_rotation=_raw_float(info, "transform_rotation", 0.0),
             transform_slot=int(info.get("transform_slot") if info.get("transform_slot") is not None else -1),
+            image_extra=info.get("image_extra"),
+            sampler_extra=info.get("sampler_extra"),
         )
     return texture_infos
 
 
+def _variant_texture_infos(
+    base_infos: dict[str, TextureRefData] | None,
+    raw_infos: dict,
+) -> dict[str, TextureRefData]:
+    texture_infos = {
+        role: replace(info)
+        for role, info in (base_infos or {}).items()
+    }
+    texture_infos.update(_raw_texture_infos(raw_infos))
+    return texture_infos
+
+
 def _apply_assetkit_extra_props(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    obj["assetkit_primitive_type"] = int(data.primitive_type)
+    obj["assetkit_primitive_mode"] = int(data.primitive_mode)
+    obj["assetkit_vertex_count"] = int(data.vertex_count)
+    obj["assetkit_loop_count"] = int(data.loop_count)
+    obj["assetkit_face_count"] = int(data.face_count)
+    obj["assetkit_node_index"] = int(data.node_index)
+    obj["assetkit_zero_copy_flags"] = int(data.zero_copy_flags)
     _set_assetkit_json_prop(obj, "assetkit_primitive_extra_json", data.primitive_extra)
     _set_assetkit_json_prop(obj, "assetkit_mesh_extra_json", data.mesh_extra)
     _set_assetkit_json_prop(obj, "assetkit_geometry_extra_json", data.geometry_extra)
+    _apply_gaussian_splat_props(obj, data)
+
+
+def _apply_gaussian_splat_props(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
+    if not data.has_gsplat:
+        return
+
+    obj["assetkit_gaussian_splat"] = True
+    obj["assetkit_gaussian_splat_kernel"] = _gsplat_kernel_name(data.gsplat_kernel)
+    obj["assetkit_gaussian_splat_color_space"] = _gsplat_color_space_name(data.gsplat_color_space)
+    obj["assetkit_gaussian_splat_projection"] = _gsplat_projection_name(data.gsplat_projection)
+    obj["assetkit_gaussian_splat_sorting_method"] = _gsplat_sorting_method_name(
+        data.gsplat_sorting_method
+    )
+    obj["assetkit_gaussian_splat_decoded_count"] = int(data.gsplat_decoded_count)
+    obj["assetkit_gaussian_splat_kernel_value"] = int(data.gsplat_kernel)
+    obj["assetkit_gaussian_splat_color_space_value"] = int(data.gsplat_color_space)
+    obj["assetkit_gaussian_splat_projection_value"] = int(data.gsplat_projection)
+    obj["assetkit_gaussian_splat_sorting_method_value"] = int(data.gsplat_sorting_method)
+
+
+def _gsplat_kernel_name(value: int) -> str:
+    return {
+        1: "ellipse",
+    }.get(int(value), "unknown")
+
+
+def _gsplat_color_space_name(value: int) -> str:
+    return {
+        1: "srgb_rec709_display",
+        2: "lin_rec709_display",
+    }.get(int(value), "unknown")
+
+
+def _gsplat_projection_name(value: int) -> str:
+    return {
+        0: "perspective",
+        1: "orthographic",
+    }.get(int(value), "unknown")
+
+
+def _gsplat_sorting_method_name(value: int) -> str:
+    return {
+        0: "camera_distance",
+        1: "none",
+    }.get(int(value), "unknown")
 
 
 def _create_material(
@@ -2731,13 +3723,7 @@ def _create_material(
     mat.diffuse_color = base_color
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
-    if data.alpha_mode == 0:
-        mat.blend_method = "OPAQUE"
-    elif data.alpha_mode == 1:
-        mat.blend_method = "BLEND"
-    elif data.alpha_mode == 2:
-        mat.blend_method = "CLIP"
-        mat.alpha_threshold = data.alpha_cutoff
+    _set_material_alpha_mode(mat, data)
 
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     if not bsdf:
@@ -2777,8 +3763,12 @@ def _create_material(
         _set_first_input(bsdf, ("Anisotropic",), data.anisotropy)
         _set_first_input(bsdf, ("Anisotropic Rotation",), _blender_anisotropy_rotation(data.anisotropy_rotation))
         _set_first_input(bsdf, ("Thin Film IOR",), data.iridescence_ior)
+        _set_first_input(bsdf, ("Thin Film Weight", "Iridescence Weight", "Iridescence"), data.iridescence)
+        _set_first_input(bsdf, ("Dispersion",), data.dispersion)
         if data.iridescence or data.iridescence_thickness_texture:
             _set_first_input(bsdf, ("Thin Film Thickness",), data.iridescence_thickness_maximum)
+        _set_first_input(bsdf, ("Diffuse Transmission Weight", "Diffuse Transmission"), data.diffuse_transmission)
+        _set_first_input(bsdf, ("Diffuse Transmission Color",), (*data.diffuse_transmission_color, 1.0))
 
     _set_input(color_target, color_input, base_color)
     if alpha_socket:
@@ -2800,6 +3790,8 @@ def _create_material(
             bsdf,
             data.metallic_roughness_texture,
             _texture_info(data, "metallic_roughness"),
+            metallic_factor=data.metallic,
+            roughness_factor=data.roughness,
         )
     if data.occlusion_texture and bsdf == color_target:
         _link_occlusion_texture(mat, bsdf, data, settings_node)
@@ -2913,7 +3905,19 @@ def _create_material(
             tex_info=_texture_info(data, "iridescence_thickness"),
         )
     if data.iridescence_texture:
-        if settings_node:
+        iridescence_inputs = ("Thin Film Weight", "Iridescence Weight", "Iridescence")
+        if _has_input(bsdf, iridescence_inputs):
+            _link_factor_texture(
+                mat,
+                bsdf,
+                data.iridescence_texture,
+                iridescence_inputs,
+                colorspace="Non-Color",
+                channel="Red",
+                factor=data.iridescence,
+                tex_info=_texture_info(data, "iridescence"),
+            )
+        elif settings_node:
             _link_factor_texture(
                 mat,
                 settings_node,
@@ -2924,19 +3928,20 @@ def _create_material(
                 factor=data.iridescence,
                 tex_info=_texture_info(data, "iridescence"),
             )
-        else:
+    if data.volume_thickness_texture:
+        volume_inputs = ("Volume Thickness", "Thickness")
+        if _has_input(bsdf, volume_inputs):
             _link_factor_texture(
                 mat,
                 bsdf,
-                data.iridescence_texture,
-                ("Thin Film Weight", "Iridescence Weight", "Iridescence"),
+                data.volume_thickness_texture,
+                volume_inputs,
                 colorspace="Non-Color",
-                channel="Red",
-                factor=data.iridescence,
-                tex_info=_texture_info(data, "iridescence"),
+                channel="Green",
+                factor=data.volume_thickness,
+                tex_info=_texture_info(data, "volume_thickness"),
             )
-    if data.volume_thickness_texture:
-        if settings_node:
+        elif settings_node:
             _link_factor_texture(
                 mat,
                 settings_node,
@@ -2947,40 +3952,21 @@ def _create_material(
                 factor=data.volume_thickness,
                 tex_info=_texture_info(data, "volume_thickness"),
             )
-        else:
-            _link_factor_texture(
-                mat,
-                bsdf,
-                data.volume_thickness_texture,
-                ("Volume Thickness", "Thickness"),
-                colorspace="Non-Color",
-                channel="Green",
-                factor=data.volume_thickness,
-                tex_info=_texture_info(data, "volume_thickness"),
-            )
+    diffuse_transmission_inputs = ("Diffuse Transmission Weight", "Diffuse Transmission")
     if data.anisotropy_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.anisotropy_texture,
-            ("Anisotropic",),
-            colorspace="Non-Color",
-            channel="Blue",
-            factor=data.anisotropy,
-            tex_info=_texture_info(data, "anisotropy"),
-        )
-    if data.diffuse_transmission_texture:
+        _link_anisotropy_texture(mat, bsdf, data)
+    if data.diffuse_transmission_texture and _has_input(bsdf, diffuse_transmission_inputs):
         _link_factor_texture(
             mat,
             bsdf,
             data.diffuse_transmission_texture,
-            ("Diffuse Transmission Weight", "Diffuse Transmission"),
+            diffuse_transmission_inputs,
             colorspace="Non-Color",
             channel="Alpha",
             factor=data.diffuse_transmission,
             tex_info=_texture_info(data, "diffuse_transmission"),
         )
-    if data.diffuse_transmission_color_texture:
+    if data.diffuse_transmission_color_texture and _has_input(bsdf, ("Diffuse Transmission Color",)):
         _link_color_texture(
             mat,
             bsdf,
@@ -2990,8 +3976,12 @@ def _create_material(
             factor=(*data.diffuse_transmission_color, 1.0),
             tex_info=_texture_info(data, "diffuse_transmission_color"),
         )
+    if _has_diffuse_transmission(data) and not _has_input(bsdf, diffuse_transmission_inputs):
+        _link_diffuse_transmission_shader(mat, data)
     if data.volume_thickness > 0.0:
         _link_volume_absorption(mat, data)
+    if _has_volume_scatter(data):
+        _link_volume_scatter(mat, data)
 
     _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket, settings_node)
 
@@ -3020,9 +4010,24 @@ def _apply_material_animation(
     actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
+    converted_texture_location_roles, tex_end_frame = _apply_texture_transform_location_animations(
+        mat,
+        data,
+        actions,
+        written_fcurves,
+        channels,
+        fps,
+    )
+    end_frame = max(end_frame, tex_end_frame)
 
     for channel in channels:
         target = int(channel.get("target") or 0)
+        tex_role = _texture_anim_role(target)
+        if (
+            tex_role in converted_texture_location_roles
+            and _texture_anim_prop(target) == _ANIM_TEXTURE_TRANSFORM_OFFSET
+        ):
+            continue
         width = _material_anim_width(target)
         if width <= 0:
             continue
@@ -3145,6 +4150,199 @@ def _material_anim_width(target: int) -> int:
     return 0
 
 
+def _apply_texture_transform_location_animations(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]],
+    written_fcurves: set[tuple[int, int, str, int]],
+    channels: list[dict],
+    fps: float,
+) -> tuple[set[str], int]:
+    by_role: dict[str, dict[int, list[dict]]] = {}
+    for channel in channels:
+        target = int(channel.get("target") or 0)
+        role = _texture_anim_role(target)
+        prop = _texture_anim_prop(target)
+        if role and prop in {
+            _ANIM_TEXTURE_TRANSFORM_OFFSET,
+            _ANIM_TEXTURE_TRANSFORM_SCALE,
+            _ANIM_TEXTURE_TRANSFORM_ROTATION,
+        }:
+            by_role.setdefault(role, {}).setdefault(prop, []).append(channel)
+
+    converted_roles: set[str] = set()
+    end_frame = bpy.context.scene.frame_end
+
+    for role, prop_channels in by_role.items():
+        tex_info = _texture_info(data, role)
+        mapping = _texture_mapping_node(mat, role)
+        if not tex_info or not mapping:
+            continue
+        socket = mapping.inputs.get("Location")
+        if not socket:
+            continue
+
+        key_times = _texture_transform_key_times(prop_channels)
+        if not key_times:
+            continue
+
+        path = socket.path_from_id("default_value")
+        action = _animation_action_for(mat, mat.node_tree, actions, "_Nodes", _first_texture_transform_channel(prop_channels))
+        interpolation = _texture_transform_location_interpolation(prop_channels)
+
+        coords = [array("f", [0.0]) * (len(key_times) * 2) for _ in range(2)]
+        for key_index, time_value in enumerate(key_times):
+            offset = _texture_transform_sample_vec2(
+                prop_channels.get(_ANIM_TEXTURE_TRANSFORM_OFFSET, []),
+                tex_info.transform_offset,
+                time_value,
+            )
+            scale = _texture_transform_sample_vec2(
+                prop_channels.get(_ANIM_TEXTURE_TRANSFORM_SCALE, []),
+                tex_info.transform_scale,
+                time_value,
+            )
+            rotation = _texture_transform_sample_scalar(
+                prop_channels.get(_ANIM_TEXTURE_TRANSFORM_ROTATION, []),
+                float(tex_info.transform_rotation),
+                time_value,
+            )
+            blender_offset, _, _ = _texture_transform_values_gltf_to_blender(offset, rotation, scale)
+            frame = time_value * fps
+            for component in range(2):
+                coords[component][key_index * 2] = frame
+                coords[component][key_index * 2 + 1] = blender_offset[component]
+
+        first_channel = _first_texture_transform_channel(prop_channels)
+        for component in range(2):
+            write_key = _fcurve_write_key(mat.node_tree, first_channel, path, component)
+            if write_key in written_fcurves:
+                continue
+            written_fcurves.add(write_key)
+            fcurve = _ensure_fcurve(action, mat.node_tree, path, component, group_name="Texture Transform")
+            _write_fcurve_points(fcurve, coords[component], interpolation)
+
+        converted_roles.add(role)
+        end_frame = max(end_frame, int(key_times[-1] * fps + 0.5))
+
+    return converted_roles, end_frame
+
+
+def _first_texture_transform_channel(prop_channels: dict[int, list[dict]]) -> dict:
+    for prop in (
+        _ANIM_TEXTURE_TRANSFORM_OFFSET,
+        _ANIM_TEXTURE_TRANSFORM_SCALE,
+        _ANIM_TEXTURE_TRANSFORM_ROTATION,
+    ):
+        channels = prop_channels.get(prop) or []
+        if channels:
+            return channels[0]
+    return {}
+
+
+def _texture_transform_key_times(prop_channels: dict[int, list[dict]]) -> list[float]:
+    values: set[float] = set()
+    for channels in prop_channels.values():
+        for channel in channels:
+            count = int(channel.get("count") or 0)
+            times = _buffer_view(channel.get("times_f32") or b"", "f")
+            if count <= 0 or times is None:
+                continue
+            for index in range(min(count, len(times))):
+                values.add(float(times[index]))
+    return sorted(values)
+
+
+def _texture_transform_location_interpolation(prop_channels: dict[int, list[dict]]) -> str:
+    interpolation = "CONSTANT"
+    for channels in prop_channels.values():
+        for channel in channels:
+            if _blender_interpolation(int(channel.get("interpolation") or 0)) != "CONSTANT":
+                return "LINEAR"
+    return interpolation
+
+
+def _texture_transform_sample_vec2(
+    channels: list[dict],
+    fallback: tuple[float, float],
+    time_value: float,
+) -> tuple[float, float]:
+    values = [float(fallback[0]), float(fallback[1])]
+    for channel in channels:
+        _texture_transform_sample_into(values, channel, time_value)
+    return values[0], values[1]
+
+
+def _texture_transform_sample_scalar(
+    channels: list[dict],
+    fallback: float,
+    time_value: float,
+) -> float:
+    values = [float(fallback)]
+    for channel in channels:
+        _texture_transform_sample_into(values, channel, time_value)
+    return values[0]
+
+
+def _texture_transform_sample_into(values: list[float], channel: dict, time_value: float) -> None:
+    count = int(channel.get("count") or 0)
+    value_width = int(channel.get("value_width") or 0)
+    target_offset = int(channel.get("target_offset") or 0)
+    is_partial = bool(channel.get("is_partial"))
+    times = _buffer_view(channel.get("times_f32") or b"", "f")
+    raw_values = _buffer_view(channel.get("values_f32") or b"", "f")
+    if count <= 0 or value_width <= 0 or times is None or raw_values is None:
+        return
+
+    width = len(values)
+    if target_offset >= width:
+        return
+    component_count = 1 if is_partial else min(width - target_offset, value_width)
+    interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+    for component in range(component_count):
+        target_index = target_offset + component
+        value_index = 0 if is_partial else component
+        values[target_index] = _sample_anim_scalar(times, raw_values, count, value_width, value_index, time_value, interpolation)
+
+
+def _sample_anim_scalar(
+    times: memoryview,
+    values: memoryview,
+    count: int,
+    value_width: int,
+    value_index: int,
+    time_value: float,
+    interpolation: str,
+) -> float:
+    if count <= 1 or time_value <= float(times[0]):
+        return float(values[value_index])
+
+    last = min(count, len(times)) - 1
+    if time_value >= float(times[last]):
+        return float(values[last * value_width + value_index])
+
+    prev = 0
+    for index in range(1, last + 1):
+        if time_value <= float(times[index]):
+            prev = index - 1
+            next_index = index
+            break
+    else:
+        return float(values[last * value_width + value_index])
+
+    prev_value = float(values[prev * value_width + value_index])
+    if interpolation == "CONSTANT":
+        return prev_value
+
+    next_time = float(times[next_index])
+    prev_time = float(times[prev])
+    if next_time <= prev_time:
+        return prev_value
+    next_value = float(values[next_index * value_width + value_index])
+    factor = (time_value - prev_time) / (next_time - prev_time)
+    return prev_value + (next_value - prev_value) * factor
+
+
 def _material_anim_channel_target(
     mat: bpy.types.Material,
     bsdf,
@@ -3180,6 +4378,18 @@ def _material_anim_channel_target(
         index = None if socket == alpha_socket else target_index
         return mat.node_tree, socket.path_from_id("default_value"), index, "Material"
 
+    if target == _ANIM_MATERIAL_NORMAL_SCALE:
+        node = _normal_map_node(mat, "normal")
+        socket = _first_input(node, ("Strength",))
+        if socket:
+            return mat.node_tree, socket.path_from_id("default_value"), None, "Normal"
+
+    if target == _ANIM_MATERIAL_CLEARCOAT_NORMAL_SCALE:
+        node = _normal_map_node(mat, "clearcoat_normal")
+        socket = _first_input(node, ("Strength",))
+        if socket:
+            return mat.node_tree, socket.path_from_id("default_value"), None, "Normal"
+
     socket_target = {
         _ANIM_MATERIAL_METALLIC: ("Metallic",),
         _ANIM_MATERIAL_ROUGHNESS: ("Roughness",),
@@ -3192,8 +4402,12 @@ def _material_anim_channel_target(
         _ANIM_MATERIAL_SHEEN_ROUGHNESS: ("Sheen Roughness",),
         _ANIM_MATERIAL_ANISOTROPY: ("Anisotropic",),
         _ANIM_MATERIAL_ANISOTROPY_ROTATION: ("Anisotropic Rotation",),
+        _ANIM_MATERIAL_IRIDESCENCE: ("Thin Film Weight", "Iridescence Weight", "Iridescence"),
         _ANIM_MATERIAL_IRIDESCENCE_IOR: ("Thin Film IOR",),
         _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MAXIMUM: ("Thin Film Thickness",),
+        _ANIM_MATERIAL_VOLUME_THICKNESS: ("Volume Thickness",),
+        _ANIM_MATERIAL_DISPERSION: ("Dispersion",),
+        _ANIM_MATERIAL_DIFFUSE_TRANSMISSION: ("Diffuse Transmission Weight", "Diffuse Transmission"),
     }.get(target)
     if socket_target:
         socket = _first_input(bsdf, socket_target)
@@ -3204,6 +4418,7 @@ def _material_anim_channel_target(
         _ANIM_MATERIAL_EMISSIVE_COLOR: ("Emission Color",),
         _ANIM_MATERIAL_SPECULAR_COLOR: ("Specular Tint",),
         _ANIM_MATERIAL_SHEEN_COLOR: ("Sheen Tint",),
+        _ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR: ("Diffuse Transmission Color",),
     }.get(target)
     if color_socket_target:
         socket = _first_input(bsdf, color_socket_target)
@@ -3212,6 +4427,24 @@ def _material_anim_channel_target(
 
     if target == _ANIM_MATERIAL_ALPHA_CUTOFF:
         return mat, "alpha_threshold", None, "Material"
+
+    if target == _ANIM_MATERIAL_DIFFUSE_TRANSMISSION:
+        node = _assetkit_node(mat, "assetkit_diffuse_transmission_node", "mix")
+        socket = _first_input(node, ("Fac",))
+        if socket and not socket.is_linked:
+            return mat.node_tree, socket.path_from_id("default_value"), None, "Diffuse Transmission"
+
+    if target == _ANIM_MATERIAL_DIFFUSE_TRANSMISSION_COLOR:
+        node = _assetkit_node(mat, "assetkit_diffuse_transmission_node", "translucent")
+        socket = _first_input(node, ("Color",))
+        if socket and not socket.is_linked:
+            return mat.node_tree, socket.path_from_id("default_value"), target_index, "Diffuse Transmission"
+
+    if target == _ANIM_MATERIAL_VOLUME_ATTENUATION_COLOR:
+        node = _assetkit_node(mat, "assetkit_volume_node", "absorption")
+        socket = _first_input(node, ("Color",))
+        if socket:
+            return mat.node_tree, socket.path_from_id("default_value"), target_index, "Volume"
 
     settings_socket_target = {
         _ANIM_MATERIAL_OCCLUSION_STRENGTH: ("Occlusion",),
@@ -3260,6 +4493,10 @@ def _first_input(node, names: tuple[str, ...]):
     return None
 
 
+def _has_input(node, names: tuple[str, ...]) -> bool:
+    return _first_input(node, names) is not None
+
+
 def _texture_anim_role(target: int) -> str:
     if target < _ANIM_TEXTURE_TRANSFORM_BASE:
         return ""
@@ -3282,6 +4519,20 @@ def _texture_mapping_node(mat: bpy.types.Material, role: str):
         return None
     for node in node_tree.nodes:
         if node.bl_idname == "ShaderNodeMapping" and node.get("assetkit_texture_role") == role:
+            return node
+    return None
+
+
+def _normal_map_node(mat: bpy.types.Material, role: str):
+    return _assetkit_node(mat, "assetkit_normal_role", role)
+
+
+def _assetkit_node(mat: bpy.types.Material, key: str, value: str):
+    node_tree = mat.node_tree
+    if not node_tree:
+        return None
+    for node in node_tree.nodes:
+        if node.get(key) == value:
             return node
     return None
 
@@ -3311,7 +4562,7 @@ def _has_material_data(data: MeshPrimitiveData) -> bool:
 
 
 def _material_base_color(data: MeshPrimitiveData) -> tuple[float, float, float, float]:
-    if _uses_collada_transparent_as_surface_color(data):
+    if _uses_transparent_as_surface_color(data):
         return (
             float(data.transparent_color[0]),
             float(data.transparent_color[1]),
@@ -3321,9 +4572,7 @@ def _material_base_color(data: MeshPrimitiveData) -> tuple[float, float, float, 
     return data.base_color
 
 
-def _uses_collada_transparent_as_surface_color(data: MeshPrimitiveData) -> bool:
-    if int(data.file_type) != _AK_FILE_TYPE_COLLADA:
-        return False
+def _uses_transparent_as_surface_color(data: MeshPrimitiveData) -> bool:
     if data.base_color_texture or data.transparent_texture:
         return False
     if not _is_default_rgb(data.base_color):
@@ -3390,6 +4639,56 @@ def _is_double_sided_material(data: MeshPrimitiveData) -> bool:
         or float(data.transmission) > 0.0
         or float(data.diffuse_transmission) > 0.0
     )
+
+
+def _set_transparency_overlap(mat: bpy.types.Material, enabled: bool) -> None:
+    if hasattr(mat, "use_transparency_overlap"):
+        mat.use_transparency_overlap = enabled
+    elif hasattr(mat, "show_transparent_back"):
+        mat.show_transparent_back = enabled
+
+
+def _set_material_alpha_mode(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
+    alpha_mode = int(data.alpha_mode)
+    if alpha_mode == 0:
+        mat.blend_method = "OPAQUE"
+    elif alpha_mode == 1:
+        if _prefers_hashed_transparency(data):
+            _set_material_enum(mat, "blend_method", "HASHED", "BLEND")
+            _set_material_enum(mat, "surface_render_method", "DITHERED")
+        else:
+            mat.blend_method = "BLEND"
+            _set_material_enum(mat, "surface_render_method", "BLENDED")
+        _set_transparency_overlap(mat, False)
+    elif alpha_mode == 2:
+        mat.blend_method = "CLIP"
+        _set_material_enum(mat, "surface_render_method", "DITHERED")
+        mat.alpha_threshold = data.alpha_cutoff
+        _set_transparency_overlap(mat, False)
+
+
+def _prefers_hashed_transparency(data: MeshPrimitiveData) -> bool:
+    if not data.transparent_texture and not _uses_transparent_as_surface_color(data):
+        return False
+    return int(data.transparent_opaque) in {
+        _AK_OPAQUE_A_ZERO,
+        _AK_OPAQUE_RGB_ZERO,
+    }
+
+
+def _set_material_enum(mat: bpy.types.Material, attr: str, *values: str) -> bool:
+    if not hasattr(mat, attr):
+        return False
+    prop = mat.bl_rna.properties.get(attr)
+    enum_values = {item.identifier for item in prop.enum_items} if prop else set()
+    for value in values:
+        if not enum_values or value in enum_values:
+            try:
+                setattr(mat, attr, value)
+                return True
+            except TypeError:
+                continue
+    return False
 
 
 def _has_emission(data: MeshPrimitiveData) -> bool:
@@ -3536,6 +4835,10 @@ def _texture_infos_cache_key(texture_infos: dict[str, TextureRefData] | None) ->
             (
                 role,
                 info.path,
+                info.image_name,
+                info.sampler_name,
+                info.color_space,
+                info.channels,
                 info.texcoord,
                 info.coord_input_name,
                 int(info.slot),
@@ -3550,6 +4853,8 @@ def _texture_infos_cache_key(texture_infos: dict[str, TextureRefData] | None) ->
                 _round_tuple(info.transform_scale),
                 round(float(info.transform_rotation), 6),
                 int(info.transform_slot),
+                _json_cache_key(info.image_extra),
+                _json_cache_key(info.sampler_extra),
             )
         )
     return tuple(items)
@@ -3567,6 +4872,10 @@ def _json_cache_key(value: object | None) -> str:
 def _color_attribute_name(data: MeshPrimitiveData) -> str:
     if data.color_sets:
         return data.color_sets[0].name or "Color"
+    for attr in data.point_attrs or ():
+        name = attr.name or ""
+        if _is_color_attribute_name(name):
+            return name
     if data.colors_f32:
         return "Color"
     return ""
@@ -3635,6 +4944,9 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_diffuse_transmission_color_texture": data.diffuse_transmission_color_texture,
         "assetkit_transparent_texture": data.transparent_texture,
     }
+    scatter_color = _volume_scatter_color(data)
+    if scatter_color:
+        props["assetkit_volume_scatter_multiscatter_color"] = scatter_color
     for key, value in props.items():
         if value == "" or value == 0.0:
             continue
@@ -3643,14 +4955,28 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
     for role, info in (data.texture_infos or {}).items():
         prefix = f"assetkit_texture_{role}"
         mat[f"{prefix}_slot"] = info.slot
+        if info.image_name:
+            mat[f"{prefix}_image_name"] = info.image_name
+        if info.sampler_name:
+            mat[f"{prefix}_sampler_name"] = info.sampler_name
+        if info.color_space:
+            mat[f"{prefix}_color_space"] = info.color_space
+        if info.channels:
+            mat[f"{prefix}_channels"] = info.channels
         if info.texcoord:
             mat[f"{prefix}_texcoord"] = info.texcoord
         if info.coord_input_name:
             mat[f"{prefix}_coord_input_name"] = info.coord_input_name
         mat[f"{prefix}_wrap_s"] = info.wrap_s
         mat[f"{prefix}_wrap_t"] = info.wrap_t
+        mat[f"{prefix}_wrap_p"] = info.wrap_p
         mat[f"{prefix}_min_filter"] = info.min_filter
         mat[f"{prefix}_mag_filter"] = info.mag_filter
+        mat[f"{prefix}_mip_filter"] = info.mip_filter
+        mat[f"{prefix}_extension"] = _texture_extension(info)
+        mat[f"{prefix}_interpolation"] = _texture_interpolation(info)
+        _set_assetkit_json_prop(mat, f"{prefix}_image_extra_json", info.image_extra)
+        _set_assetkit_json_prop(mat, f"{prefix}_sampler_extra_json", info.sampler_extra)
         if info.has_transform:
             mat[f"{prefix}_transform_offset"] = info.transform_offset
             mat[f"{prefix}_transform_scale"] = info.transform_scale
@@ -3765,6 +5091,99 @@ def _set_assetkit_json_prop(target, key: str, value: object | None) -> None:
         target[key] = payload
 
 
+def _material_extra_extension(data: MeshPrimitiveData, name: str) -> object | None:
+    extensions = _assetkit_extra_path(data.material_extra, "extensions")
+    return _assetkit_extra_path(extensions, name)
+
+
+def _assetkit_extra_path(value: object | None, *path: str) -> object | None:
+    node = value
+    for name in path:
+        node = _assetkit_extra_child(node, name)
+        if node is None:
+            return None
+    return node
+
+
+def _assetkit_extra_child(value: object | None, name: str) -> object | None:
+    if not isinstance(value, dict):
+        return None
+    for child in value.get("children") or ():
+        if isinstance(child, dict) and child.get("name") == name:
+            return child
+    return None
+
+
+def _assetkit_extra_float(value: object | None, default: float = 0.0) -> float:
+    if not isinstance(value, dict):
+        return default
+    try:
+        return float(value.get("value"))
+    except (TypeError, ValueError):
+        return default
+
+
+def _assetkit_extra_float_array(value: object | None, limit: int) -> tuple[float, ...]:
+    if not isinstance(value, dict):
+        return ()
+    items = []
+    for child in value.get("children") or ():
+        items.append(_assetkit_extra_float(child))
+        if len(items) >= limit:
+            break
+    return tuple(items)
+
+
+def _assetkit_extra_plain_value(value: object | None) -> object | None:
+    if not isinstance(value, dict):
+        return None
+
+    attrs = value.get("attributes") if isinstance(value.get("attributes"), dict) else {}
+    node_type = attrs.get("type")
+    children = [child for child in (value.get("children") or ()) if isinstance(child, dict)]
+
+    if node_type == "array":
+        return [_assetkit_extra_plain_value(child) for child in children]
+
+    if node_type == "object" or children:
+        out = {}
+        for child in children:
+            key = str(child.get("name") or "item")
+            child_value = _assetkit_extra_plain_value(child)
+            if key in out:
+                current = out[key]
+                if not isinstance(current, list):
+                    out[key] = [current]
+                out[key].append(child_value)
+            else:
+                out[key] = child_value
+        return out
+
+    return _assetkit_extra_plain_scalar(value.get("value"))
+
+
+def _assetkit_extra_plain_scalar(value: object | None) -> object | None:
+    if value is None:
+        return None
+
+    text = str(value)
+    if text == "":
+        return ""
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    if text == "null":
+        return None
+
+    try:
+        if "." not in text and "e" not in text and "E" not in text:
+            return int(text)
+        return float(text)
+    except ValueError:
+        return text
+
+
 def _texture_info(data: MeshPrimitiveData, role: str) -> TextureRefData | None:
     return (data.texture_infos or {}).get(role)
 
@@ -3835,16 +5254,31 @@ def _link_factor_texture(
     factor: float = 1.0,
     tex_info: TextureRefData | None = None,
 ) -> None:
-    output = _image_texture_channel(mat, path, colorspace, channel, tex_info)
+    output = _factor_texture_output(mat, path, colorspace, channel, factor, tex_info)
     if not output:
         return
-    if factor != 1.0:
-        output = _multiply_value_factor(mat, output, factor, f"{channel} Factor")
     for input_name in input_names:
         socket = target.inputs.get(input_name)
         if socket:
             mat.node_tree.links.new(output, socket)
             return
+
+
+def _factor_texture_output(
+    mat: bpy.types.Material,
+    path: str,
+    colorspace: str,
+    channel: str,
+    factor: float = 1.0,
+    tex_info: TextureRefData | None = None,
+):
+    channel = _texture_channel_name(tex_info, channel)
+    output = _image_texture_channel(mat, path, colorspace, channel, tex_info)
+    if not output:
+        return None
+    if factor != 1.0:
+        output = _multiply_value_factor(mat, output, factor, f"{channel} Factor")
+    return output
 
 
 def _link_specular_glossiness_texture(
@@ -3853,6 +5287,7 @@ def _link_specular_glossiness_texture(
     data: MeshPrimitiveData,
 ) -> None:
     tex_info = _texture_info(data, "specular")
+    gloss_info = replace(tex_info, color_space="") if tex_info else None
     _link_color_texture(
         mat,
         bsdf,
@@ -3863,7 +5298,7 @@ def _link_specular_glossiness_texture(
         tex_info=tex_info,
     )
 
-    output = _image_texture_channel(mat, data.specular_texture, "Non-Color", "Alpha", tex_info)
+    output = _image_texture_channel(mat, data.specular_texture, "Non-Color", "Alpha", gloss_info)
     if not output:
         return
     if data.specular_strength != 1.0:
@@ -3885,6 +5320,7 @@ def _link_range_texture(
     maximum: float,
     tex_info: TextureRefData | None = None,
 ) -> None:
+    channel = _texture_channel_name(tex_info, channel)
     output = _image_texture_channel(mat, path, colorspace, channel, tex_info)
     if not output:
         return
@@ -3976,10 +5412,15 @@ def _link_occlusion_texture(
     if not tex:
         return
 
-    ao_output = tex.outputs.get("Color")
-    strength = float(data.occlusion_strength)
+    ao_output = _separate_color_channel(
+        mat,
+        tex.outputs.get("Color"),
+        _texture_channel_name(_texture_info(data, "occlusion"), "Red"),
+    )
+    strength = max(0.0, min(1.0, float(data.occlusion_strength)))
     if strength != 1.0:
-        ao_output = _mix_color_factor(mat, ao_output, (1.0, 1.0, 1.0), strength, "Occlusion Strength")
+        ao_output = _multiply_value_factor(mat, ao_output, strength, "Occlusion Strength")
+        ao_output = _add_value_factor(mat, ao_output, 1.0 - strength, "Occlusion Base")
     if settings_node and ao_output:
         socket = settings_node.inputs.get("Occlusion")
         if socket:
@@ -4039,6 +5480,8 @@ def _link_volume_absorption(mat: bpy.types.Material, data: MeshPrimitiveData) ->
         volume = nodes.new("ShaderNodeVolumeAbsorption")
     except Exception:
         return
+    volume.label = "AssetKit Volume Absorption"
+    volume["assetkit_volume_node"] = "absorption"
 
     color = volume.inputs.get("Color")
     if color:
@@ -4052,6 +5495,70 @@ def _link_volume_absorption(mat: bpy.types.Material, data: MeshPrimitiveData) ->
     volume_output = volume.outputs.get("Volume")
     if volume_output:
         links.new(volume_output, output.inputs["Volume"])
+
+
+def _has_volume_scatter(data: MeshPrimitiveData) -> bool:
+    return bool(_volume_scatter_color(data))
+
+
+def _volume_scatter_color(data: MeshPrimitiveData) -> tuple[float, float, float] | None:
+    ext = _material_extra_extension(data, "KHR_materials_volume_scatter")
+    color = _assetkit_extra_float_array(_assetkit_extra_child(ext, "multiscatterColorFactor"), 3)
+    if len(color) != 3:
+        return None
+    return tuple(max(0.0, min(1.0, float(value))) for value in color)
+
+
+def _link_volume_scatter(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
+    color = _volume_scatter_color(data)
+    if not color:
+        return
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    output = nodes.get("Material Output")
+    if not output or "Volume" not in output.inputs:
+        return
+
+    try:
+        scatter = nodes.new("ShaderNodeVolumeScatter")
+    except Exception:
+        return
+    scatter.label = "AssetKit Volume Scatter"
+    scatter["assetkit_volume_node"] = "scatter"
+
+    color_socket = scatter.inputs.get("Color")
+    if color_socket:
+        color_socket.default_value = (*color, 1.0)
+
+    density = scatter.inputs.get("Density")
+    if density:
+        distance = float(data.volume_attenuation_distance)
+        if distance > 0.0 and distance < 1000000.0:
+            density.default_value = min(1.0 / distance, 1.0)
+        else:
+            density.default_value = max(0.0, min(float(data.volume_thickness), 1.0))
+
+    volume_output = scatter.outputs.get("Volume")
+    volume_input = output.inputs.get("Volume")
+    if not volume_output or not volume_input:
+        return
+
+    previous = volume_input.links[0].from_socket if volume_input.links else None
+    if previous is None:
+        links.new(volume_output, volume_input)
+        return
+
+    try:
+        add = nodes.new("ShaderNodeAddShader")
+    except Exception:
+        return
+    add.label = "AssetKit Volume"
+    for link in list(volume_input.links):
+        links.remove(link)
+    links.new(previous, add.inputs[0])
+    links.new(volume_output, add.inputs[1])
+    links.new(add.outputs.get("Shader"), volume_input)
 
 
 def _vertex_color_node(mat: bpy.types.Material, name: str):
@@ -4277,12 +5784,19 @@ def _link_transparent_texture(
     alpha_socket,
     data: MeshPrimitiveData,
 ) -> None:
-    tex = _image_texture_node(mat, data.transparent_texture, "Non-Color", _texture_info(data, "transparent"))
+    tex_info = _texture_info(data, "transparent")
+    tex = _image_texture_node(mat, data.transparent_texture, "Non-Color", tex_info)
     if not tex:
         return
 
     opaque = int(data.transparent_opaque)
-    if opaque in {_AK_OPAQUE_RGB_ONE, _AK_OPAQUE_RGB_ZERO}:
+    channel = _texture_channel_name(tex_info, "")
+    if channel:
+        if channel == "Alpha":
+            output = tex.outputs.get("Alpha") or _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent Alpha")
+        else:
+            output = _separate_color_channel(mat, tex.outputs.get("Color"), channel)
+    elif opaque in {_AK_OPAQUE_RGB_ONE, _AK_OPAQUE_RGB_ZERO}:
         output = _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent RGB")
     else:
         output = tex.outputs.get("Alpha") or _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent Alpha")
@@ -4297,6 +5811,144 @@ def _link_transparent_texture(
         output = _one_minus_value(mat, output, "Transparent Invert")
 
     _replace_socket_link(mat, alpha_socket, output)
+
+
+def _has_diffuse_transmission(data: MeshPrimitiveData) -> bool:
+    return (
+        float(data.diffuse_transmission) > 0.0
+        or bool(data.diffuse_transmission_texture)
+        or bool(data.diffuse_transmission_color_texture)
+    )
+
+
+def _link_diffuse_transmission_shader(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    output = nodes.get("Material Output")
+    if not output:
+        return
+    surface = output.inputs.get("Surface")
+    if not surface:
+        return
+
+    previous = surface.links[0].from_socket if surface.links else None
+    if previous is None:
+        bsdf = nodes.get("Principled BSDF")
+        previous = bsdf.outputs.get("BSDF") if bsdf else None
+    if previous is None:
+        return
+
+    try:
+        translucent = nodes.new("ShaderNodeBsdfTranslucent")
+        mix = nodes.new("ShaderNodeMixShader")
+    except Exception:
+        return
+    translucent.label = "AssetKit Diffuse Transmission"
+    translucent["assetkit_diffuse_transmission_node"] = "translucent"
+    mix.label = "AssetKit Diffuse Transmission"
+    mix["assetkit_diffuse_transmission_node"] = "mix"
+
+    color_socket = translucent.inputs.get("Color")
+    if color_socket:
+        color_socket.default_value = (*data.diffuse_transmission_color, 1.0)
+        if data.diffuse_transmission_color_texture:
+            _link_color_texture(
+                mat,
+                translucent,
+                data.diffuse_transmission_color_texture,
+                ("Color",),
+                colorspace="sRGB",
+                factor=(*data.diffuse_transmission_color, 1.0),
+                tex_info=_texture_info(data, "diffuse_transmission_color"),
+            )
+
+    factor_output = None
+    if data.diffuse_transmission_texture:
+        factor_output = _factor_texture_output(
+            mat,
+            data.diffuse_transmission_texture,
+            "Non-Color",
+            "Alpha",
+            data.diffuse_transmission,
+            _texture_info(data, "diffuse_transmission"),
+        )
+    factor = mix.inputs.get("Fac")
+    if factor_output and factor:
+        links.new(factor_output, factor)
+    elif factor:
+        factor.default_value = max(0.0, min(1.0, float(data.diffuse_transmission)))
+
+    for link in list(surface.links):
+        links.remove(link)
+    links.new(previous, mix.inputs[1])
+    links.new(translucent.outputs.get("BSDF"), mix.inputs[2])
+    links.new(mix.outputs.get("Shader"), surface)
+
+
+def _link_anisotropy_texture(
+    mat: bpy.types.Material,
+    bsdf,
+    data: MeshPrimitiveData,
+) -> None:
+    tex_info = _texture_info(data, "anisotropy")
+    tex = _image_texture_node(mat, data.anisotropy_texture, "Non-Color", tex_info)
+    if not tex:
+        return
+
+    separate = mat.node_tree.nodes.new("ShaderNodeSeparateColor")
+    mat.node_tree.links.new(tex.outputs["Color"], separate.inputs["Color"])
+
+    strength = separate.outputs.get("Blue")
+    if strength:
+        if data.anisotropy != 1.0:
+            strength = _multiply_value_factor(mat, strength, data.anisotropy, "Anisotropy Factor")
+        socket = bsdf.inputs.get("Anisotropic")
+        if socket:
+            mat.node_tree.links.new(strength, socket)
+
+    rotation = _anisotropy_rotation_output(mat, separate, data.anisotropy_rotation)
+    socket = bsdf.inputs.get("Anisotropic Rotation")
+    if rotation and socket:
+        mat.node_tree.links.new(rotation, socket)
+
+    tangent = bsdf.inputs.get("Tangent")
+    if tangent:
+        try:
+            tangent_node = mat.node_tree.nodes.new("ShaderNodeTangent")
+            tangent_node.direction_type = "UV_MAP"
+            tangent_node.uv_map = _uv_layer_name(tex_info.slot if tex_info else 0)
+            mat.node_tree.links.new(tangent_node.outputs["Tangent"], tangent)
+        except Exception:
+            pass
+
+
+def _anisotropy_rotation_output(
+    mat: bpy.types.Material,
+    separate,
+    factor_rotation: float,
+):
+    red = separate.outputs.get("Red")
+    green = separate.outputs.get("Green")
+    if not red or not green:
+        return None
+
+    x = _add_value_factor(mat, _multiply_value_factor(mat, red, 2.0, "Anisotropy X Scale"), -1.0, "Anisotropy X Bias")
+    y = _add_value_factor(mat, _multiply_value_factor(mat, green, 2.0, "Anisotropy Y Scale"), -1.0, "Anisotropy Y Bias")
+
+    try:
+        atan = mat.node_tree.nodes.new("ShaderNodeMath")
+    except Exception:
+        return None
+    atan.label = "Anisotropy Rotation"
+    atan.operation = "ARCTAN2"
+    mat.node_tree.links.new(y, atan.inputs[0])
+    mat.node_tree.links.new(x, atan.inputs[1])
+    output = atan.outputs[0]
+
+    if factor_rotation != 0.0:
+        output = _add_value_factor(mat, output, factor_rotation, "Anisotropy Rotation Factor")
+
+    return _multiply_value_factor(mat, output, 1.0 / (2.0 * math.pi), "Anisotropy Rotation Units")
 
 
 def _replace_socket_link(mat: bpy.types.Material, socket, output) -> None:
@@ -4324,6 +5976,8 @@ def _link_metallic_roughness_texture(
     bsdf,
     path: str,
     tex_info: TextureRefData | None = None,
+    metallic_factor: float = 1.0,
+    roughness_factor: float = 1.0,
 ) -> None:
     tex = _image_texture_node(mat, path, "Non-Color", tex_info)
     if not tex:
@@ -4337,9 +5991,15 @@ def _link_metallic_roughness_texture(
     roughness = bsdf.inputs.get("Roughness")
     metallic = bsdf.inputs.get("Metallic")
     if roughness:
-        links.new(separate.outputs["Green"], roughness)
+        roughness_output = separate.outputs["Green"]
+        if roughness_factor != 1.0:
+            roughness_output = _multiply_value_factor(mat, roughness_output, roughness_factor, "Roughness Factor")
+        links.new(roughness_output, roughness)
     if metallic:
-        links.new(separate.outputs["Blue"], metallic)
+        metallic_output = separate.outputs["Blue"]
+        if metallic_factor != 1.0:
+            metallic_output = _multiply_value_factor(mat, metallic_output, metallic_factor, "Metallic Factor")
+        links.new(metallic_output, metallic)
 
 
 def _link_normal_texture(
@@ -4357,6 +6017,9 @@ def _link_normal_texture(
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
     normal_map = nodes.new("ShaderNodeNormalMap")
+    normal_map.label = f"AssetKit {(tex_info.role if tex_info else input_name)}"
+    if tex_info and tex_info.role:
+        normal_map["assetkit_normal_role"] = tex_info.role
     normal_map.inputs["Strength"].default_value = strength
     links.new(tex.outputs["Color"], normal_map.inputs["Color"])
     normal = bsdf.inputs.get(input_name)
@@ -4370,6 +6033,7 @@ def _image_texture_node(
     colorspace: str,
     tex_info: TextureRefData | None = None,
 ):
+    colorspace = _texture_color_space(tex_info, colorspace)
     image = _load_texture_image(path, colorspace)
     if not image:
         return None
@@ -4381,8 +6045,24 @@ def _image_texture_node(
         tex.label = f"AssetKit {tex_info.role}"
         tex["assetkit_texture_role"] = tex_info.role
         tex["assetkit_texture_slot"] = tex_info.slot
+        tex["assetkit_texture_colorspace"] = colorspace
+        if tex_info.image_name:
+            tex["assetkit_texture_image_name"] = tex_info.image_name
+        if tex_info.sampler_name:
+            tex["assetkit_texture_sampler_name"] = tex_info.sampler_name
+        if tex_info.channels:
+            tex["assetkit_texture_channels"] = tex_info.channels
+        _set_texture_sampler_props(tex, tex_info)
+        _set_assetkit_json_prop(tex, "assetkit_texture_image_extra_json", tex_info.image_extra)
+        _set_assetkit_json_prop(tex, "assetkit_texture_sampler_extra_json", tex_info.sampler_extra)
     _configure_texture_node(mat, tex, tex_info)
     return tex
+
+
+def _texture_color_space(tex_info: TextureRefData | None, fallback: str) -> str:
+    if tex_info and tex_info.color_space:
+        return tex_info.color_space
+    return fallback
 
 
 def _load_texture_image(path: str, colorspace: str):
@@ -4519,19 +6199,51 @@ def _image_texture_channel(
     tex = _image_texture_node(mat, path, colorspace, tex_info)
     if not tex:
         return None
+    channel = _texture_channel_name(tex_info, channel)
     if channel == "Alpha":
         return tex.outputs.get("Alpha") or tex.outputs.get("Color")
     if channel == "Color":
         return tex.outputs.get("Color")
 
-    nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
+    return _separate_color_channel(mat, tex.outputs.get("Color"), channel)
+
+
+def _texture_channel_name(tex_info: TextureRefData | None, fallback: str) -> str:
+    letters = _texture_channel_letters(tex_info)
+    if len(letters) != 1:
+        return fallback
+    return {
+        "R": "Red",
+        "G": "Green",
+        "B": "Blue",
+        "A": "Alpha",
+    }.get(letters[0], fallback)
+
+
+def _texture_channel_letters(tex_info: TextureRefData | None) -> tuple[str, ...]:
+    if not tex_info or not tex_info.channels:
+        return ()
+    seen = []
+    for letter in str(tex_info.channels).upper():
+        if letter in {"R", "G", "B", "A"} and letter not in seen:
+            seen.append(letter)
+    return tuple(seen)
+
+
+def _separate_color_channel(
+    mat: bpy.types.Material,
+    color_output,
+    channel: str,
+):
+    if color_output is None:
+        return None
+
     try:
-        separate = nodes.new("ShaderNodeSeparateColor")
-        links.new(tex.outputs["Color"], separate.inputs["Color"])
+        separate = mat.node_tree.nodes.new("ShaderNodeSeparateColor")
+        mat.node_tree.links.new(color_output, separate.inputs["Color"])
         return separate.outputs.get(channel)
     except Exception:
-        return tex.outputs.get("Color")
+        return color_output
 
 
 def _configure_texture_node(mat: bpy.types.Material, tex, tex_info: TextureRefData | None) -> None:
@@ -4541,31 +6253,66 @@ def _configure_texture_node(mat: bpy.types.Material, tex, tex_info: TextureRefDa
     tex.extension = _texture_extension(tex_info)
     tex.interpolation = _texture_interpolation(tex_info)
 
-    needs_uv_node = tex_info.slot > 0 or tex_info.has_transform
+    uv_slot = _texture_uv_slot(tex_info)
+    needs_uv_node = uv_slot > 0 or tex_info.has_transform
     if not needs_uv_node:
         return
 
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
     uv = nodes.new("ShaderNodeUVMap")
-    uv.uv_map = _uv_layer_name(tex_info.slot)
+    uv.uv_map = _uv_layer_name(uv_slot)
     vector_output = uv.outputs.get("UV")
 
     if tex_info.has_transform:
+        offset, rotation, scale = _texture_transform_gltf_to_blender(tex_info)
         mapping = nodes.new("ShaderNodeMapping")
         mapping.label = f"AssetKit {tex_info.role} Transform"
         mapping["assetkit_texture_role"] = tex_info.role
-        mapping.inputs["Location"].default_value[0] = tex_info.transform_offset[0]
-        mapping.inputs["Location"].default_value[1] = tex_info.transform_offset[1]
-        mapping.inputs["Rotation"].default_value[2] = tex_info.transform_rotation
-        mapping.inputs["Scale"].default_value[0] = tex_info.transform_scale[0]
-        mapping.inputs["Scale"].default_value[1] = tex_info.transform_scale[1]
+        if hasattr(mapping, "vector_type"):
+            mapping.vector_type = "POINT"
+        mapping.inputs["Location"].default_value[0] = offset[0]
+        mapping.inputs["Location"].default_value[1] = offset[1]
+        mapping.inputs["Rotation"].default_value[2] = rotation
+        mapping.inputs["Scale"].default_value[0] = scale[0]
+        mapping.inputs["Scale"].default_value[1] = scale[1]
         if vector_output:
             links.new(vector_output, mapping.inputs["Vector"])
         vector_output = mapping.outputs.get("Vector")
 
     if vector_output:
         links.new(vector_output, tex.inputs["Vector"])
+
+
+def _texture_uv_slot(tex_info: TextureRefData) -> int:
+    if tex_info.has_transform and tex_info.transform_slot >= 0:
+        return tex_info.transform_slot
+    return tex_info.slot
+
+
+def _texture_transform_gltf_to_blender(
+    tex_info: TextureRefData,
+) -> tuple[tuple[float, float], float, tuple[float, float]]:
+    return _texture_transform_values_gltf_to_blender(
+        tex_info.transform_offset,
+        float(tex_info.transform_rotation),
+        tex_info.transform_scale,
+    )
+
+
+def _texture_transform_values_gltf_to_blender(
+    offset: tuple[float, float],
+    rotation: float,
+    scale: tuple[float, float],
+) -> tuple[tuple[float, float], float, tuple[float, float]]:
+    return (
+        (
+            float(offset[0]) + float(scale[1]) * math.sin(rotation),
+            1.0 - float(offset[1]) - float(scale[1]) * math.cos(rotation),
+        ),
+        rotation,
+        (float(scale[0]), float(scale[1])),
+    )
 
 
 def _uv_layer_name(slot: int) -> str:
@@ -4587,6 +6334,19 @@ def _texture_extension(tex_info: TextureRefData) -> str:
 
 
 def _texture_interpolation(tex_info: TextureRefData) -> str:
-    if tex_info.mag_filter == 1 or tex_info.min_filter == 1:
+    if tex_info.mag_filter == 1 or tex_info.min_filter in {1, 4, 5}:
         return "Closest"
     return "Linear"
+
+
+def _set_texture_sampler_props(tex, tex_info: TextureRefData) -> None:
+    extension = _texture_extension(tex_info)
+    interpolation = _texture_interpolation(tex_info)
+    tex["assetkit_texture_wrap_s"] = int(tex_info.wrap_s)
+    tex["assetkit_texture_wrap_t"] = int(tex_info.wrap_t)
+    tex["assetkit_texture_wrap_p"] = int(tex_info.wrap_p)
+    tex["assetkit_texture_min_filter"] = int(tex_info.min_filter)
+    tex["assetkit_texture_mag_filter"] = int(tex_info.mag_filter)
+    tex["assetkit_texture_mip_filter"] = int(tex_info.mip_filter)
+    tex["assetkit_texture_extension"] = extension
+    tex["assetkit_texture_interpolation"] = interpolation

@@ -10,7 +10,11 @@ bl_info = {
 
 import bpy
 
-from .operators import ASSETKIT_OT_apply_material_variant, ASSETKIT_OT_import_assetkit
+from .operators import (
+    ASSETKIT_OT_apply_material_variant,
+    ASSETKIT_OT_apply_morph_preset,
+    ASSETKIT_OT_import_assetkit,
+)
 from .preferences import AssetKitPreferences
 
 
@@ -26,12 +30,17 @@ class ASSETKIT_MT_file_menu(bpy.types.Menu):
             ASSETKIT_OT_apply_material_variant.bl_idname,
             text="Apply Material Variant",
         )
+        self.layout.operator(
+            ASSETKIT_OT_apply_morph_preset.bl_idname,
+            text="Apply Morph Preset",
+        )
 
 
 classes = (
     AssetKitPreferences,
     ASSETKIT_OT_import_assetkit,
     ASSETKIT_OT_apply_material_variant,
+    ASSETKIT_OT_apply_morph_preset,
     ASSETKIT_MT_file_menu,
 )
 

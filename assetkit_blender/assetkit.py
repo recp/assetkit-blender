@@ -231,6 +231,10 @@ class LoopFloatAttributeData:
 class TextureRefData:
     role: str = ""
     path: str = ""
+    image_name: str = ""
+    sampler_name: str = ""
+    color_space: str = ""
+    channels: str = ""
     texcoord: str = ""
     coord_input_name: str = ""
     slot: int = 0
@@ -245,6 +249,8 @@ class TextureRefData:
     transform_scale: tuple[float, float] = (1.0, 1.0)
     transform_rotation: float = 0.0
     transform_slot: int = -1
+    image_extra: object | None = None
+    sampler_extra: object | None = None
 
 
 @dataclass
@@ -279,6 +285,7 @@ class MeshPrimitiveData:
     point_attrs: list[LoopFloatAttributeData] | None = None
     texture_infos: dict[str, TextureRefData] | None = None
     morph_targets: list[MorphTargetData] | None = None
+    morph_presets: list[dict] | None = None
     material_variants: list[dict] | None = None
     morph_anim_channels: list[dict] | None = None
     material_anim_channels: list[dict] | None = None
@@ -289,9 +296,16 @@ class MeshPrimitiveData:
     node_index: int = -1
     instance_count: int = 0
     has_node: bool = False
+    has_gsplat: bool = False
+    gsplat_kernel: int = 0
+    gsplat_color_space: int = 0
+    gsplat_projection: int = 0
+    gsplat_sorting_method: int = 0
+    gsplat_decoded_count: int = 0
     has_skin: bool = False
     anim_count: int = 0
     morph_target_count: int = 0
+    morph_preset_count: int = 0
     morph_anim_count: int = 0
     material_anim_count: int = 0
     material_variant_count: int = 0
@@ -344,6 +358,7 @@ class MeshPrimitiveData:
     transparent_opaque: int = 0
     double_sided: bool = False
     has_sheen: bool = False
+    skin_mesh_in_bind_pose: bool = False
     material_type: int = 0
     file_type: int = 0
     zero_copy_flags: int = 0
@@ -378,13 +393,17 @@ class SceneNodeData:
     anim_channels: list[dict] | None = None
     anim_count: int = 0
     visible: bool = True
+    layers: list[str] | None = None
     camera_type: int = 0
     camera_name: str = ""
     camera_values: tuple[float, float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    camera_extra: object | None = None
+    camera_imager_extra: object | None = None
     light_type: int = 0
     light_name: str = ""
     light_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     light_values: tuple[float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0)
+    light_extra: object | None = None
     extra: object | None = None
     _native_owner: object | None = None
 
@@ -394,6 +413,12 @@ class AssetKitSceneData:
     meshes: list[MeshPrimitiveData]
     nodes: list[SceneNodeData]
     doc_extra: object | None = None
+    scene_extra: object | None = None
+    images: list[dict] | None = None
+    scene_index: int = -1
+    scene_count: int = 0
+    scene_name: str = ""
+    scene_names: list[str] | None = None
 
 
 class AssetKitError(RuntimeError):
@@ -640,7 +665,10 @@ def native_load_meshes(
     except ImportError:
         return None
 
-    result = _assetkit_blender.load_meshes(os.fspath(filepath), options or None)
+    try:
+        result = _assetkit_blender.load_meshes(os.fspath(filepath), options or None)
+    except RuntimeError as exc:
+        raise AssetKitError(str(exc)) from exc
     raw_meshes = result.get("meshes", []) if isinstance(result, dict) else result
     raw_nodes = result.get("nodes", []) if isinstance(result, dict) else []
 
@@ -648,6 +676,12 @@ def native_load_meshes(
         meshes=_native_meshes_from_raw(raw_meshes),
         nodes=_native_nodes_from_raw(raw_nodes),
         doc_extra=result.get("doc_extra") if isinstance(result, dict) else None,
+        scene_extra=result.get("scene_extra") if isinstance(result, dict) else None,
+        images=list(result.get("images") or []) if isinstance(result, dict) else None,
+        scene_index=_native_result_int(result, "scene_index", -1),
+        scene_count=_native_result_int(result, "scene_count", 0),
+        scene_name=str(result.get("scene_name") or "") if isinstance(result, dict) else "",
+        scene_names=list(result.get("scene_names") or []) if isinstance(result, dict) else None,
     )
 
 
@@ -660,13 +694,22 @@ def native_open_scene_stream(
     except ImportError:
         return None
 
-    result = _assetkit_blender.open_scene(os.fspath(filepath), options or None)
+    try:
+        result = _assetkit_blender.open_scene(os.fspath(filepath), options or None)
+    except RuntimeError as exc:
+        raise AssetKitError(str(exc)) from exc
     return NativeSceneStream(
         _assetkit_blender,
         result.get("_owner"),
         int(result.get("mesh_count") or 0),
         _native_nodes_from_raw(result.get("nodes", [])),
         result.get("doc_extra"),
+        result.get("scene_extra"),
+        list(result.get("images") or []),
+        _native_result_int(result, "scene_index", -1),
+        _native_result_int(result, "scene_count", 0),
+        str(result.get("scene_name") or ""),
+        list(result.get("scene_names") or []),
     )
 
 
@@ -678,16 +721,35 @@ class NativeSceneStream:
         mesh_count: int,
         nodes: list[SceneNodeData],
         doc_extra: object | None = None,
+        scene_extra: object | None = None,
+        images: list[dict] | None = None,
+        scene_index: int = -1,
+        scene_count: int = 0,
+        scene_name: str = "",
+        scene_names: list[str] | None = None,
     ) -> None:
         self._module = module
         self._owner = owner
         self.mesh_count = mesh_count
         self.nodes = nodes
         self.doc_extra = doc_extra
+        self.scene_extra = scene_extra
+        self.images = images or []
+        self.scene_index = scene_index
+        self.scene_count = scene_count
+        self.scene_name = scene_name
+        self.scene_names = scene_names or []
 
     def read_mesh_batch(self, start: int, count: int) -> list[MeshPrimitiveData]:
         raw_meshes = self._module.read_mesh_batch(self._owner, start, count)
         return _native_meshes_from_raw(raw_meshes)
+
+
+def _native_result_int(result: object, key: str, default: int) -> int:
+    if not isinstance(result, dict):
+        return default
+    value = result.get(key)
+    return int(value if value is not None else default)
 
 
 def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
@@ -705,13 +767,17 @@ def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
                 anim_channels=item.get("anim_channels") or [],
                 anim_count=int(item.get("anim_count") or 0),
                 visible=visible,
+                layers=list(item.get("layers") or []),
                 camera_type=int(item.get("camera_type") or 0),
                 camera_name=item.get("camera_name") or "",
                 camera_values=tuple(item.get("camera_values") or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+                camera_extra=item.get("camera_extra"),
+                camera_imager_extra=item.get("camera_imager_extra"),
                 light_type=int(item.get("light_type") or 0),
                 light_name=item.get("light_name") or "",
                 light_color=tuple(item.get("light_color") or (1.0, 1.0, 1.0)),
                 light_values=tuple(item.get("light_values") or (0.0, 0.0, 0.0, 0.0, 0.0)),
+                light_extra=item.get("light_extra"),
                 extra=extra,
                 _native_owner=item.get("_owner"),
             )
@@ -789,6 +855,10 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
             texture_infos[str(role)] = TextureRefData(
                 role=str(role),
                 path=info.get("path") or "",
+                image_name=info.get("image_name") or "",
+                sampler_name=info.get("sampler_name") or "",
+                color_space=info.get("color_space") or "",
+                channels=info.get("channels") or "",
                 texcoord=info.get("texcoord") or "",
                 coord_input_name=info.get("coord_input_name") or "",
                 slot=int(info.get("slot") or 0),
@@ -807,6 +877,8 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                     else 0.0
                 ),
                 transform_slot=int(info.get("transform_slot") if info.get("transform_slot") is not None else -1),
+                image_extra=info.get("image_extra"),
+                sampler_extra=info.get("sampler_extra"),
             )
 
         morph_targets = []
@@ -852,6 +924,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 point_attrs=point_attrs,
                 texture_infos=texture_infos,
                 morph_targets=morph_targets,
+                morph_presets=item.get("morph_presets") or [],
                 material_variants=item.get("material_variants") or [],
                 morph_anim_channels=item.get("morph_anim_channels") or [],
                 material_anim_channels=item.get("material_anim_channels") or [],
@@ -862,9 +935,16 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 node_index=int(item.get("node_index") if item.get("node_index") is not None else -1),
                 instance_count=int(item.get("instance_count") or 0),
                 has_node=bool(item.get("has_node")),
+                has_gsplat=bool(item.get("has_gsplat")),
+                gsplat_kernel=int(item.get("gsplat_kernel") or 0),
+                gsplat_color_space=int(item.get("gsplat_color_space") or 0),
+                gsplat_projection=int(item.get("gsplat_projection") or 0),
+                gsplat_sorting_method=int(item.get("gsplat_sorting_method") or 0),
+                gsplat_decoded_count=int(item.get("gsplat_decoded_count") or 0),
                 has_skin=bool(item.get("has_skin")),
                 anim_count=int(item.get("anim_count") or 0),
                 morph_target_count=int(item.get("morph_target_count") or 0),
+                morph_preset_count=int(item.get("morph_preset_count") or 0),
                 morph_anim_count=int(item.get("morph_anim_count") or 0),
                 material_anim_count=int(item.get("material_anim_count") or 0),
                 material_variant_count=int(item.get("material_variant_count") or 0),
@@ -933,6 +1013,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 transparent_opaque=int(item.get("transparent_opaque") or 0),
                 double_sided=bool(item.get("double_sided")),
                 has_sheen=bool(item.get("has_sheen")),
+                skin_mesh_in_bind_pose=bool(item.get("skin_mesh_in_bind_pose")),
                 material_type=int(item.get("material_type") or 0),
                 file_type=int(item.get("file_type") or 0),
                 zero_copy_flags=int(item.get("zero_copy_flags") or 0),
