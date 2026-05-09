@@ -112,6 +112,11 @@ _MATERIAL_TEXTURE_FIELDS = tuple(f"{role}_texture" for role in _ANIM_TEXTURE_TRA
 _TEXTURE_IMAGE_CACHE: dict[tuple[str, str], object] = {}
 _ACTIVE_TEXTURE_NODE_CACHE: dict[object, object] | None = None
 _ACTIVE_SEPARATE_COLOR_CACHE: dict[int, object] | None = None
+_ACTIVE_TEXTURE_LOAD_MODE = "IMMEDIATE"
+_DEFERRED_TEXTURE_WAITERS: dict[tuple[str, str], list[object]] = {}
+_DEFERRED_TEXTURE_KEYS: deque[tuple[str, str]] = deque()
+_DEFERRED_TEXTURE_TIMER_ACTIVE = False
+_DEFERRED_TEXTURE_TIME_BUDGET = 0.006
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_HERMITE = 4
 _INTERPOLATION_STEP = 6
@@ -191,6 +196,7 @@ def import_assetkit_file(
 ) -> list[bpy.types.Object]:
     _reset_action_cache()
     existing_actions = _snapshot_actions(fit_timeline)
+    texture_load_mode = _texture_load_mode(load_options)
     profile_detail = _profile_enabled()
     total_started_at = time.perf_counter() if profile_detail else 0.0
     load_started_at = total_started_at
@@ -224,8 +230,14 @@ def import_assetkit_file(
     objects: list[bpy.types.Object] = []
     build_started_at = time.perf_counter() if profile_detail else 0.0
     import_units = _mesh_import_units(primitives)
-    for unit in import_units:
-        objects.extend(_create_import_unit(unit, state, collection or bpy.context.collection, shading_mode))
+    global _ACTIVE_TEXTURE_LOAD_MODE
+    previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
+    _ACTIVE_TEXTURE_LOAD_MODE = texture_load_mode
+    try:
+        for unit in import_units:
+            objects.extend(_create_import_unit(unit, state, collection or bpy.context.collection, shading_mode))
+    finally:
+        _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
     if profile_detail:
         _profile_log(
             "blocking build_objects "
@@ -348,6 +360,15 @@ def _load_assetkit_scene(
             list(loaded.images or []),
         )
     return loaded, [], None, None, {}, []
+
+
+def _texture_load_mode(load_options: dict | None) -> str:
+    mode = str((load_options or {}).get("texture_loading") or "IMMEDIATE").upper()
+    if mode == "AUTO":
+        return "IMMEDIATE" if bpy.app.background else "DEFERRED"
+    if mode == "DEFERRED":
+        return "DEFERRED"
+    return "IMMEDIATE"
 
 
 def _scene_info_from_loaded(loaded: object | None) -> dict:
@@ -1678,6 +1699,7 @@ class _ProgressiveImportJob:
         self.existing_actions = existing_actions
         self.stream = stream
         self.prefer_grouped = prefer_grouped
+        self.texture_load_mode = _texture_load_mode(load_options)
         self.scene_nodes: list[SceneNodeData] = []
         self.doc_extra: object | None = getattr(stream, "doc_extra", None)
         self.scene_extra: object | None = getattr(stream, "scene_extra", None)
@@ -1843,25 +1865,31 @@ class _ProgressiveImportJob:
 
         created_this_step = 0
         slice_started_at = time.perf_counter()
-        while (self.pending_primitives or self.deferred_primitives) and created_this_step < self.batch_size:
-            primitive = (
-                self.pending_primitives.popleft()
-                if self.pending_primitives
-                else self.deferred_primitives.popleft()
-            )
-            created_objects = _create_import_object(
-                primitive,
-                self.state,
-                self.collection,
-                self.shading_mode,
-            )
-            self.objects.extend(created_objects)
-            self.created_count += 1
-            created_this_step += 1
-            if self.first_object_at == 0.0:
-                self.first_object_at = time.perf_counter()
-            if time.perf_counter() - slice_started_at >= _PROGRESSIVE_TIME_BUDGET:
-                break
+        global _ACTIVE_TEXTURE_LOAD_MODE
+        previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
+        _ACTIVE_TEXTURE_LOAD_MODE = self.texture_load_mode
+        try:
+            while (self.pending_primitives or self.deferred_primitives) and created_this_step < self.batch_size:
+                primitive = (
+                    self.pending_primitives.popleft()
+                    if self.pending_primitives
+                    else self.deferred_primitives.popleft()
+                )
+                created_objects = _create_import_object(
+                    primitive,
+                    self.state,
+                    self.collection,
+                    self.shading_mode,
+                )
+                self.objects.extend(created_objects)
+                self.created_count += 1
+                created_this_step += 1
+                if self.first_object_at == 0.0:
+                    self.first_object_at = time.perf_counter()
+                if time.perf_counter() - slice_started_at >= _PROGRESSIVE_TIME_BUDGET:
+                    break
+        finally:
+            _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
 
         if created_this_step and self.profile_detail:
             _profile_log(
@@ -1924,18 +1952,24 @@ class _ProgressiveImportJob:
 
         created_units = 0
         created_primitives = 0
-        for unit in units:
-            created_objects = _create_import_unit(
-                unit,
-                self.state,
-                self.collection,
-                self.shading_mode,
-            )
-            self.objects.extend(created_objects)
-            created_units += 1
-            created_primitives += len(unit) if isinstance(unit, list) else 1
-            if self.first_object_at == 0.0 and created_objects:
-                self.first_object_at = time.perf_counter()
+        global _ACTIVE_TEXTURE_LOAD_MODE
+        previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
+        _ACTIVE_TEXTURE_LOAD_MODE = self.texture_load_mode
+        try:
+            for unit in units:
+                created_objects = _create_import_unit(
+                    unit,
+                    self.state,
+                    self.collection,
+                    self.shading_mode,
+                )
+                self.objects.extend(created_objects)
+                created_units += 1
+                created_primitives += len(unit) if isinstance(unit, list) else 1
+                if self.first_object_at == 0.0 and created_objects:
+                    self.first_object_at = time.perf_counter()
+        finally:
+            _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
 
         self.created_count += created_primitives
         if self.profile_detail:
@@ -7904,13 +7938,17 @@ def _image_texture_node(
             _append_texture_node_role(tex, tex_info)
             return tex
 
-    image = _load_texture_image(path, colorspace)
-    if not image:
+    defer_image = _should_defer_texture_image(path)
+    image = _find_texture_image(path, colorspace) if defer_image else _load_texture_image(path, colorspace)
+    if not image and not defer_image:
         return None
 
     nodes = mat.node_tree.nodes
     tex = nodes.new("ShaderNodeTexImage")
-    tex.image = image
+    if image:
+        tex.image = image
+    elif defer_image:
+        _queue_deferred_texture_image(tex, path, colorspace)
     if tex_info and tex_info.role:
         tex.label = f"AssetKit {tex_info.role}"
         tex["assetkit_texture_role"] = tex_info.role
@@ -7997,6 +8035,80 @@ def _socket_cache_key(socket) -> int:
         return 0
 
 
+def _should_defer_texture_image(path: str) -> bool:
+    return _ACTIVE_TEXTURE_LOAD_MODE == "DEFERRED" and bool(path)
+
+
+def _queue_deferred_texture_image(tex, path: str, colorspace: str) -> None:
+    global _DEFERRED_TEXTURE_TIMER_ACTIVE
+    key = _texture_image_cache_key(path, colorspace)
+    image = _find_texture_image(key[0], key[1])
+    if image:
+        _assign_texture_image(tex, image)
+        return
+
+    waiters = _DEFERRED_TEXTURE_WAITERS.get(key)
+    if waiters is None:
+        _DEFERRED_TEXTURE_WAITERS[key] = [tex]
+        _DEFERRED_TEXTURE_KEYS.append(key)
+    else:
+        waiters.append(tex)
+
+    try:
+        tex["assetkit_texture_pending_path"] = key[0]
+        tex["assetkit_texture_pending_colorspace"] = key[1]
+    except Exception:
+        pass
+
+    if not _DEFERRED_TEXTURE_TIMER_ACTIVE:
+        _DEFERRED_TEXTURE_TIMER_ACTIVE = True
+        bpy.app.timers.register(_deferred_texture_timer, first_interval=0.001)
+
+
+def _deferred_texture_timer() -> float | None:
+    global _DEFERRED_TEXTURE_TIMER_ACTIVE
+    started_at = time.perf_counter()
+    while _DEFERRED_TEXTURE_KEYS:
+        key = _DEFERRED_TEXTURE_KEYS.popleft()
+        waiters = _DEFERRED_TEXTURE_WAITERS.pop(key, [])
+        live_waiters = [node for node in waiters if _node_ref_alive(node)]
+        if live_waiters:
+            image = _load_texture_image_immediate(key[0], key[1])
+            if image:
+                for node in live_waiters:
+                    _assign_texture_image(node, image)
+        if time.perf_counter() - started_at >= _DEFERRED_TEXTURE_TIME_BUDGET:
+            return 0.001
+
+    _DEFERRED_TEXTURE_TIMER_ACTIVE = False
+    return None
+
+
+def _assign_texture_image(tex, image) -> None:
+    if not _node_ref_alive(tex):
+        return
+    try:
+        tex.image = image
+        if "assetkit_texture_pending_path" in tex:
+            del tex["assetkit_texture_pending_path"]
+        if "assetkit_texture_pending_colorspace" in tex:
+            del tex["assetkit_texture_pending_colorspace"]
+    except Exception:
+        pass
+
+
+def _node_ref_alive(node) -> bool:
+    if node is None:
+        return False
+    try:
+        tree = node.id_data
+        return tree is not None and tree.nodes.get(node.name) == node
+    except ReferenceError:
+        return False
+    except Exception:
+        return False
+
+
 def _texture_color_space(tex_info: TextureRefData | None, fallback: str) -> str:
     if tex_info and tex_info.color_space:
         return tex_info.color_space
@@ -8004,6 +8116,10 @@ def _texture_color_space(tex_info: TextureRefData | None, fallback: str) -> str:
 
 
 def _load_texture_image(path: str, colorspace: str):
+    return _load_texture_image_immediate(path, colorspace)
+
+
+def _load_texture_image_immediate(path: str, colorspace: str):
     source_path = os.path.abspath(os.fspath(path))
     image = _find_texture_image(source_path, colorspace)
     if image:

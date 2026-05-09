@@ -110,6 +110,16 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         min=1,
         max=512,
     )
+    texture_loading: bpy.props.EnumProperty(
+        name="Textures",
+        description="When texture image files are loaded into Blender",
+        items=(
+            ("AUTO", "Auto", "Defer image file loading in the UI so geometry appears first"),
+            ("IMMEDIATE", "Immediate", "Load texture image files during import"),
+            ("DEFERRED", "Deferred", "Create materials first and load texture images after import starts"),
+        ),
+        default="AUTO",
+    )
     scene_index: bpy.props.IntProperty(
         name="Scene Index",
         description="AssetKit visual scene index to import. Use -1 for the authored default scene",
@@ -338,6 +348,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         load_box.prop(self, "build_mode")
         if self.build_mode in {"AUTO", "PROGRESSIVE"}:
             load_box.prop(self, "progressive_batch_size")
+        load_box.prop(self, "texture_loading")
 
         view_box = layout.box()
         view_box.label(text="View")
@@ -363,6 +374,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             "import_lines": self.import_lines,
             "convert_line_loop": self.convert_line_loop,
             "convert_line_strip": self.convert_line_strip,
+            "texture_loading": self.texture_loading,
         }
 
 
