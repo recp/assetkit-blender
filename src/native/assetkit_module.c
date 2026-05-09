@@ -397,6 +397,8 @@ typedef struct AkbPrimitive {
   uint8_t  skin_mesh_in_bind_pose;
   uint8_t  borrowed_vertices;
   uint8_t  borrowed_indices;
+  uint8_t  borrowed_normals;
+  uint8_t  borrowed_tangents;
   uint8_t  arena_vertices;
   uint8_t  arena_indices;
   uint8_t  arena_loop_meta;
@@ -412,6 +414,22 @@ typedef struct AkbPrimitiveList {
   size_t        count;
   size_t        capacity;
 } AkbPrimitiveList;
+
+typedef struct AkbPrimitiveReuseEntry {
+  AkGeometry      *geom;
+  AkMesh          *mesh;
+  AkMeshPrimitive *prim;
+  AkBindMaterial  *bind_material;
+  uint32_t        prim_index;
+  size_t          source_index;
+} AkbPrimitiveReuseEntry;
+
+typedef struct AkbPrimitiveReuseCache {
+  AkbPrimitiveReuseEntry *items;
+  size_t                  count;
+  size_t                  capacity;
+  size_t                  hits;
+} AkbPrimitiveReuseCache;
 
 typedef struct AkbSceneNode {
   struct AkbAnimation *animation;
@@ -1040,7 +1058,8 @@ akb_primitive_free(AkbPrimitive *prim) {
     free(prim->indices);
   if (!prim->arena_loop_meta)
     free(prim->loop_meta);
-  free(prim->normals);
+  if (!prim->borrowed_normals)
+    free(prim->normals);
   for (i = 0; i < prim->uv_set_count; i++)
     if (!prim->uv_sets[i].borrowed)
       free(prim->uv_sets[i].values);
@@ -1057,7 +1076,8 @@ akb_primitive_free(AkbPrimitive *prim) {
     free(prim->uvs);
   if (!prim->color_set_count)
     free(prim->colors);
-  free(prim->tangents);
+  if (!prim->borrowed_tangents)
+    free(prim->tangents);
   free(prim->skin_joints);
   if (!prim->arena_skin_joint_nodes)
     free(prim->skin_joint_nodes);
@@ -6163,6 +6183,264 @@ akb_extract_primitive(AkbArena *arena,
   return 1;
 }
 
+static void
+akb_primitive_reuse_cache_free(AkbPrimitiveReuseCache *cache) {
+  if (!cache)
+    return;
+
+  free(cache->items);
+  memset(cache, 0, sizeof(*cache));
+}
+
+static int
+akb_primitive_reuse_cache_find(const AkbPrimitiveReuseCache *cache,
+                               AkGeometry *geom,
+                               AkMesh *mesh,
+                               AkMeshPrimitive *prim,
+                               AkBindMaterial *bind_material,
+                               uint32_t prim_index,
+                               size_t *source_index) {
+  size_t i;
+
+  if (!cache || !source_index)
+    return 0;
+
+  for (i = 0; i < cache->count; i++) {
+    if (cache->items[i].geom == geom
+        && cache->items[i].mesh == mesh
+        && cache->items[i].prim == prim
+        && cache->items[i].bind_material == bind_material
+        && cache->items[i].prim_index == prim_index) {
+      *source_index = cache->items[i].source_index;
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+static int
+akb_primitive_reuse_cache_add(AkbPrimitiveReuseCache *cache,
+                              AkGeometry *geom,
+                              AkMesh *mesh,
+                              AkMeshPrimitive *prim,
+                              AkBindMaterial *bind_material,
+                              uint32_t prim_index,
+                              size_t source_index) {
+  AkbPrimitiveReuseEntry *items;
+  size_t capacity;
+
+  if (!cache)
+    return 1;
+
+  if (cache->count == cache->capacity) {
+    capacity = cache->capacity ? cache->capacity * 2 : 32;
+    items = (AkbPrimitiveReuseEntry *)realloc(cache->items,
+                                              capacity * sizeof(*items));
+    if (!items)
+      return 0;
+    cache->items = items;
+    cache->capacity = capacity;
+  }
+
+  cache->items[cache->count].geom = geom;
+  cache->items[cache->count].mesh = mesh;
+  cache->items[cache->count].prim = prim;
+  cache->items[cache->count].bind_material = bind_material;
+  cache->items[cache->count].prim_index = prim_index;
+  cache->items[cache->count].source_index = source_index;
+  cache->count++;
+  return 1;
+}
+
+static int
+akb_primitive_can_reuse_mesh_data(const AkbAnimationIndex *anim_index,
+                                  AkbAnimation *animation,
+                                  AkbAnimation *morph_animation,
+                                  AkNode *node,
+                                  AkMeshPrimitive *prim) {
+  if (!node || !node->geometry || !prim)
+    return 0;
+  if (anim_index && anim_index->count)
+    return 0;
+  if ((animation && animation->count)
+      || (morph_animation && morph_animation->count))
+    return 0;
+  if (node->instancing
+      || node->geometry->morpher
+      || node->geometry->skinner)
+    return 0;
+  if (prim->type != AKB_PRIMITIVE_TRIANGLES
+      || akb_primitive_index_width(prim) != 3
+      || prim->gsplat
+      || prim->variantMappings
+      || prim->variantMappingCount)
+    return 0;
+
+  return 1;
+}
+
+static int
+akb_loop_attrs_share(AkbLoopFloatAttribute **dst,
+                     AkbLoopFloatAttribute *src,
+                     uint32_t count) {
+  uint32_t i;
+
+  *dst = NULL;
+  if (!src || !count)
+    return 1;
+
+  *dst = (AkbLoopFloatAttribute *)calloc(count, sizeof(**dst));
+  if (!*dst)
+    return 0;
+
+  memcpy(*dst, src, (size_t)count * sizeof(**dst));
+  for (i = 0; i < count; i++)
+    (*dst)[i].borrowed = 1;
+
+  return 1;
+}
+
+static int
+akb_primitive_clone_shared(AkbPrimitive *dst,
+                           const AkbPrimitive *src,
+                           AkNode *node,
+                           int32_t node_index) {
+  if (!dst || !src)
+    return 0;
+
+  *dst = *src;
+
+  dst->doc_owner = src->doc_owner;
+  akb_shared_doc_retain(dst->doc_owner);
+  dst->animation = akb_animation_retain(src->animation);
+  dst->morph_animation = akb_animation_retain(src->morph_animation);
+  dst->material_animation = akb_animation_retain(src->material_animation);
+
+  dst->borrowed_vertices = src->vertices != NULL;
+  dst->borrowed_indices = src->indices != NULL;
+  dst->borrowed_normals = src->normals != NULL;
+  dst->borrowed_tangents = src->tangents != NULL;
+  dst->arena_vertices = 0;
+  dst->arena_indices = 0;
+  dst->arena_loop_meta = src->loop_meta != NULL;
+  dst->arena_instance_matrices = src->instance_matrices != NULL;
+  dst->arena_skin_joint_nodes = src->skin_joint_nodes != NULL;
+  dst->arena_skin_inverse_bind_matrices = src->skin_inverse_bind_matrices != NULL;
+  dst->arena_skin_joint_sources = src->skin_joint_sources != NULL;
+
+  dst->uv_sets = NULL;
+  dst->color_sets = NULL;
+  dst->point_attrs = NULL;
+  dst->material_variants = NULL;
+  dst->morph_targets = NULL;
+  dst->skin_pose_animations = NULL;
+  dst->material_variant_count = 0;
+  dst->morph_target_count = 0;
+  dst->skin_pose_animation_count = 0;
+
+  if (!akb_loop_attrs_share(&dst->uv_sets, src->uv_sets, src->uv_set_count)
+      || !akb_loop_attrs_share(&dst->color_sets, src->color_sets, src->color_set_count)
+      || !akb_loop_attrs_share(&dst->point_attrs, src->point_attrs, src->point_attr_count)) {
+    akb_primitive_free(dst);
+    return 0;
+  }
+
+  if (dst->uv_set_count)
+    dst->uvs = dst->uv_sets[0].values;
+  if (dst->color_set_count)
+    dst->colors = dst->color_sets[0].values;
+
+  dst->node_index = node_index;
+  dst->has_node = 0;
+  dst->object_name[0] = '\0';
+  if (node) {
+    snprintf(dst->object_name, sizeof(dst->object_name), "%s", akb_name(node->name, "AssetKitObject"));
+    ak_transformCombine(node->transform, dst->matrix);
+    dst->has_node = 1;
+  }
+
+  return 1;
+}
+
+static int
+akb_extract_primitive_cached(AkbArena *arena,
+                             AkbPrimitiveList *list,
+                             AkbSceneNodeList *nodes,
+                             AkDoc *doc,
+                             AkbSharedDoc *doc_owner,
+                             const AkbAnimationIndex *anim_index,
+                             AkbPrimitiveReuseCache *reuse_cache,
+                             AkbAnimation *animation,
+                             AkbAnimation *morph_animation,
+                             AkNode *node,
+                             int32_t node_index,
+                             AkGeometry *geom,
+                             AkMesh *mesh,
+                             AkMeshPrimitive *prim,
+                             uint32_t prim_index) {
+  AkbPrimitive out = {0};
+  AkBindMaterial *bind_material;
+  size_t source_index;
+  size_t before_count;
+  int can_reuse;
+
+  bind_material = node && node->geometry ? node->geometry->bindMaterial : NULL;
+  can_reuse = reuse_cache
+              && akb_primitive_can_reuse_mesh_data(anim_index,
+                                                   animation,
+                                                   morph_animation,
+                                                   node,
+                                                   prim);
+  if (can_reuse
+      && akb_primitive_reuse_cache_find(reuse_cache,
+                                        geom,
+                                        mesh,
+                                        prim,
+                                        bind_material,
+                                        prim_index,
+                                        &source_index)
+      && source_index < list->count) {
+    if (!akb_primitive_clone_shared(&out, &list->items[source_index], node, node_index))
+      return 0;
+    if (!akb_list_push(list, &out)) {
+      akb_primitive_free(&out);
+      return 0;
+    }
+    reuse_cache->hits++;
+    return 1;
+  }
+
+  before_count = list->count;
+  if (!akb_extract_primitive(arena,
+                             list,
+                             nodes,
+                             doc,
+                             doc_owner,
+                             anim_index,
+                             animation,
+                             morph_animation,
+                             node,
+                             node_index,
+                             geom,
+                             mesh,
+                             prim,
+                             prim_index))
+    return 0;
+
+  if (can_reuse && list->count > before_count) {
+    return akb_primitive_reuse_cache_add(reuse_cache,
+                                         geom,
+                                         mesh,
+                                         prim,
+                                         bind_material,
+                                         prim_index,
+                                         before_count);
+  }
+
+  return 1;
+}
+
 static int
 akb_extract_mesh(AkbArena *arena,
                  AkbPrimitiveList *list,
@@ -6170,6 +6448,7 @@ akb_extract_mesh(AkbArena *arena,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
                  const AkbAnimationIndex *anim_index,
+                 AkbPrimitiveReuseCache *reuse_cache,
                  AkbAnimation *animation,
                  AkbAnimation *morph_animation,
                  AkNode *node,
@@ -6207,20 +6486,21 @@ akb_extract_mesh(AkbArena *arena,
   for (prim = mesh->primitive; prim; prim = prim->next, prim_index++) {
     if (!akb_primitive_supported(prim, options))
       continue;
-    if (!akb_extract_primitive(arena,
-                               list,
-                               nodes,
-                               doc,
-                               doc_owner,
-                               anim_index,
-                               animation,
-                               morph_animation,
-                               node,
-                               node_index,
-                               geom,
-                               mesh,
-                               prim,
-                               prim_index))
+    if (!akb_extract_primitive_cached(arena,
+                                      list,
+                                      nodes,
+                                      doc,
+                                      doc_owner,
+                                      anim_index,
+                                      reuse_cache,
+                                      animation,
+                                      morph_animation,
+                                      node,
+                                      node_index,
+                                      geom,
+                                      mesh,
+                                      prim,
+                                      prim_index))
       return 0;
   }
 
@@ -6235,6 +6515,7 @@ akb_extract_node(AkbArena *arena,
                  AkbSharedDoc *doc_owner,
                  AkNode *node,
                  const AkbAnimationIndex *anim_index,
+                 AkbPrimitiveReuseCache *reuse_cache,
                  const AkbCoordContext *coord,
                  const AkbLoadOptions *options,
                  int32_t parent_index) {
@@ -6285,6 +6566,7 @@ akb_extract_node(AkbArena *arena,
                           doc,
                           doc_owner,
                           anim_index,
+                          reuse_cache,
                           animation,
                           morph_animation,
                           node,
@@ -6300,7 +6582,7 @@ akb_extract_node(AkbArena *arena,
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, child, anim_index, coord, options, node_index))
+    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, child, anim_index, reuse_cache, coord, options, node_index))
       return 0;
   }
 
@@ -6308,7 +6590,7 @@ akb_extract_node(AkbArena *arena,
     inst_node = (AkNode *)ak_instanceObject(inst);
     if (!inst_node || inst_node == node)
       continue;
-    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, inst_node, anim_index, coord, options, node_index))
+    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, inst_node, anim_index, reuse_cache, coord, options, node_index))
       return 0;
   }
 
@@ -6451,10 +6733,13 @@ akb_extract_scene(AkDoc *doc,
                   AkbPrimitiveList *list,
                   AkbSceneNodeList *nodes,
                   const AkbCoordContext *coord,
-                  const AkbLoadOptions *options) {
+                  const AkbLoadOptions *options,
+                  size_t *reuse_hits) {
+  AkbPrimitiveReuseCache reuse_cache = {0};
   AkVisualScene *scene;
   AkInstanceBase *inst;
   AkNode *node;
+  int ok = 1;
 
   if (!doc)
     return 1;
@@ -6466,17 +6751,24 @@ akb_extract_scene(AkDoc *doc,
   if (scene->node->node) {
     for (inst = &scene->node->node->base; inst; inst = inst->next) {
       node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
-        return 0;
+      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, &reuse_cache, coord, options, -1)) {
+        ok = 0;
+        break;
+      }
     }
   } else {
     for (node = scene->node; node; node = node->next) {
-      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
-        return 0;
+      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, &reuse_cache, coord, options, -1)) {
+        ok = 0;
+        break;
+      }
     }
   }
 
-  return 1;
+  if (reuse_hits)
+    *reuse_hits = reuse_cache.hits;
+  akb_primitive_reuse_cache_free(&reuse_cache);
+  return ok;
 }
 
 static int
@@ -6491,6 +6783,7 @@ akb_extract_doc(AkDoc *doc,
   AkGeometry *geom;
   size_t fallback_estimate;
   size_t skin_count;
+  size_t reuse_hits = 0;
   double total_started_at = 0.0;
   double phase_started_at = 0.0;
   double coord_ms = 0.0;
@@ -6533,7 +6826,8 @@ akb_extract_doc(AkDoc *doc,
                          &import->primitives,
                          &import->nodes,
                          &coord,
-                         options)) {
+                         options,
+                         &reuse_hits)) {
     akb_animation_index_free(&anim_index);
     return 0;
   }
@@ -6560,10 +6854,11 @@ akb_extract_doc(AkDoc *doc,
     akb_list_set_coord_matrix(&import->primitives, &coord);
     if (profile) {
       set_coord_ms = akb_now_ms() - phase_started_at;
-      akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
+      akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
                       import->nodes.count,
                       import->primitives.count,
                       anim_index.count,
+                      reuse_hits,
                       coord_ms,
                       anim_index_ms,
                       scene_ms,
@@ -6595,6 +6890,7 @@ akb_extract_doc(AkDoc *doc,
                             NULL,
                             NULL,
                             NULL,
+                            NULL,
                             -1,
                             geom,
                             options)) {
@@ -6611,10 +6907,11 @@ akb_extract_doc(AkDoc *doc,
   akb_list_set_coord_matrix(&import->primitives, &coord);
   if (profile) {
     set_coord_ms = akb_now_ms() - phase_started_at;
-    akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
+    akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
                     import->nodes.count,
                     import->primitives.count,
                     anim_index.count,
+                    reuse_hits,
                     coord_ms,
                     anim_index_ms,
                     scene_ms,

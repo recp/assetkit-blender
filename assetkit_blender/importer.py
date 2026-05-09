@@ -179,6 +179,22 @@ _CH_KEYS = (
     _CH_OUT_TANGENTS_F32,
 ) = range(len(_CH_KEYS))
 
+(
+    _S_COORD_ROOT,
+    _S_ROOT_OBJECTS,
+    _S_NODE_OBJECTS,
+    _S_NODE_DATA,
+    _S_NODE_VISIBILITY,
+    _S_NODE_ANIMATION_SKIP_INDICES,
+    _S_MATERIAL_CACHE,
+    _S_MESH_CACHE,
+    _S_SKIN_CACHE,
+    _S_NODE_ANIMATION_DEFERRED,
+    _S_SKIN_ANIMATION_DEFERRED,
+    _S_DEFERRED_SKIN_ANIMATIONS,
+    _S_MESH_CACHE_HITS,
+) = range(13)
+
 
 def import_assetkit_file(
     filepath: str,
@@ -242,6 +258,7 @@ def import_assetkit_file(
         _profile_log(
             "blocking build_objects "
             f"objects={len(objects)} primitives={len(primitives)} units={len(import_units)} "
+            f"mesh_cache_hits={int(state[_S_MESH_CACHE_HITS])} "
             f"elapsed={(time.perf_counter() - build_started_at) * 1000.0:.3f}ms"
         )
 
@@ -250,7 +267,7 @@ def import_assetkit_file(
         objects,
         focus_mode,
         placement_mode,
-        state["root_objects"],
+        state[_S_ROOT_OBJECTS],
         scene_was_empty,
         collection or bpy.context.collection,
         focus_camera,
@@ -424,17 +441,19 @@ def _begin_scene_build(
             f"nodes={len(scene_nodes)}"
         )
     return {
-        "coord_root": coord_root,
-        "root_objects": _scene_root_objects(scene_nodes, coord_root, node_objects),
-        "node_objects": node_objects,
-        "node_data": {index: node for index, node in enumerate(scene_nodes)},
-        "node_visibility": node_visibility,
-        "node_animation_skip_indices": node_animation_skip_indices,
-        "material_cache": {},
-        "skin_cache": {},
-        "node_animation_deferred": not apply_node_animation,
-        "skin_animation_deferred": not apply_node_animation,
-        "deferred_skin_animations": [],
+        _S_COORD_ROOT: coord_root,
+        _S_ROOT_OBJECTS: _scene_root_objects(scene_nodes, coord_root, node_objects),
+        _S_NODE_OBJECTS: node_objects,
+        _S_NODE_DATA: {index: node for index, node in enumerate(scene_nodes)},
+        _S_NODE_VISIBILITY: node_visibility,
+        _S_NODE_ANIMATION_SKIP_INDICES: node_animation_skip_indices,
+        _S_MATERIAL_CACHE: {},
+        _S_MESH_CACHE: {},
+        _S_SKIN_CACHE: {},
+        _S_NODE_ANIMATION_DEFERRED: not apply_node_animation,
+        _S_SKIN_ANIMATION_DEFERRED: not apply_node_animation,
+        _S_DEFERRED_SKIN_ANIMATIONS: [],
+        _S_MESH_CACHE_HITS: 0,
     }
 
 
@@ -643,26 +662,52 @@ def _create_import_object(
     collection: bpy.types.Collection,
     shading_mode: str = "AUTO",
 ) -> list[bpy.types.Object]:
-    node_objects = state["node_objects"]
+    node_objects = state[_S_NODE_OBJECTS]
     node_parent = node_objects.get(primitive.node_index)
-    parent = node_parent or state["coord_root"]
+    parent = node_parent or state[_S_COORD_ROOT]
     use_node_parent = node_parent is not None
-    defer_animation = bool(state.get("node_animation_deferred"))
-    return _create_mesh_object(
+    defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
+    mesh_cache_key = _mesh_data_reuse_key(primitive, shading_mode)
+    mesh_cache = state[_S_MESH_CACHE] if mesh_cache_key is not None else None
+    if mesh_cache is not None:
+        cached_mesh = mesh_cache.get(mesh_cache_key)
+        if cached_mesh is not None:
+            state[_S_MESH_CACHE_HITS] += 1
+            return _finish_mesh_object(
+                cached_mesh,
+                primitive,
+                parent,
+                node_objects=node_objects,
+                node_data=state[_S_NODE_DATA],
+                node_visibility=state[_S_NODE_VISIBILITY],
+                material_cache=state[_S_MATERIAL_CACHE],
+                skin_cache=state[_S_SKIN_CACHE],
+                apply_transform=not use_node_parent,
+                apply_animation=(not use_node_parent and not defer_animation),
+                apply_skin_animation=not bool(state[_S_SKIN_ANIMATION_DEFERRED]),
+                deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
+                collection=collection,
+                assign_material=False,
+            )
+
+    objects = _create_mesh_object(
         primitive,
         parent,
         node_objects=node_objects,
-        node_data=state["node_data"],
-        node_visibility=state["node_visibility"],
-        material_cache=state["material_cache"],
-        skin_cache=state["skin_cache"],
+        node_data=state[_S_NODE_DATA],
+        node_visibility=state[_S_NODE_VISIBILITY],
+        material_cache=state[_S_MATERIAL_CACHE],
+        skin_cache=state[_S_SKIN_CACHE],
         apply_transform=not use_node_parent,
         apply_animation=(not use_node_parent and not defer_animation),
-        apply_skin_animation=not bool(state.get("skin_animation_deferred")),
-        deferred_skin_animations=state.get("deferred_skin_animations"),
+        apply_skin_animation=not bool(state[_S_SKIN_ANIMATION_DEFERRED]),
+        deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
         shading_mode=shading_mode,
         collection=collection,
     )
+    if mesh_cache is not None and len(objects) == 1 and isinstance(objects[0].data, bpy.types.Mesh):
+        mesh_cache[mesh_cache_key] = objects[0].data
+    return objects
 
 
 def _create_import_unit(
@@ -686,11 +731,11 @@ def _create_grouped_mesh_object(
     profile_detail = _profile_enabled()
     total_started_at = time.perf_counter() if profile_detail else 0.0
     first = primitives[0]
-    node_objects = state["node_objects"]
+    node_objects = state[_S_NODE_OBJECTS]
     node_parent = node_objects.get(first.node_index)
-    parent = node_parent or state["coord_root"]
+    parent = node_parent or state[_S_COORD_ROOT]
     use_node_parent = node_parent is not None
-    defer_animation = bool(state.get("node_animation_deferred"))
+    defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
 
     count_started_at = time.perf_counter() if profile_detail else 0.0
     total_vertex_count = sum(int(primitive.vertex_count) for primitive in primitives)
@@ -802,14 +847,14 @@ def _create_grouped_mesh_object(
         material_indices,
         parent,
         node_objects=node_objects,
-        node_data=state["node_data"],
-        node_visibility=state["node_visibility"],
-        material_cache=state["material_cache"],
-        skin_cache=state["skin_cache"],
+        node_data=state[_S_NODE_DATA],
+        node_visibility=state[_S_NODE_VISIBILITY],
+        material_cache=state[_S_MATERIAL_CACHE],
+        skin_cache=state[_S_SKIN_CACHE],
         apply_transform=not use_node_parent,
         apply_animation=(not use_node_parent and not defer_animation),
-        apply_skin_animation=not bool(state.get("skin_animation_deferred")),
-        deferred_skin_animations=state.get("deferred_skin_animations"),
+        apply_skin_animation=not bool(state[_S_SKIN_ANIMATION_DEFERRED]),
+        deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
         has_materials=has_materials,
         shading_mode=shading_mode,
         collection=collection,
@@ -1102,6 +1147,40 @@ def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
     )
 
 
+def _mesh_data_reuse_key(primitive: MeshPrimitiveData, shading_mode: str) -> tuple | None:
+    if int(primitive.primitive_type) != AK_PRIMITIVE_TRIANGLES:
+        return None
+    if not primitive.mesh_key or not primitive.vertices_f32 or not primitive.indices_u32:
+        return None
+    if int(primitive.loop_count) != int(primitive.face_count) * 3:
+        return None
+    if primitive.instance_count or primitive.has_gsplat:
+        return None
+    if primitive.has_skin or primitive.morph_targets or primitive.morph_anim_channels:
+        return None
+    if primitive.material_anim_channels or primitive.material_variants:
+        return None
+    if primitive.point_attr_count:
+        return None
+    if not primitive.material_key and _has_material_data(primitive):
+        return None
+
+    return (
+        int(primitive.mesh_key),
+        int(primitive.primitive_index),
+        int(primitive.material_key),
+        int(primitive.primitive_mode),
+        int(primitive.vertex_count),
+        int(primitive.loop_count),
+        int(primitive.face_count),
+        bool(primitive.normals_f32),
+        bool(primitive.tangents_f32),
+        _loop_attr_signature(primitive.uv_sets),
+        _loop_attr_signature(primitive.color_sets),
+        str(shading_mode or "AUTO").upper(),
+    )
+
+
 def _loop_attr_signature(attrs: list[LoopFloatAttributeData] | None) -> tuple:
     return tuple((attr.name, int(attr.set), int(attr.width)) for attr in (attrs or ()))
 
@@ -1110,7 +1189,7 @@ def _import_result_objects(mesh_objects: list[bpy.types.Object], state: dict) ->
     if mesh_objects:
         return mesh_objects
 
-    node_objects = state.get("node_objects") or {}
+    node_objects = state.get(_S_NODE_OBJECTS) or {}
     return [
         obj
         for obj in node_objects.values()
@@ -2001,7 +2080,7 @@ class _ProgressiveImportJob:
             self.objects,
             self.focus_mode,
             self.placement_mode,
-            self.state["root_objects"] if self.state else [],
+            self.state[_S_ROOT_OBJECTS] if self.state else [],
             self.scene_was_empty,
             self.collection,
             self.focus_camera,
@@ -2017,6 +2096,7 @@ class _ProgressiveImportJob:
             _profile_log(
                 "progressive finish "
                 f"objects={len(_import_result_objects(self.objects, self.state or {}))} "
+                f"mesh_cache_hits={int(self.state[_S_MESH_CACHE_HITS]) if self.state else 0} "
                 f"first_object={first_object_seconds:.3f}s "
                 f"load={load_seconds:.3f}s build={build_seconds:.3f}s "
                 f"total={finished_at - self.load_started_at:.3f}s"
@@ -2368,6 +2448,7 @@ def _finish_mesh_object(
     apply_skin_animation: bool = True,
     deferred_skin_animations: list | None = None,
     collection: bpy.types.Collection | None = None,
+    assign_material: bool = True,
 ) -> list[bpy.types.Object]:
     profile_detail = _profile_enabled()
     total_started_at = time.perf_counter() if profile_detail else 0.0
@@ -2389,15 +2470,17 @@ def _finish_mesh_object(
         now = time.perf_counter()
         object_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
-    material = _create_material(data, material_cache)
-    if material:
-        mesh.materials.append(material)
+    if assign_material:
+        material = _create_material(data, material_cache)
+        if material:
+            mesh.materials.append(material)
     if profile_detail:
         now = time.perf_counter()
         material_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
     _apply_assetkit_extra_props(obj, data)
-    _apply_material_variants(obj, data, material_cache)
+    if assign_material:
+        _apply_material_variants(obj, data, material_cache)
     if profile_detail:
         now = time.perf_counter()
         props_ms = (now - phase_started_at) * 1000.0
@@ -2758,14 +2841,14 @@ def _mark_skinned_node_animation_skip(state: dict | None, primitives: list[MeshP
 
 
 def _apply_deferred_scene_node_animations(state: dict | None) -> None:
-    if not state or not state.get("node_animation_deferred"):
+    if not state or not state.get(_S_NODE_ANIMATION_DEFERRED):
         return
 
     profile_detail = _profile_enabled()
     started_at = time.perf_counter() if profile_detail else 0.0
-    node_objects = state.get("node_objects") or {}
-    node_data = state.get("node_data") or {}
-    skip_animation_nodes = state.get("node_animation_skip_indices") or set()
+    node_objects = state.get(_S_NODE_OBJECTS) or {}
+    node_data = state.get(_S_NODE_DATA) or {}
+    skip_animation_nodes = state.get(_S_NODE_ANIMATION_SKIP_INDICES) or set()
     animation_ms = 0.0
     visibility_anim_ms = 0.0
     for index, node in node_data.items():
@@ -2785,7 +2868,7 @@ def _apply_deferred_scene_node_animations(state: dict | None) -> None:
             if profile_detail:
                 visibility_anim_ms += (time.perf_counter() - vis_started_at) * 1000.0
 
-    state["node_animation_deferred"] = False
+    state[_S_NODE_ANIMATION_DEFERRED] = False
     if profile_detail:
         _profile_log(
             "deferred_scene_node_animations "
@@ -2797,12 +2880,12 @@ def _apply_deferred_scene_node_animations(state: dict | None) -> None:
 
 
 def _apply_deferred_skin_animations(state: dict | None) -> None:
-    if not state or not state.get("skin_animation_deferred"):
+    if not state or not state.get(_S_SKIN_ANIMATION_DEFERRED):
         return
 
-    pending = state.get("deferred_skin_animations") or []
+    pending = state.get(_S_DEFERRED_SKIN_ANIMATIONS) or []
     if not pending:
-        state["skin_animation_deferred"] = False
+        state[_S_SKIN_ANIMATION_DEFERRED] = False
         return
 
     profile_detail = _profile_enabled()
@@ -2815,7 +2898,7 @@ def _apply_deferred_skin_animations(state: dict | None) -> None:
                 _apply_animation(armature, root_node)
         _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels_by_joint)
 
-    state["skin_animation_deferred"] = False
+    state[_S_SKIN_ANIMATION_DEFERRED] = False
     pending.clear()
     if profile_detail:
         _profile_log(
