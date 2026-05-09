@@ -71,7 +71,15 @@ if(NOT CGLM_INCLUDE_DIR)
   message(FATAL_ERROR "cglm headers not found. Set ASSETKIT_ROOT to an AssetKit source root.")
 endif()
 
-Python3_add_library(_assetkit_blender MODULE src/native/assetkit_module.c WITH_SOABI)
+Python3_add_library(_assetkit_blender MODULE
+  src/native/assetkit_module.c
+  src/native/mem.c
+  WITH_SOABI)
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ASSETKIT_BLENDER_IPO_SUPPORTED OUTPUT ASSETKIT_BLENDER_IPO_ERROR)
+if(ASSETKIT_BLENDER_IPO_SUPPORTED)
+  set_target_properties(_assetkit_blender PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
 if(ASSETKIT_BLENDER_PYTHON_SOABI)
   string(REGEX REPLACE "^\\." "" ASSETKIT_BLENDER_PYTHON_SOABI_CLEAN "${ASSETKIT_BLENDER_PYTHON_SOABI}")
   set_target_properties(_assetkit_blender PROPERTIES

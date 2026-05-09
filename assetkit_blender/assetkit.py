@@ -214,7 +214,7 @@ class AkDoc(ctypes.Structure):
     ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MorphTargetData:
     name: str
     weight: float = 0.0
@@ -222,7 +222,7 @@ class MorphTargetData:
     positions_f32: object = b""
 
 
-@dataclass
+@dataclass(slots=True)
 class LoopFloatAttributeData:
     name: str
     set: int = 0
@@ -230,7 +230,7 @@ class LoopFloatAttributeData:
     values_f32: object = b""
 
 
-@dataclass
+@dataclass(slots=True)
 class TextureRefData:
     role: str = ""
     path: str = ""
@@ -258,7 +258,7 @@ class TextureRefData:
     sampler_extra: object | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class MeshPrimitiveData:
     name: str
     vertices: list[tuple[float, float, float]]
@@ -394,7 +394,7 @@ class MeshPrimitiveData:
     _native_owner: object | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class SceneNodeData:
     name: str
     parent_index: int = -1
@@ -417,7 +417,7 @@ class SceneNodeData:
     _native_owner: object | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class AssetKitSceneData:
     meshes: list[MeshPrimitiveData]
     nodes: list[SceneNodeData]
@@ -995,11 +995,426 @@ def _extra_child_path(extra: object, path: tuple[str, ...]) -> object | None:
     return node
 
 
+_NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
+    "uv_sets",
+    "color_sets",
+    "point_attrs",
+    "texture_infos",
+    "morph_targets",
+    "morph_presets",
+    "material_variants",
+    "skin_pose_anim_channels",
+    "anim_channels",
+    "morph_anim_channels",
+    "material_anim_channels",
+    "primitive_extra",
+    "mesh_extra",
+    "geometry_extra",
+    "material_extra",
+    "effect_extra",
+    "has_skin",
+    "has_gsplat",
+    "material_key",
+    "material_name",
+    "base_color_texture",
+    "metallic_roughness_texture",
+    "occlusion_texture",
+    "normal_texture",
+    "emissive_texture",
+    "transparent_texture",
+    "specular_texture",
+    "specular_color_texture",
+    "clearcoat_texture",
+    "clearcoat_roughness_texture",
+    "clearcoat_normal_texture",
+    "transmission_texture",
+    "sheen_color_texture",
+    "sheen_roughness_texture",
+    "iridescence_texture",
+    "iridescence_thickness_texture",
+    "volume_thickness_texture",
+    "anisotropy_texture",
+    "diffuse_transmission_texture",
+    "diffuse_transmission_color_texture",
+)
+
+(
+    _S_OWNER,
+    _S_NAME,
+    _S_OBJECT_NAME,
+    _S_VERTEX_COUNT,
+    _S_LOOP_COUNT,
+    _S_FACE_COUNT,
+    _S_PRIMITIVE_TYPE,
+    _S_PRIMITIVE_MODE,
+    _S_FILE_TYPE,
+    _S_MESH_KEY,
+    _S_PRIMITIVE_INDEX,
+    _S_ZERO_COPY_FLAGS,
+    _S_HAS_NODE,
+    _S_NODE_INDEX,
+    _S_MATRIX_F32,
+    _S_COORD_MATRIX_F32,
+    _S_INSTANCE_COUNT,
+    _S_INSTANCE_MATRICES_F32,
+    _S_VERTICES_F32,
+    _S_INDICES_U32,
+    _S_LOOP_STARTS_I32,
+    _S_LOOP_TOTALS_I32,
+    _S_NORMALS_F32,
+    _S_TANGENTS_F32,
+) = range(24)
+
+(
+    _M_OWNER,
+    _M_NAME,
+    _M_OBJECT_NAME,
+    _M_VERTEX_COUNT,
+    _M_LOOP_COUNT,
+    _M_FACE_COUNT,
+    _M_PRIMITIVE_TYPE,
+    _M_PRIMITIVE_MODE,
+    _M_MATERIAL_NAME,
+    _M_BASE_COLOR,
+    _M_TRANSPARENT_COLOR,
+    _M_EMISSIVE_COLOR,
+    _M_SPECULAR_COLOR,
+    _M_SHEEN_COLOR,
+    _M_VOLUME_ATTENUATION_COLOR,
+    _M_DIFFUSE_TRANSMISSION_COLOR,
+    _M_METALLIC,
+    _M_ROUGHNESS,
+    _M_ALPHA_CUTOFF,
+    _M_TRANSPARENT_AMOUNT,
+    _M_OPACITY,
+    _M_NORMAL_SCALE,
+    _M_OCCLUSION_STRENGTH,
+    _M_EMISSIVE_STRENGTH,
+    _M_SPECULAR_STRENGTH,
+    _M_IOR,
+    _M_CLEARCOAT,
+    _M_CLEARCOAT_ROUGHNESS,
+    _M_CLEARCOAT_NORMAL_SCALE,
+    _M_TRANSMISSION,
+    _M_SHEEN_ROUGHNESS,
+    _M_IRIDESCENCE,
+    _M_IRIDESCENCE_IOR,
+    _M_IRIDESCENCE_THICKNESS_MINIMUM,
+    _M_IRIDESCENCE_THICKNESS_MAXIMUM,
+    _M_VOLUME_THICKNESS,
+    _M_VOLUME_ATTENUATION_DISTANCE,
+    _M_ANISOTROPY,
+    _M_ANISOTROPY_ROTATION,
+    _M_DIFFUSE_TRANSMISSION,
+    _M_DISPERSION,
+    _M_ALPHA_MODE,
+    _M_TRANSPARENT_OPAQUE,
+    _M_DOUBLE_SIDED,
+    _M_MATERIAL_TYPE,
+    _M_FILE_TYPE,
+    _M_MESH_KEY,
+    _M_MATERIAL_KEY,
+    _M_PRIMITIVE_INDEX,
+    _M_HAS_NODE,
+    _M_NODE_INDEX,
+    _M_INSTANCE_COUNT,
+    _M_HAS_GSPLAT,
+    _M_GSPLAT_KERNEL,
+    _M_GSPLAT_COLOR_SPACE,
+    _M_GSPLAT_PROJECTION,
+    _M_GSPLAT_SORTING_METHOD,
+    _M_GSPLAT_DECODED_COUNT,
+    _M_HAS_SKIN,
+    _M_HAS_SHEEN,
+    _M_SKIN_VERTEX_COUNT,
+    _M_SKIN_JOINT_COUNT,
+    _M_SKIN_JOINT_WIDTH,
+    _M_SKIN_ROOT_NODE_INDEX,
+    _M_SKIN_MESH_IN_BIND_POSE,
+    _M_SKIN_POSE_ANIM_CHANNELS,
+    _M_ZERO_COPY_FLAGS,
+    _M_UV_SET_COUNT,
+    _M_COLOR_SET_COUNT,
+    _M_POINT_ATTR_COUNT,
+    _M_ANIM_COUNT,
+    _M_ANIM_CHANNELS,
+    _M_MORPH_TARGET_COUNT,
+    _M_MORPH_TARGETS,
+    _M_MORPH_PRESET_COUNT,
+    _M_MORPH_PRESETS,
+    _M_MORPH_ANIM_COUNT,
+    _M_MORPH_ANIM_CHANNELS,
+    _M_MATERIAL_ANIM_COUNT,
+    _M_MATERIAL_ANIM_CHANNELS,
+    _M_UV_SETS,
+    _M_COLOR_SETS,
+    _M_POINT_ATTRS,
+    _M_TEXTURE_INFOS,
+    _M_PRIMITIVE_EXTRA,
+    _M_MESH_EXTRA,
+    _M_GEOMETRY_EXTRA,
+    _M_MATERIAL_EXTRA,
+    _M_EFFECT_EXTRA,
+    _M_MATERIAL_VARIANT_COUNT,
+    _M_MATERIAL_VARIANTS,
+    _M_MATRIX_F32,
+    _M_COORD_MATRIX_F32,
+    _M_INSTANCE_MATRICES_F32,
+    _M_BASE_COLOR_TEXTURE,
+    _M_METALLIC_ROUGHNESS_TEXTURE,
+    _M_OCCLUSION_TEXTURE,
+    _M_NORMAL_TEXTURE,
+    _M_EMISSIVE_TEXTURE,
+    _M_TRANSPARENT_TEXTURE,
+    _M_SPECULAR_TEXTURE,
+    _M_SPECULAR_COLOR_TEXTURE,
+    _M_CLEARCOAT_TEXTURE,
+    _M_CLEARCOAT_ROUGHNESS_TEXTURE,
+    _M_CLEARCOAT_NORMAL_TEXTURE,
+    _M_TRANSMISSION_TEXTURE,
+    _M_SHEEN_COLOR_TEXTURE,
+    _M_SHEEN_ROUGHNESS_TEXTURE,
+    _M_IRIDESCENCE_TEXTURE,
+    _M_IRIDESCENCE_THICKNESS_TEXTURE,
+    _M_VOLUME_THICKNESS_TEXTURE,
+    _M_ANISOTROPY_TEXTURE,
+    _M_DIFFUSE_TRANSMISSION_TEXTURE,
+    _M_DIFFUSE_TRANSMISSION_COLOR_TEXTURE,
+    _M_VERTICES_F32,
+    _M_INDICES_U32,
+    _M_LOOP_STARTS_I32,
+    _M_LOOP_TOTALS_I32,
+    _M_NORMALS_F32,
+    _M_UVS_F32,
+    _M_COLORS_F32,
+    _M_TANGENTS_F32,
+    _M_SKIN_JOINTS_U16,
+    _M_SKIN_WEIGHTS_F32,
+    _M_SKIN_JOINT_NODES_I32,
+    _M_SKIN_INVERSE_BIND_MATRICES_F32,
+    _M_SKIN_BIND_SHAPE_MATRIX_F32,
+) = range(127)
+
+_M_FIELD_NAMES = (
+    "_owner",
+    "name",
+    "object_name",
+    "vertex_count",
+    "loop_count",
+    "face_count",
+    "primitive_type",
+    "primitive_mode",
+    "material_name",
+    "base_color",
+    "transparent_color",
+    "emissive_color",
+    "specular_color",
+    "sheen_color",
+    "volume_attenuation_color",
+    "diffuse_transmission_color",
+    "metallic",
+    "roughness",
+    "alpha_cutoff",
+    "transparent_amount",
+    "opacity",
+    "normal_scale",
+    "occlusion_strength",
+    "emissive_strength",
+    "specular_strength",
+    "ior",
+    "clearcoat",
+    "clearcoat_roughness",
+    "clearcoat_normal_scale",
+    "transmission",
+    "sheen_roughness",
+    "iridescence",
+    "iridescence_ior",
+    "iridescence_thickness_minimum",
+    "iridescence_thickness_maximum",
+    "volume_thickness",
+    "volume_attenuation_distance",
+    "anisotropy",
+    "anisotropy_rotation",
+    "diffuse_transmission",
+    "dispersion",
+    "alpha_mode",
+    "transparent_opaque",
+    "double_sided",
+    "material_type",
+    "file_type",
+    "mesh_key",
+    "material_key",
+    "primitive_index",
+    "has_node",
+    "node_index",
+    "instance_count",
+    "has_gsplat",
+    "gsplat_kernel",
+    "gsplat_color_space",
+    "gsplat_projection",
+    "gsplat_sorting_method",
+    "gsplat_decoded_count",
+    "has_skin",
+    "has_sheen",
+    "skin_vertex_count",
+    "skin_joint_count",
+    "skin_joint_width",
+    "skin_root_node_index",
+    "skin_mesh_in_bind_pose",
+    "skin_pose_anim_channels",
+    "zero_copy_flags",
+    "uv_set_count",
+    "color_set_count",
+    "point_attr_count",
+    "anim_count",
+    "anim_channels",
+    "morph_target_count",
+    "morph_targets",
+    "morph_preset_count",
+    "morph_presets",
+    "morph_anim_count",
+    "morph_anim_channels",
+    "material_anim_count",
+    "material_anim_channels",
+    "uv_sets",
+    "color_sets",
+    "point_attrs",
+    "texture_infos",
+    "primitive_extra",
+    "mesh_extra",
+    "geometry_extra",
+    "material_extra",
+    "effect_extra",
+    "material_variant_count",
+    "material_variants",
+    "matrix_f32",
+    "coord_matrix_f32",
+    "instance_matrices_f32",
+    "base_color_texture",
+    "metallic_roughness_texture",
+    "occlusion_texture",
+    "normal_texture",
+    "emissive_texture",
+    "transparent_texture",
+    "specular_texture",
+    "specular_color_texture",
+    "clearcoat_texture",
+    "clearcoat_roughness_texture",
+    "clearcoat_normal_texture",
+    "transmission_texture",
+    "sheen_color_texture",
+    "sheen_roughness_texture",
+    "iridescence_texture",
+    "iridescence_thickness_texture",
+    "volume_thickness_texture",
+    "anisotropy_texture",
+    "diffuse_transmission_texture",
+    "diffuse_transmission_color_texture",
+    "vertices_f32",
+    "indices_u32",
+    "loop_starts_i32",
+    "loop_totals_i32",
+    "normals_f32",
+    "uvs_f32",
+    "colors_f32",
+    "tangents_f32",
+    "skin_joints_u16",
+    "skin_weights_f32",
+    "skin_joint_nodes_i32",
+    "skin_inverse_bind_matrices_f32",
+    "skin_bind_shape_matrix_f32",
+)
+
+
+def _native_mesh_field_getter(item):
+    if isinstance(item, tuple):
+        return item.__getitem__
+    names = _M_FIELD_NAMES
+    return lambda index: item.get(names[index])
+
+
+def _native_mesh_is_simple(item: object) -> bool:
+    if isinstance(item, tuple):
+        return len(item) == 24
+    if not isinstance(item, dict):
+        return False
+    if "material_name" not in item and "uv_sets" not in item:
+        return True
+    for key in _NATIVE_SIMPLE_MESH_COMPLEX_KEYS:
+        if item.get(key):
+            return False
+    return True
+
+
+def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
+    if isinstance(item, tuple):
+        data = MeshPrimitiveData(item[_S_NAME] or "AssetKitMesh", [], [], [], [], [])
+        data.vertex_count = int(item[_S_VERTEX_COUNT] or 0)
+        data.loop_count = int(item[_S_LOOP_COUNT] or 0)
+        data.face_count = int(item[_S_FACE_COUNT] or 0)
+        data.primitive_type = int(item[_S_PRIMITIVE_TYPE] or AK_PRIMITIVE_TRIANGLES)
+        data.primitive_mode = int(item[_S_PRIMITIVE_MODE] or 0)
+        data.vertices_f32 = item[_S_VERTICES_F32] or b""
+        data.indices_u32 = item[_S_INDICES_U32] or b""
+        data.loop_starts_i32 = item[_S_LOOP_STARTS_I32] or b""
+        data.loop_totals_i32 = item[_S_LOOP_TOTALS_I32] or b""
+        data.normals_f32 = item[_S_NORMALS_F32] or b""
+        data.tangents_f32 = item[_S_TANGENTS_F32] or b""
+        data.object_name = item[_S_OBJECT_NAME] or ""
+        data.matrix_f32 = item[_S_MATRIX_F32] or b""
+        data.coord_matrix_f32 = item[_S_COORD_MATRIX_F32] or b""
+        data.instance_matrices_f32 = item[_S_INSTANCE_MATRICES_F32] or b""
+        data.node_index = int(item[_S_NODE_INDEX] if item[_S_NODE_INDEX] is not None else -1)
+        data.instance_count = int(item[_S_INSTANCE_COUNT] or 0)
+        data.has_node = bool(item[_S_HAS_NODE])
+        data.file_type = int(item[_S_FILE_TYPE] or 0)
+        data.mesh_key = int(item[_S_MESH_KEY] or 0)
+        data.primitive_index = int(item[_S_PRIMITIVE_INDEX] or 0)
+        data.zero_copy_flags = int(item[_S_ZERO_COPY_FLAGS] or 0)
+        data._native_owner = item[_S_OWNER]
+        return data
+
+    get = item.get
+    data = MeshPrimitiveData(get("name") or "AssetKitMesh", [], [], [], [], [])
+    data.vertex_count = int(get("vertex_count") or 0)
+    data.loop_count = int(get("loop_count") or 0)
+    data.face_count = int(get("face_count") or 0)
+    data.primitive_type = int(get("primitive_type") or AK_PRIMITIVE_TRIANGLES)
+    data.primitive_mode = int(get("primitive_mode") or 0)
+    data.vertices_f32 = get("vertices_f32") or b""
+    data.indices_u32 = get("indices_u32") or b""
+    data.loop_starts_i32 = get("loop_starts_i32") or b""
+    data.loop_totals_i32 = get("loop_totals_i32") or b""
+    data.normals_f32 = get("normals_f32") or b""
+    data.uvs_f32 = get("uvs_f32") or b""
+    data.colors_f32 = get("colors_f32") or b""
+    data.tangents_f32 = get("tangents_f32") or b""
+    data.object_name = get("object_name") or ""
+    data.matrix_f32 = get("matrix_f32") or b""
+    data.coord_matrix_f32 = get("coord_matrix_f32") or b""
+    data.instance_matrices_f32 = get("instance_matrices_f32") or b""
+    node_index = get("node_index")
+    data.node_index = int(node_index if node_index is not None else -1)
+    data.instance_count = int(get("instance_count") or 0)
+    data.has_node = bool(get("has_node"))
+    data.file_type = int(get("file_type") or 0)
+    data.mesh_key = int(get("mesh_key") or 0)
+    data.primitive_index = int(get("primitive_index") or 0)
+    data.zero_copy_flags = int(get("zero_copy_flags") or 0)
+    data._native_owner = get("_owner")
+    return data
+
+
 def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveData]:
     meshes = []
     for item in raw_meshes:
+        if _native_mesh_is_simple(item):
+            meshes.append(_native_simple_mesh_from_raw(item))
+            continue
+
+        get = _native_mesh_field_getter(item)
         uv_sets = []
-        for attr in item.get("uv_sets") or []:
+        for attr in get(_M_UV_SETS) or []:
             uv_sets.append(
                 LoopFloatAttributeData(
                     name=attr.get("name") or "UVMap",
@@ -1010,7 +1425,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
             )
 
         color_sets = []
-        for attr in item.get("color_sets") or []:
+        for attr in get(_M_COLOR_SETS) or []:
             color_sets.append(
                 LoopFloatAttributeData(
                     name=attr.get("name") or "Color",
@@ -1021,7 +1436,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
             )
 
         point_attrs = []
-        for attr in item.get("point_attrs") or []:
+        for attr in get(_M_POINT_ATTRS) or []:
             point_attrs.append(
                 LoopFloatAttributeData(
                     name=attr.get("name") or "assetkit_point_attr",
@@ -1032,7 +1447,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
             )
 
         texture_infos = {}
-        for role, info in (item.get("texture_infos") or {}).items():
+        for role, info in (get(_M_TEXTURE_INFOS) or {}).items():
             texture_infos[str(role)] = TextureRefData(
                 role=str(role),
                 path=info.get("path") or "",
@@ -1065,7 +1480,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
             )
 
         morph_targets = []
-        for target in item.get("morph_targets") or []:
+        for target in get(_M_MORPH_TARGETS) or []:
             morph_targets.append(
                 MorphTargetData(
                     name=target.get("name") or "AssetKitMorph",
@@ -1077,154 +1492,154 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
 
         meshes.append(
             MeshPrimitiveData(
-                name=item.get("name") or "AssetKitMesh",
+                name=get(_M_NAME) or "AssetKitMesh",
                 vertices=[],
                 faces=[],
                 normals=[],
                 uvs=[],
                 loop_vertex_indices=[],
-                vertex_count=int(item.get("vertex_count") or 0),
-                loop_count=int(item.get("loop_count") or 0),
-                face_count=int(item.get("face_count") or 0),
-                primitive_type=int(item.get("primitive_type") or AK_PRIMITIVE_TRIANGLES),
-                primitive_mode=int(item.get("primitive_mode") or 0),
-                vertices_f32=item.get("vertices_f32") or b"",
-                indices_u32=item.get("indices_u32") or b"",
-                loop_starts_i32=item.get("loop_starts_i32") or b"",
-                loop_totals_i32=item.get("loop_totals_i32") or b"",
-                normals_f32=item.get("normals_f32") or b"",
-                uvs_f32=item.get("uvs_f32") or b"",
-                colors_f32=item.get("colors_f32") or b"",
-                tangents_f32=item.get("tangents_f32") or b"",
-                skin_joints_u16=item.get("skin_joints_u16") or b"",
-                skin_weights_f32=item.get("skin_weights_f32") or b"",
-                skin_joint_nodes_i32=item.get("skin_joint_nodes_i32") or b"",
-                skin_inverse_bind_matrices_f32=item.get("skin_inverse_bind_matrices_f32") or b"",
-                skin_bind_shape_matrix_f32=item.get("skin_bind_shape_matrix_f32") or b"",
-                skin_pose_anim_channels=item.get("skin_pose_anim_channels") or [],
-                anim_channels=item.get("anim_channels") or [],
+                vertex_count=int(get(_M_VERTEX_COUNT) or 0),
+                loop_count=int(get(_M_LOOP_COUNT) or 0),
+                face_count=int(get(_M_FACE_COUNT) or 0),
+                primitive_type=int(get(_M_PRIMITIVE_TYPE) or AK_PRIMITIVE_TRIANGLES),
+                primitive_mode=int(get(_M_PRIMITIVE_MODE) or 0),
+                vertices_f32=get(_M_VERTICES_F32) or b"",
+                indices_u32=get(_M_INDICES_U32) or b"",
+                loop_starts_i32=get(_M_LOOP_STARTS_I32) or b"",
+                loop_totals_i32=get(_M_LOOP_TOTALS_I32) or b"",
+                normals_f32=get(_M_NORMALS_F32) or b"",
+                uvs_f32=get(_M_UVS_F32) or b"",
+                colors_f32=get(_M_COLORS_F32) or b"",
+                tangents_f32=get(_M_TANGENTS_F32) or b"",
+                skin_joints_u16=get(_M_SKIN_JOINTS_U16) or b"",
+                skin_weights_f32=get(_M_SKIN_WEIGHTS_F32) or b"",
+                skin_joint_nodes_i32=get(_M_SKIN_JOINT_NODES_I32) or b"",
+                skin_inverse_bind_matrices_f32=get(_M_SKIN_INVERSE_BIND_MATRICES_F32) or b"",
+                skin_bind_shape_matrix_f32=get(_M_SKIN_BIND_SHAPE_MATRIX_F32) or b"",
+                skin_pose_anim_channels=get(_M_SKIN_POSE_ANIM_CHANNELS) or [],
+                anim_channels=get(_M_ANIM_CHANNELS) or [],
                 uv_sets=uv_sets,
                 color_sets=color_sets,
                 point_attrs=point_attrs,
                 texture_infos=texture_infos,
                 morph_targets=morph_targets,
-                morph_presets=item.get("morph_presets") or [],
-                material_variants=item.get("material_variants") or [],
-                morph_anim_channels=item.get("morph_anim_channels") or [],
-                material_anim_channels=item.get("material_anim_channels") or [],
-                object_name=item.get("object_name") or "",
-                matrix_f32=item.get("matrix_f32") or b"",
-                coord_matrix_f32=item.get("coord_matrix_f32") or b"",
-                instance_matrices_f32=item.get("instance_matrices_f32") or b"",
-                node_index=int(item.get("node_index") if item.get("node_index") is not None else -1),
-                instance_count=int(item.get("instance_count") or 0),
-                has_node=bool(item.get("has_node")),
-                has_gsplat=bool(item.get("has_gsplat")),
-                gsplat_kernel=int(item.get("gsplat_kernel") or 0),
-                gsplat_color_space=int(item.get("gsplat_color_space") or 0),
-                gsplat_projection=int(item.get("gsplat_projection") or 0),
-                gsplat_sorting_method=int(item.get("gsplat_sorting_method") or 0),
-                gsplat_decoded_count=int(item.get("gsplat_decoded_count") or 0),
-                has_skin=bool(item.get("has_skin")),
-                anim_count=int(item.get("anim_count") or 0),
-                morph_target_count=int(item.get("morph_target_count") or 0),
-                morph_preset_count=int(item.get("morph_preset_count") or 0),
-                morph_anim_count=int(item.get("morph_anim_count") or 0),
-                material_anim_count=int(item.get("material_anim_count") or 0),
-                material_variant_count=int(item.get("material_variant_count") or 0),
-                primitive_extra=item.get("primitive_extra"),
-                mesh_extra=item.get("mesh_extra"),
-                geometry_extra=item.get("geometry_extra"),
-                material_extra=item.get("material_extra"),
-                effect_extra=item.get("effect_extra"),
-                skin_vertex_count=int(item.get("skin_vertex_count") or 0),
-                skin_joint_count=int(item.get("skin_joint_count") or 0),
-                skin_joint_width=int(item.get("skin_joint_width") or 0),
-                uv_set_count=int(item.get("uv_set_count") or 0),
-                color_set_count=int(item.get("color_set_count") or 0),
-                point_attr_count=int(item.get("point_attr_count") or 0),
-                skin_root_node_index=int(item.get("skin_root_node_index") if item.get("skin_root_node_index") is not None else -1),
-                material_name=item.get("material_name") or "",
-                base_color=tuple(item.get("base_color") or (1.0, 1.0, 1.0, 1.0)),
-                transparent_color=tuple(item.get("transparent_color") or (1.0, 1.0, 1.0, 1.0)),
-                emissive_color=tuple(item.get("emissive_color") or (0.0, 0.0, 0.0)),
-                specular_color=tuple(item.get("specular_color") or (1.0, 1.0, 1.0)),
-                sheen_color=tuple(item.get("sheen_color") or (0.0, 0.0, 0.0)),
-                volume_attenuation_color=tuple(item.get("volume_attenuation_color") or (1.0, 1.0, 1.0)),
-                diffuse_transmission_color=tuple(item.get("diffuse_transmission_color") or (1.0, 1.0, 1.0)),
-                metallic=float(item.get("metallic") if item.get("metallic") is not None else 1.0),
-                roughness=float(item.get("roughness") if item.get("roughness") is not None else 1.0),
-                alpha_cutoff=float(item.get("alpha_cutoff") if item.get("alpha_cutoff") is not None else 0.5),
-                transparent_amount=float(item.get("transparent_amount") if item.get("transparent_amount") is not None else 1.0),
-                opacity=float(item.get("opacity") if item.get("opacity") is not None else 1.0),
-                normal_scale=float(item.get("normal_scale") if item.get("normal_scale") is not None else 1.0),
-                occlusion_strength=float(item.get("occlusion_strength") if item.get("occlusion_strength") is not None else 1.0),
-                emissive_strength=float(item.get("emissive_strength") if item.get("emissive_strength") is not None else 1.0),
-                specular_strength=float(item.get("specular_strength") if item.get("specular_strength") is not None else 1.0),
-                ior=float(item.get("ior") if item.get("ior") is not None else 1.5),
-                clearcoat=float(item.get("clearcoat") if item.get("clearcoat") is not None else 0.0),
-                clearcoat_roughness=float(item.get("clearcoat_roughness") if item.get("clearcoat_roughness") is not None else 0.0),
-                clearcoat_normal_scale=float(item.get("clearcoat_normal_scale") if item.get("clearcoat_normal_scale") is not None else 1.0),
-                transmission=float(item.get("transmission") if item.get("transmission") is not None else 0.0),
-                sheen_roughness=float(item.get("sheen_roughness") if item.get("sheen_roughness") is not None else 0.0),
-                iridescence=float(item.get("iridescence") if item.get("iridescence") is not None else 0.0),
-                iridescence_ior=float(item.get("iridescence_ior") if item.get("iridescence_ior") is not None else 1.3),
+                morph_presets=get(_M_MORPH_PRESETS) or [],
+                material_variants=get(_M_MATERIAL_VARIANTS) or [],
+                morph_anim_channels=get(_M_MORPH_ANIM_CHANNELS) or [],
+                material_anim_channels=get(_M_MATERIAL_ANIM_CHANNELS) or [],
+                object_name=get(_M_OBJECT_NAME) or "",
+                matrix_f32=get(_M_MATRIX_F32) or b"",
+                coord_matrix_f32=get(_M_COORD_MATRIX_F32) or b"",
+                instance_matrices_f32=get(_M_INSTANCE_MATRICES_F32) or b"",
+                node_index=int(get(_M_NODE_INDEX) if get(_M_NODE_INDEX) is not None else -1),
+                instance_count=int(get(_M_INSTANCE_COUNT) or 0),
+                has_node=bool(get(_M_HAS_NODE)),
+                has_gsplat=bool(get(_M_HAS_GSPLAT)),
+                gsplat_kernel=int(get(_M_GSPLAT_KERNEL) or 0),
+                gsplat_color_space=int(get(_M_GSPLAT_COLOR_SPACE) or 0),
+                gsplat_projection=int(get(_M_GSPLAT_PROJECTION) or 0),
+                gsplat_sorting_method=int(get(_M_GSPLAT_SORTING_METHOD) or 0),
+                gsplat_decoded_count=int(get(_M_GSPLAT_DECODED_COUNT) or 0),
+                has_skin=bool(get(_M_HAS_SKIN)),
+                anim_count=int(get(_M_ANIM_COUNT) or 0),
+                morph_target_count=int(get(_M_MORPH_TARGET_COUNT) or 0),
+                morph_preset_count=int(get(_M_MORPH_PRESET_COUNT) or 0),
+                morph_anim_count=int(get(_M_MORPH_ANIM_COUNT) or 0),
+                material_anim_count=int(get(_M_MATERIAL_ANIM_COUNT) or 0),
+                material_variant_count=int(get(_M_MATERIAL_VARIANT_COUNT) or 0),
+                primitive_extra=get(_M_PRIMITIVE_EXTRA),
+                mesh_extra=get(_M_MESH_EXTRA),
+                geometry_extra=get(_M_GEOMETRY_EXTRA),
+                material_extra=get(_M_MATERIAL_EXTRA),
+                effect_extra=get(_M_EFFECT_EXTRA),
+                skin_vertex_count=int(get(_M_SKIN_VERTEX_COUNT) or 0),
+                skin_joint_count=int(get(_M_SKIN_JOINT_COUNT) or 0),
+                skin_joint_width=int(get(_M_SKIN_JOINT_WIDTH) or 0),
+                uv_set_count=int(get(_M_UV_SET_COUNT) or 0),
+                color_set_count=int(get(_M_COLOR_SET_COUNT) or 0),
+                point_attr_count=int(get(_M_POINT_ATTR_COUNT) or 0),
+                skin_root_node_index=int(get(_M_SKIN_ROOT_NODE_INDEX) if get(_M_SKIN_ROOT_NODE_INDEX) is not None else -1),
+                material_name=get(_M_MATERIAL_NAME) or "",
+                base_color=tuple(get(_M_BASE_COLOR) or (1.0, 1.0, 1.0, 1.0)),
+                transparent_color=tuple(get(_M_TRANSPARENT_COLOR) or (1.0, 1.0, 1.0, 1.0)),
+                emissive_color=tuple(get(_M_EMISSIVE_COLOR) or (0.0, 0.0, 0.0)),
+                specular_color=tuple(get(_M_SPECULAR_COLOR) or (1.0, 1.0, 1.0)),
+                sheen_color=tuple(get(_M_SHEEN_COLOR) or (0.0, 0.0, 0.0)),
+                volume_attenuation_color=tuple(get(_M_VOLUME_ATTENUATION_COLOR) or (1.0, 1.0, 1.0)),
+                diffuse_transmission_color=tuple(get(_M_DIFFUSE_TRANSMISSION_COLOR) or (1.0, 1.0, 1.0)),
+                metallic=float(get(_M_METALLIC) if get(_M_METALLIC) is not None else 1.0),
+                roughness=float(get(_M_ROUGHNESS) if get(_M_ROUGHNESS) is not None else 1.0),
+                alpha_cutoff=float(get(_M_ALPHA_CUTOFF) if get(_M_ALPHA_CUTOFF) is not None else 0.5),
+                transparent_amount=float(get(_M_TRANSPARENT_AMOUNT) if get(_M_TRANSPARENT_AMOUNT) is not None else 1.0),
+                opacity=float(get(_M_OPACITY) if get(_M_OPACITY) is not None else 1.0),
+                normal_scale=float(get(_M_NORMAL_SCALE) if get(_M_NORMAL_SCALE) is not None else 1.0),
+                occlusion_strength=float(get(_M_OCCLUSION_STRENGTH) if get(_M_OCCLUSION_STRENGTH) is not None else 1.0),
+                emissive_strength=float(get(_M_EMISSIVE_STRENGTH) if get(_M_EMISSIVE_STRENGTH) is not None else 1.0),
+                specular_strength=float(get(_M_SPECULAR_STRENGTH) if get(_M_SPECULAR_STRENGTH) is not None else 1.0),
+                ior=float(get(_M_IOR) if get(_M_IOR) is not None else 1.5),
+                clearcoat=float(get(_M_CLEARCOAT) if get(_M_CLEARCOAT) is not None else 0.0),
+                clearcoat_roughness=float(get(_M_CLEARCOAT_ROUGHNESS) if get(_M_CLEARCOAT_ROUGHNESS) is not None else 0.0),
+                clearcoat_normal_scale=float(get(_M_CLEARCOAT_NORMAL_SCALE) if get(_M_CLEARCOAT_NORMAL_SCALE) is not None else 1.0),
+                transmission=float(get(_M_TRANSMISSION) if get(_M_TRANSMISSION) is not None else 0.0),
+                sheen_roughness=float(get(_M_SHEEN_ROUGHNESS) if get(_M_SHEEN_ROUGHNESS) is not None else 0.0),
+                iridescence=float(get(_M_IRIDESCENCE) if get(_M_IRIDESCENCE) is not None else 0.0),
+                iridescence_ior=float(get(_M_IRIDESCENCE_IOR) if get(_M_IRIDESCENCE_IOR) is not None else 1.3),
                 iridescence_thickness_minimum=float(
-                    item.get("iridescence_thickness_minimum")
-                    if item.get("iridescence_thickness_minimum") is not None
+                    get(_M_IRIDESCENCE_THICKNESS_MINIMUM)
+                    if get(_M_IRIDESCENCE_THICKNESS_MINIMUM) is not None
                     else 100.0
                 ),
                 iridescence_thickness_maximum=float(
-                    item.get("iridescence_thickness_maximum")
-                    if item.get("iridescence_thickness_maximum") is not None
+                    get(_M_IRIDESCENCE_THICKNESS_MAXIMUM)
+                    if get(_M_IRIDESCENCE_THICKNESS_MAXIMUM) is not None
                     else 400.0
                 ),
-                volume_thickness=float(item.get("volume_thickness") if item.get("volume_thickness") is not None else 0.0),
+                volume_thickness=float(get(_M_VOLUME_THICKNESS) if get(_M_VOLUME_THICKNESS) is not None else 0.0),
                 volume_attenuation_distance=float(
-                    item.get("volume_attenuation_distance")
-                    if item.get("volume_attenuation_distance") is not None
+                    get(_M_VOLUME_ATTENUATION_DISTANCE)
+                    if get(_M_VOLUME_ATTENUATION_DISTANCE) is not None
                     else 1000000.0
                 ),
-                anisotropy=float(item.get("anisotropy") if item.get("anisotropy") is not None else 0.0),
-                anisotropy_rotation=float(item.get("anisotropy_rotation") if item.get("anisotropy_rotation") is not None else 0.0),
+                anisotropy=float(get(_M_ANISOTROPY) if get(_M_ANISOTROPY) is not None else 0.0),
+                anisotropy_rotation=float(get(_M_ANISOTROPY_ROTATION) if get(_M_ANISOTROPY_ROTATION) is not None else 0.0),
                 diffuse_transmission=float(
-                    item.get("diffuse_transmission")
-                    if item.get("diffuse_transmission") is not None
+                    get(_M_DIFFUSE_TRANSMISSION)
+                    if get(_M_DIFFUSE_TRANSMISSION) is not None
                     else 0.0
                 ),
-                dispersion=float(item.get("dispersion") if item.get("dispersion") is not None else 0.0),
-                alpha_mode=int(item.get("alpha_mode") or 0),
-                transparent_opaque=int(item.get("transparent_opaque") or 0),
-                double_sided=bool(item.get("double_sided")),
-                has_sheen=bool(item.get("has_sheen")),
-                skin_mesh_in_bind_pose=bool(item.get("skin_mesh_in_bind_pose")),
-                material_type=int(item.get("material_type") or 0),
-                file_type=int(item.get("file_type") or 0),
-                mesh_key=int(item.get("mesh_key") or 0),
-                material_key=int(item.get("material_key") or 0),
-                primitive_index=int(item.get("primitive_index") or 0),
-                zero_copy_flags=int(item.get("zero_copy_flags") or 0),
-                base_color_texture=item.get("base_color_texture") or "",
-                metallic_roughness_texture=item.get("metallic_roughness_texture") or "",
-                occlusion_texture=item.get("occlusion_texture") or "",
-                normal_texture=item.get("normal_texture") or "",
-                emissive_texture=item.get("emissive_texture") or "",
-                transparent_texture=item.get("transparent_texture") or "",
-                specular_texture=item.get("specular_texture") or "",
-                specular_color_texture=item.get("specular_color_texture") or "",
-                clearcoat_texture=item.get("clearcoat_texture") or "",
-                clearcoat_roughness_texture=item.get("clearcoat_roughness_texture") or "",
-                clearcoat_normal_texture=item.get("clearcoat_normal_texture") or "",
-                transmission_texture=item.get("transmission_texture") or "",
-                sheen_color_texture=item.get("sheen_color_texture") or "",
-                sheen_roughness_texture=item.get("sheen_roughness_texture") or "",
-                iridescence_texture=item.get("iridescence_texture") or "",
-                iridescence_thickness_texture=item.get("iridescence_thickness_texture") or "",
-                volume_thickness_texture=item.get("volume_thickness_texture") or "",
-                anisotropy_texture=item.get("anisotropy_texture") or "",
-                diffuse_transmission_texture=item.get("diffuse_transmission_texture") or "",
-                diffuse_transmission_color_texture=item.get("diffuse_transmission_color_texture") or "",
-                _native_owner=item.get("_owner"),
+                dispersion=float(get(_M_DISPERSION) if get(_M_DISPERSION) is not None else 0.0),
+                alpha_mode=int(get(_M_ALPHA_MODE) or 0),
+                transparent_opaque=int(get(_M_TRANSPARENT_OPAQUE) or 0),
+                double_sided=bool(get(_M_DOUBLE_SIDED)),
+                has_sheen=bool(get(_M_HAS_SHEEN)),
+                skin_mesh_in_bind_pose=bool(get(_M_SKIN_MESH_IN_BIND_POSE)),
+                material_type=int(get(_M_MATERIAL_TYPE) or 0),
+                file_type=int(get(_M_FILE_TYPE) or 0),
+                mesh_key=int(get(_M_MESH_KEY) or 0),
+                material_key=int(get(_M_MATERIAL_KEY) or 0),
+                primitive_index=int(get(_M_PRIMITIVE_INDEX) or 0),
+                zero_copy_flags=int(get(_M_ZERO_COPY_FLAGS) or 0),
+                base_color_texture=get(_M_BASE_COLOR_TEXTURE) or "",
+                metallic_roughness_texture=get(_M_METALLIC_ROUGHNESS_TEXTURE) or "",
+                occlusion_texture=get(_M_OCCLUSION_TEXTURE) or "",
+                normal_texture=get(_M_NORMAL_TEXTURE) or "",
+                emissive_texture=get(_M_EMISSIVE_TEXTURE) or "",
+                transparent_texture=get(_M_TRANSPARENT_TEXTURE) or "",
+                specular_texture=get(_M_SPECULAR_TEXTURE) or "",
+                specular_color_texture=get(_M_SPECULAR_COLOR_TEXTURE) or "",
+                clearcoat_texture=get(_M_CLEARCOAT_TEXTURE) or "",
+                clearcoat_roughness_texture=get(_M_CLEARCOAT_ROUGHNESS_TEXTURE) or "",
+                clearcoat_normal_texture=get(_M_CLEARCOAT_NORMAL_TEXTURE) or "",
+                transmission_texture=get(_M_TRANSMISSION_TEXTURE) or "",
+                sheen_color_texture=get(_M_SHEEN_COLOR_TEXTURE) or "",
+                sheen_roughness_texture=get(_M_SHEEN_ROUGHNESS_TEXTURE) or "",
+                iridescence_texture=get(_M_IRIDESCENCE_TEXTURE) or "",
+                iridescence_thickness_texture=get(_M_IRIDESCENCE_THICKNESS_TEXTURE) or "",
+                volume_thickness_texture=get(_M_VOLUME_THICKNESS_TEXTURE) or "",
+                anisotropy_texture=get(_M_ANISOTROPY_TEXTURE) or "",
+                diffuse_transmission_texture=get(_M_DIFFUSE_TRANSMISSION_TEXTURE) or "",
+                diffuse_transmission_color_texture=get(_M_DIFFUSE_TRANSMISSION_COLOR_TEXTURE) or "",
+                _native_owner=get(_M_OWNER),
             )
         )
     return meshes

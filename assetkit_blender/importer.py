@@ -109,6 +109,7 @@ _ANIM_TEXTURE_TRANSFORM_ROLES = (
     "diffuse_transmission_color",
 )
 _MATERIAL_TEXTURE_FIELDS = tuple(f"{role}_texture" for role in _ANIM_TEXTURE_TRANSFORM_ROLES)
+_TEXTURE_IMAGE_CACHE: dict[tuple[str, str], object] = {}
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_HERMITE = 4
 _INTERPOLATION_STEP = 6
@@ -679,7 +680,6 @@ def _create_grouped_mesh_object(
     indices = bytearray(total_loop_count * 4)
     loop_starts = bytearray(total_face_count * 4)
     loop_totals = bytearray(total_face_count * 4)
-    material_indices = bytearray(total_face_count * 4)
     normals = bytearray(total_loop_count * 3 * 4) if first.normals_f32 else None
     tangents = bytearray(total_loop_count * 4 * 4) if first.tangents_f32 else None
     skin_joints = bytearray(total_vertex_count * skin_joint_width * 2) if first.has_skin else None
@@ -687,6 +687,8 @@ def _create_grouped_mesh_object(
     attr_started_at = time.perf_counter() if profile_detail else 0.0
     uv_sets = _group_loop_float_attrs(primitives, "uv_sets")
     color_sets = _group_loop_float_attrs(primitives, "color_sets")
+    has_materials = any(_has_material_data(primitive) for primitive in primitives)
+    material_indices = bytearray(total_face_count * 4) if has_materials else b""
     attr_ms = (time.perf_counter() - attr_started_at) * 1000.0 if profile_detail else 0.0
 
     assemble_started_at = time.perf_counter() if profile_detail else 0.0
@@ -732,7 +734,8 @@ def _create_grouped_mesh_object(
         else:
             _copy_buffer_bytes(loop_totals, face_offset * 4, array("i", [3]) * int(primitive.face_count), "i")
 
-        _copy_buffer_bytes(material_indices, face_offset * 4, array("i", [slot_index]) * int(primitive.face_count), "i")
+        if has_materials:
+            _copy_buffer_bytes(material_indices, face_offset * 4, array("i", [slot_index]) * int(primitive.face_count), "i")
         if normals is not None:
             view = _buffer_view(primitive.normals_f32, "f")
             if view is not None:
@@ -790,6 +793,7 @@ def _create_grouped_mesh_object(
         apply_animation=(not use_node_parent and not defer_animation),
         apply_skin_animation=not bool(state.get("skin_animation_deferred")),
         deferred_skin_animations=state.get("deferred_skin_animations"),
+        has_materials=has_materials,
         shading_mode=shading_mode,
         collection=collection,
     )
@@ -861,6 +865,7 @@ def _create_grouped_mesh_object_bulk(
     apply_animation: bool = True,
     apply_skin_animation: bool = True,
     deferred_skin_animations: list | None = None,
+    has_materials: bool = True,
     shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
@@ -935,12 +940,15 @@ def _create_grouped_mesh_object_bulk(
         detail_parts.append(f"tangent={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
 
+    normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
+    shading_done = _apply_shading(mesh, shading_mode, normals)
     mesh.update(calc_edges=True)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"update={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
-    _apply_shading(mesh, shading_mode, _buffer_view(data.normals_f32, "f") if data.normals_f32 else None)
+    if not shading_done:
+        _apply_shading(mesh, shading_mode, normals)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"shading={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -964,10 +972,11 @@ def _create_grouped_mesh_object_bulk(
         detail_parts.append(f"object={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
 
-    for primitive in primitives:
-        material = _create_material(primitive, material_cache)
-        if material:
-            mesh.materials.append(material)
+    if has_materials:
+        for primitive in primitives:
+            material = _create_material(primitive, material_cache)
+            if material:
+                mesh.materials.append(material)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"materials={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -2179,9 +2188,11 @@ def _create_mesh_object_bulk(
             if not _apply_vector_attribute(mesh, "assetkit_tangent", tangents, "FLOAT4", "CORNER"):
                 _apply_split_attribute(mesh, "assetkit_tangent", tangents, ("x", "y", "z", "w"), "CORNER")
 
+    normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
+    shading_done = _apply_shading(mesh, shading_mode, normals)
     mesh.update(calc_edges=True)
-
-    _apply_shading(mesh, shading_mode, _buffer_view(data.normals_f32, "f") if data.normals_f32 else None)
+    if not shading_done:
+        _apply_shading(mesh, shading_mode, normals)
     return _finish_mesh_object(
         mesh,
         data,
@@ -2530,6 +2541,8 @@ def _set_mesh_edges(mesh: bpy.types.Mesh, indices: memoryview) -> None:
 
 
 def _set_mesh_material_indices(mesh: bpy.types.Mesh, material_indices: object) -> None:
+    if not material_indices:
+        return
     values = _buffer_view(material_indices, "i") or material_indices
     attr = _mesh_attribute_ensure(mesh, "material_index", "INT", "FACE")
     if attr is not None:
@@ -2545,17 +2558,17 @@ def _apply_shading(
     mesh: bpy.types.Mesh,
     mode: str,
     normals: object | None,
-) -> None:
+) -> bool:
     if mode == "FLAT":
         _set_mesh_smooth(mesh, False)
-        return
+        return True
     if mode == "SMOOTH":
         _set_mesh_smooth(mesh, True)
-        return
+        return True
 
     if not normals:
         _set_mesh_smooth(mesh, False)
-        return
+        return True
 
     try:
         if isinstance(normals, memoryview):
@@ -2563,8 +2576,10 @@ def _apply_shading(
         else:
             mesh.normals_split_custom_set(normals)
         _set_mesh_smooth(mesh, True)
+        return True
     except Exception:
         _set_mesh_smooth(mesh, True)
+        return False
 
 
 def _set_mesh_smooth(mesh: bpy.types.Mesh, smooth: bool) -> None:
@@ -4269,7 +4284,6 @@ def _create_skin_armature(
     if previous_active and previous_active.mode != "OBJECT":
         bpy.ops.object.mode_set(mode="OBJECT")
 
-    bpy.ops.object.select_all(action="DESELECT")
     armature.select_set(True)
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode="EDIT")
@@ -4345,9 +4359,8 @@ def _create_skin_armature(
         _match_object_space(armature, armature_source)
     _hide_helper_object(armature)
 
-    bpy.ops.object.select_all(action="DESELECT")
-    for selected in previous_selection:
-        selected.select_set(True)
+    if armature not in previous_selection:
+        armature.select_set(False)
     bpy.context.view_layer.objects.active = previous_active
     cleanup_ms = lap_ms()
     if profile_detail:
@@ -6256,6 +6269,36 @@ def _material_anim_custom_prop(target: int) -> str:
 
 
 def _has_material_data(data: MeshPrimitiveData) -> bool:
+    if (
+        not data.material_name
+        and not data.material_key
+        and not data.material_type
+        and not data.alpha_mode
+        and not data.transparent_opaque
+        and not data.texture_infos
+        and not data.color_sets
+        and not data.base_color_texture
+        and not data.metallic_roughness_texture
+        and not data.occlusion_texture
+        and not data.normal_texture
+        and not data.emissive_texture
+        and not data.transparent_texture
+        and not data.specular_texture
+        and not data.specular_color_texture
+        and not data.clearcoat_texture
+        and not data.clearcoat_roughness_texture
+        and not data.clearcoat_normal_texture
+        and not data.transmission_texture
+        and not data.sheen_color_texture
+        and not data.sheen_roughness_texture
+        and not data.iridescence_texture
+        and not data.iridescence_thickness_texture
+        and not data.volume_thickness_texture
+        and not data.anisotropy_texture
+        and not data.diffuse_transmission_texture
+        and not data.diffuse_transmission_color_texture
+    ):
+        return False
     if data.material_name:
         return True
     if _color_attribute_name(data):
@@ -7911,7 +7954,18 @@ def _load_texture_image(path: str, colorspace: str):
 
 
 def _find_texture_image(path: str, colorspace: str):
-    source_path = os.path.abspath(os.fspath(path))
+    key = _texture_image_cache_key(path, colorspace)
+    cached = _TEXTURE_IMAGE_CACHE.get(key)
+    if cached is not None:
+        try:
+            if bpy.data.images.get(cached.name) == cached and _image_has_size(cached):
+                if _image_colorspace(cached) == colorspace:
+                    return cached
+        except ReferenceError:
+            pass
+        _TEXTURE_IMAGE_CACHE.pop(key, None)
+
+    source_path = key[0]
     for image in bpy.data.images:
         if not _image_has_size(image):
             continue
@@ -7928,14 +7982,21 @@ def _find_texture_image(path: str, colorspace: str):
             continue
         image["assetkit_source_path"] = source_path
         image["assetkit_colorspace"] = colorspace
+        _TEXTURE_IMAGE_CACHE[key] = image
         return image
     return None
 
 
 def _register_texture_image(image, path: str, colorspace: str) -> None:
-    image["assetkit_source_path"] = os.path.abspath(os.fspath(path))
+    source_path, normalized_colorspace = _texture_image_cache_key(path, colorspace)
+    image["assetkit_source_path"] = source_path
     image["assetkit_colorspace"] = colorspace
     _set_image_colorspace(image, colorspace)
+    _TEXTURE_IMAGE_CACHE[(source_path, normalized_colorspace)] = image
+
+
+def _texture_image_cache_key(path: str, colorspace: str) -> tuple[str, str]:
+    return os.path.abspath(os.fspath(path)), str(colorspace or "")
 
 
 def _image_colorspace(image) -> str:

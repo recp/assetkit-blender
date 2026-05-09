@@ -22,6 +22,8 @@
 
 #include "cglm/struct.h"
 
+#include "mem.h"
+
 #include "ak/assetkit.h"
 #include "ak/options.h"
 #include "ak/path.h"
@@ -395,6 +397,13 @@ typedef struct AkbPrimitive {
   uint8_t  skin_mesh_in_bind_pose;
   uint8_t  borrowed_vertices;
   uint8_t  borrowed_indices;
+  uint8_t  arena_vertices;
+  uint8_t  arena_indices;
+  uint8_t  arena_loop_meta;
+  uint8_t  arena_instance_matrices;
+  uint8_t  arena_skin_joint_nodes;
+  uint8_t  arena_skin_inverse_bind_matrices;
+  uint8_t  arena_skin_joint_sources;
   uint8_t  zero_copy_flags;
 } AkbPrimitive;
 
@@ -434,6 +443,7 @@ typedef struct AkbSceneNodeList {
 typedef struct AkbImport {
   AkbPrimitiveList primitives;
   AkbSceneNodeList nodes;
+  AkbArena         arena;
 } AkbImport;
 
 typedef struct AkbCoordContext {
@@ -511,6 +521,165 @@ typedef enum AkbPyAnimChannelField {
   AKB_PY_ANIM_OUT_TANGENTS_F32,
   AKB_PY_ANIM_FIELD_COUNT
 } AkbPyAnimChannelField;
+
+typedef enum AkbPySimplePrimitiveField {
+  AKB_PY_SIMPLE_OWNER = 0,
+  AKB_PY_SIMPLE_NAME,
+  AKB_PY_SIMPLE_OBJECT_NAME,
+  AKB_PY_SIMPLE_VERTEX_COUNT,
+  AKB_PY_SIMPLE_LOOP_COUNT,
+  AKB_PY_SIMPLE_FACE_COUNT,
+  AKB_PY_SIMPLE_PRIMITIVE_TYPE,
+  AKB_PY_SIMPLE_PRIMITIVE_MODE,
+  AKB_PY_SIMPLE_FILE_TYPE,
+  AKB_PY_SIMPLE_MESH_KEY,
+  AKB_PY_SIMPLE_PRIMITIVE_INDEX,
+  AKB_PY_SIMPLE_ZERO_COPY_FLAGS,
+  AKB_PY_SIMPLE_HAS_NODE,
+  AKB_PY_SIMPLE_NODE_INDEX,
+  AKB_PY_SIMPLE_MATRIX_F32,
+  AKB_PY_SIMPLE_COORD_MATRIX_F32,
+  AKB_PY_SIMPLE_INSTANCE_COUNT,
+  AKB_PY_SIMPLE_INSTANCE_MATRICES_F32,
+  AKB_PY_SIMPLE_VERTICES_F32,
+  AKB_PY_SIMPLE_INDICES_U32,
+  AKB_PY_SIMPLE_LOOP_STARTS_I32,
+  AKB_PY_SIMPLE_LOOP_TOTALS_I32,
+  AKB_PY_SIMPLE_NORMALS_F32,
+  AKB_PY_SIMPLE_TANGENTS_F32,
+  AKB_PY_SIMPLE_FIELD_COUNT
+} AkbPySimplePrimitiveField;
+
+typedef enum AkbPyPrimitiveField {
+  AKB_PY_PRIM_OWNER = 0,
+  AKB_PY_PRIM_NAME,
+  AKB_PY_PRIM_OBJECT_NAME,
+  AKB_PY_PRIM_VERTEX_COUNT,
+  AKB_PY_PRIM_LOOP_COUNT,
+  AKB_PY_PRIM_FACE_COUNT,
+  AKB_PY_PRIM_PRIMITIVE_TYPE,
+  AKB_PY_PRIM_PRIMITIVE_MODE,
+  AKB_PY_PRIM_MATERIAL_NAME,
+  AKB_PY_PRIM_BASE_COLOR,
+  AKB_PY_PRIM_TRANSPARENT_COLOR,
+  AKB_PY_PRIM_EMISSIVE_COLOR,
+  AKB_PY_PRIM_SPECULAR_COLOR,
+  AKB_PY_PRIM_SHEEN_COLOR,
+  AKB_PY_PRIM_VOLUME_ATTENUATION_COLOR,
+  AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR,
+  AKB_PY_PRIM_METALLIC,
+  AKB_PY_PRIM_ROUGHNESS,
+  AKB_PY_PRIM_ALPHA_CUTOFF,
+  AKB_PY_PRIM_TRANSPARENT_AMOUNT,
+  AKB_PY_PRIM_OPACITY,
+  AKB_PY_PRIM_NORMAL_SCALE,
+  AKB_PY_PRIM_OCCLUSION_STRENGTH,
+  AKB_PY_PRIM_EMISSIVE_STRENGTH,
+  AKB_PY_PRIM_SPECULAR_STRENGTH,
+  AKB_PY_PRIM_IOR,
+  AKB_PY_PRIM_CLEARCOAT,
+  AKB_PY_PRIM_CLEARCOAT_ROUGHNESS,
+  AKB_PY_PRIM_CLEARCOAT_NORMAL_SCALE,
+  AKB_PY_PRIM_TRANSMISSION,
+  AKB_PY_PRIM_SHEEN_ROUGHNESS,
+  AKB_PY_PRIM_IRIDESCENCE,
+  AKB_PY_PRIM_IRIDESCENCE_IOR,
+  AKB_PY_PRIM_IRIDESCENCE_THICKNESS_MINIMUM,
+  AKB_PY_PRIM_IRIDESCENCE_THICKNESS_MAXIMUM,
+  AKB_PY_PRIM_VOLUME_THICKNESS,
+  AKB_PY_PRIM_VOLUME_ATTENUATION_DISTANCE,
+  AKB_PY_PRIM_ANISOTROPY,
+  AKB_PY_PRIM_ANISOTROPY_ROTATION,
+  AKB_PY_PRIM_DIFFUSE_TRANSMISSION,
+  AKB_PY_PRIM_DISPERSION,
+  AKB_PY_PRIM_ALPHA_MODE,
+  AKB_PY_PRIM_TRANSPARENT_OPAQUE,
+  AKB_PY_PRIM_DOUBLE_SIDED,
+  AKB_PY_PRIM_MATERIAL_TYPE,
+  AKB_PY_PRIM_FILE_TYPE,
+  AKB_PY_PRIM_MESH_KEY,
+  AKB_PY_PRIM_MATERIAL_KEY,
+  AKB_PY_PRIM_PRIMITIVE_INDEX,
+  AKB_PY_PRIM_HAS_NODE,
+  AKB_PY_PRIM_NODE_INDEX,
+  AKB_PY_PRIM_INSTANCE_COUNT,
+  AKB_PY_PRIM_HAS_GSPLAT,
+  AKB_PY_PRIM_GSPLAT_KERNEL,
+  AKB_PY_PRIM_GSPLAT_COLOR_SPACE,
+  AKB_PY_PRIM_GSPLAT_PROJECTION,
+  AKB_PY_PRIM_GSPLAT_SORTING_METHOD,
+  AKB_PY_PRIM_GSPLAT_DECODED_COUNT,
+  AKB_PY_PRIM_HAS_SKIN,
+  AKB_PY_PRIM_HAS_SHEEN,
+  AKB_PY_PRIM_SKIN_VERTEX_COUNT,
+  AKB_PY_PRIM_SKIN_JOINT_COUNT,
+  AKB_PY_PRIM_SKIN_JOINT_WIDTH,
+  AKB_PY_PRIM_SKIN_ROOT_NODE_INDEX,
+  AKB_PY_PRIM_SKIN_MESH_IN_BIND_POSE,
+  AKB_PY_PRIM_SKIN_POSE_ANIM_CHANNELS,
+  AKB_PY_PRIM_ZERO_COPY_FLAGS,
+  AKB_PY_PRIM_UV_SET_COUNT,
+  AKB_PY_PRIM_COLOR_SET_COUNT,
+  AKB_PY_PRIM_POINT_ATTR_COUNT,
+  AKB_PY_PRIM_ANIM_COUNT,
+  AKB_PY_PRIM_ANIM_CHANNELS,
+  AKB_PY_PRIM_MORPH_TARGET_COUNT,
+  AKB_PY_PRIM_MORPH_TARGETS,
+  AKB_PY_PRIM_MORPH_PRESET_COUNT,
+  AKB_PY_PRIM_MORPH_PRESETS,
+  AKB_PY_PRIM_MORPH_ANIM_COUNT,
+  AKB_PY_PRIM_MORPH_ANIM_CHANNELS,
+  AKB_PY_PRIM_MATERIAL_ANIM_COUNT,
+  AKB_PY_PRIM_MATERIAL_ANIM_CHANNELS,
+  AKB_PY_PRIM_UV_SETS,
+  AKB_PY_PRIM_COLOR_SETS,
+  AKB_PY_PRIM_POINT_ATTRS,
+  AKB_PY_PRIM_TEXTURE_INFOS,
+  AKB_PY_PRIM_PRIMITIVE_EXTRA,
+  AKB_PY_PRIM_MESH_EXTRA,
+  AKB_PY_PRIM_GEOMETRY_EXTRA,
+  AKB_PY_PRIM_MATERIAL_EXTRA,
+  AKB_PY_PRIM_EFFECT_EXTRA,
+  AKB_PY_PRIM_MATERIAL_VARIANT_COUNT,
+  AKB_PY_PRIM_MATERIAL_VARIANTS,
+  AKB_PY_PRIM_MATRIX_F32,
+  AKB_PY_PRIM_COORD_MATRIX_F32,
+  AKB_PY_PRIM_INSTANCE_MATRICES_F32,
+  AKB_PY_PRIM_BASE_COLOR_TEXTURE,
+  AKB_PY_PRIM_METALLIC_ROUGHNESS_TEXTURE,
+  AKB_PY_PRIM_OCCLUSION_TEXTURE,
+  AKB_PY_PRIM_NORMAL_TEXTURE,
+  AKB_PY_PRIM_EMISSIVE_TEXTURE,
+  AKB_PY_PRIM_TRANSPARENT_TEXTURE,
+  AKB_PY_PRIM_SPECULAR_TEXTURE,
+  AKB_PY_PRIM_SPECULAR_COLOR_TEXTURE,
+  AKB_PY_PRIM_CLEARCOAT_TEXTURE,
+  AKB_PY_PRIM_CLEARCOAT_ROUGHNESS_TEXTURE,
+  AKB_PY_PRIM_CLEARCOAT_NORMAL_TEXTURE,
+  AKB_PY_PRIM_TRANSMISSION_TEXTURE,
+  AKB_PY_PRIM_SHEEN_COLOR_TEXTURE,
+  AKB_PY_PRIM_SHEEN_ROUGHNESS_TEXTURE,
+  AKB_PY_PRIM_IRIDESCENCE_TEXTURE,
+  AKB_PY_PRIM_IRIDESCENCE_THICKNESS_TEXTURE,
+  AKB_PY_PRIM_VOLUME_THICKNESS_TEXTURE,
+  AKB_PY_PRIM_ANISOTROPY_TEXTURE,
+  AKB_PY_PRIM_DIFFUSE_TRANSMISSION_TEXTURE,
+  AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR_TEXTURE,
+  AKB_PY_PRIM_VERTICES_F32,
+  AKB_PY_PRIM_INDICES_U32,
+  AKB_PY_PRIM_LOOP_STARTS_I32,
+  AKB_PY_PRIM_LOOP_TOTALS_I32,
+  AKB_PY_PRIM_NORMALS_F32,
+  AKB_PY_PRIM_UVS_F32,
+  AKB_PY_PRIM_COLORS_F32,
+  AKB_PY_PRIM_TANGENTS_F32,
+  AKB_PY_PRIM_SKIN_JOINTS_U16,
+  AKB_PY_PRIM_SKIN_WEIGHTS_F32,
+  AKB_PY_PRIM_SKIN_JOINT_NODES_I32,
+  AKB_PY_PRIM_SKIN_INVERSE_BIND_MATRICES_F32,
+  AKB_PY_PRIM_SKIN_BIND_SHAPE_MATRIX_F32,
+  AKB_PY_PRIM_FIELD_COUNT
+} AkbPyPrimitiveField;
 
 typedef struct AkbAnimation {
   AkbSharedDoc  *doc_owner;
@@ -863,12 +1032,14 @@ akb_primitive_free(AkbPrimitive *prim) {
 
   if (!prim)
     return;
-  if (!prim->borrowed_vertices)
+  if (!prim->borrowed_vertices && !prim->arena_vertices)
     free(prim->vertices);
-  free(prim->instance_matrices);
-  if (!prim->borrowed_indices)
+  if (!prim->arena_instance_matrices)
+    free(prim->instance_matrices);
+  if (!prim->borrowed_indices && !prim->arena_indices)
     free(prim->indices);
-  free(prim->loop_meta);
+  if (!prim->arena_loop_meta)
+    free(prim->loop_meta);
   free(prim->normals);
   for (i = 0; i < prim->uv_set_count; i++)
     if (!prim->uv_sets[i].borrowed)
@@ -888,10 +1059,13 @@ akb_primitive_free(AkbPrimitive *prim) {
     free(prim->colors);
   free(prim->tangents);
   free(prim->skin_joints);
-  free(prim->skin_joint_nodes);
+  if (!prim->arena_skin_joint_nodes)
+    free(prim->skin_joint_nodes);
   free(prim->skin_weights);
-  free(prim->skin_inverse_bind_matrices);
-  free(prim->skin_joint_sources);
+  if (!prim->arena_skin_inverse_bind_matrices)
+    free(prim->skin_inverse_bind_matrices);
+  if (!prim->arena_skin_joint_sources)
+    free(prim->skin_joint_sources);
   for (i = 0; i < prim->skin_pose_animation_count; i++)
     akb_animation_release(prim->skin_pose_animations[i]);
   free(prim->skin_pose_animations);
@@ -938,6 +1112,42 @@ akb_node_list_free(AkbSceneNodeList *list) {
     akb_scene_node_free(&list->items[i]);
   free(list->items);
   memset(list, 0, sizeof(*list));
+}
+
+static int
+akb_list_reserve(AkbPrimitiveList *list, size_t capacity) {
+  AkbPrimitive *new_items;
+
+  if (!list || capacity <= list->capacity)
+    return 1;
+  if (capacity > SIZE_MAX / sizeof(*new_items))
+    return 0;
+
+  new_items = (AkbPrimitive *)realloc(list->items, capacity * sizeof(*new_items));
+  if (!new_items)
+    return 0;
+
+  list->items = new_items;
+  list->capacity = capacity;
+  return 1;
+}
+
+static int
+akb_node_list_reserve(AkbSceneNodeList *list, size_t capacity) {
+  AkbSceneNode *new_items;
+
+  if (!list || capacity <= list->capacity)
+    return 1;
+  if (capacity > SIZE_MAX / sizeof(*new_items))
+    return 0;
+
+  new_items = (AkbSceneNode *)realloc(list->items, capacity * sizeof(*new_items));
+  if (!new_items)
+    return 0;
+
+  list->items = new_items;
+  list->capacity = capacity;
+  return 1;
 }
 
 static int
@@ -1989,7 +2199,7 @@ akb_trs_to_matrix(const float *translation,
 }
 
 static int
-akb_extract_instancing(AkbPrimitive *out, AkNode *node) {
+akb_extract_instancing(AkbArena *arena, AkbPrimitive *out, AkNode *node) {
   AkInstanceAttribs *instancing;
   float *translations = NULL;
   float *rotations = NULL;
@@ -2028,7 +2238,12 @@ akb_extract_instancing(AkbPrimitive *out, AkNode *node) {
       goto fail;
   }
 
-  out->instance_matrices = (float *)malloc((size_t)instancing->count * 16 * sizeof(float));
+  out->instance_matrices = (float *)akb_owned_alloc(arena,
+                                                    (size_t)instancing->count
+                                                    * 16
+                                                    * sizeof(float),
+                                                    sizeof(float),
+                                                    &out->arena_instance_matrices);
   if (!out->instance_matrices)
     goto fail;
 
@@ -2666,7 +2881,8 @@ akb_skin_armature_root(AkNode *root, AkNode **joints, size_t count) {
 }
 
 static int
-akb_extract_skin(AkbPrimitive *out,
+akb_extract_skin(AkbArena *arena,
+                 AkbPrimitive *out,
                  AkbSceneNodeList *nodes,
                  AkMeshPrimitive *prim,
                  uint32_t prim_index,
@@ -2682,6 +2898,9 @@ akb_extract_skin(AkbPrimitive *out,
   size_t filled_count;
   uint32_t joint_width;
   size_t i;
+  uint8_t arena_joint_nodes = 0;
+  uint8_t arena_inverse_bind_matrices = 0;
+  uint8_t arena_joint_sources = 0;
 
   if (!out || !prim || !skinner || !(skin = skinner->skin)
       || !skin->nJoints || !out->vertex_count)
@@ -2712,11 +2931,19 @@ akb_extract_skin(AkbPrimitive *out,
     return 1;
   }
 
-  joint_nodes = (int32_t *)malloc((size_t)skin->nJoints * sizeof(*joint_nodes));
-  joint_sources = (AkNode **)malloc((size_t)skin->nJoints * sizeof(*joint_sources));
+  joint_nodes = (int32_t *)akb_owned_alloc(arena,
+                                           (size_t)skin->nJoints * sizeof(*joint_nodes),
+                                           sizeof(*joint_nodes),
+                                           &arena_joint_nodes);
+  joint_sources = (AkNode **)akb_owned_alloc(arena,
+                                             (size_t)skin->nJoints * sizeof(*joint_sources),
+                                             sizeof(void *),
+                                             &arena_joint_sources);
   if (!joint_nodes || !joint_sources) {
-    free(joint_sources);
-    free(joint_nodes);
+    if (!arena_joint_sources)
+      free(joint_sources);
+    if (!arena_joint_nodes)
+      free(joint_nodes);
     free(joint_indices);
     free(weights);
     return 0;
@@ -2732,12 +2959,17 @@ akb_extract_skin(AkbPrimitive *out,
 
   inverse_bind_matrices = NULL;
   if (skin->invBindPoses) {
-    inverse_bind_matrices = (float *)malloc((size_t)skin->nJoints
-                                            * 16
-                                            * sizeof(*inverse_bind_matrices));
+    inverse_bind_matrices = (float *)akb_owned_alloc(arena,
+                                                     (size_t)skin->nJoints
+                                                     * 16
+                                                     * sizeof(*inverse_bind_matrices),
+                                                     sizeof(*inverse_bind_matrices),
+                                                     &arena_inverse_bind_matrices);
     if (!inverse_bind_matrices) {
-      free(joint_nodes);
-      free(joint_sources);
+      if (!arena_joint_nodes)
+        free(joint_nodes);
+      if (!arena_joint_sources)
+        free(joint_sources);
       free(joint_indices);
       free(weights);
       return 0;
@@ -2752,6 +2984,9 @@ akb_extract_skin(AkbPrimitive *out,
   out->skin_joint_nodes = joint_nodes;
   out->skin_joint_sources = joint_sources;
   out->skin_inverse_bind_matrices = inverse_bind_matrices;
+  out->arena_skin_joint_nodes = arena_joint_nodes;
+  out->arena_skin_joint_sources = arena_joint_sources;
+  out->arena_skin_inverse_bind_matrices = arena_inverse_bind_matrices;
   memcpy(out->skin_bind_shape_matrix,
          skin->bindShapeMatrix,
          sizeof(out->skin_bind_shape_matrix));
@@ -3132,6 +3367,22 @@ akb_resolve_skin_joint_nodes(AkbPrimitiveList *list, AkbSceneNodeList *nodes) {
       prim->skin_root_node_index = akb_scene_node_index_for(nodes,
                                                             prim->skin_root_source);
   }
+}
+
+static size_t
+akb_list_count_skin_primitives(const AkbPrimitiveList *list) {
+  size_t count = 0;
+  size_t i;
+
+  if (!list)
+    return 0;
+
+  for (i = 0; i < list->count; i++) {
+    if (list->items[i].has_skin)
+      count++;
+  }
+
+  return count;
 }
 
 static AkInput *
@@ -5311,8 +5562,237 @@ akb_primitive_index_width(AkMeshPrimitive *prim) {
   }
 }
 
+static AkInput *
+akb_primitive_position_input(AkMeshPrimitive *prim) {
+  return prim && prim->pos && prim->pos->accessor && prim->pos->accessor->count > 0
+         ? prim->pos
+         : akb_find_input_with_accessor(prim,
+                                        AK_INPUT_POSITION,
+                                        AK_INPUT_POSITION,
+                                        "POSITION",
+                                        NULL);
+}
+
 static int
-akb_extract_primitive(AkbPrimitiveList *list,
+akb_primitive_can_use_fast_extract(AkMeshPrimitive *prim,
+                                   AkGeometry *geom,
+                                   AkMesh *mesh,
+                                   AkNode *node,
+                                   AkBindMaterial *bind_material,
+                                   AkInput *pos_input,
+                                   AkbAnimation *animation,
+                                   AkbAnimation *morph_animation) {
+  AkInput *input;
+
+  if (!prim || !mesh || !geom)
+    return 0;
+
+  if ((prim->inputCount && prim->inputCount > 1)
+      || prim->material
+      || bind_material
+      || prim->variantMappings
+      || prim->variantMappingCount
+      || prim->gsplat
+      || ak_extra(prim)
+      || ak_extra(mesh)
+      || ak_extra(geom)
+      || (animation && animation->count)
+      || (morph_animation && morph_animation->count))
+    return 0;
+
+  if (node) {
+    if (node->instancing
+        || (node->geometry
+            && (node->geometry->morpher || node->geometry->skinner)))
+      return 0;
+  }
+
+  for (input = prim->input; input; input = input->next) {
+    if (!input->accessor || input->accessor->count == 0)
+      continue;
+    if (input == pos_input
+        || input->semantic == AK_INPUT_POSITION
+        || akb_raw_semantic_is(input, "POSITION"))
+      continue;
+    return 0;
+  }
+
+  return 1;
+}
+
+static int
+akb_extract_simple_mesh_group(AkbArena *arena,
+                              AkbPrimitiveList *list,
+                              AkDoc *doc,
+                              AkNode *node,
+                              int32_t node_index,
+                              AkGeometry *geom,
+                              AkMesh *mesh,
+                              const AkbLoadOptions *options,
+                              AkbAnimation *animation,
+                              AkbAnimation *morph_animation,
+                              int *handled) {
+  AkbPrimitive out = {0};
+  AkMeshPrimitive *prim;
+  AkInput *pos_input;
+  const float *positions;
+  const uint32_t *raw_indices;
+  size_t raw_count;
+  size_t total_vertex_count = 0;
+  size_t total_loop_count = 0;
+  size_t total_face_count = 0;
+  size_t vertex_offset = 0;
+  size_t loop_offset = 0;
+  size_t face_offset = 0;
+  uint32_t pos_count;
+  uint32_t loop_count;
+  uint32_t stride;
+  uint32_t pos_offset;
+  uint32_t prim_count = 0;
+  uint32_t i;
+  const char *base_name;
+
+  if (handled)
+    *handled = 0;
+  if (!handled || !list || !mesh || !geom)
+    return 0;
+
+  for (prim = mesh->primitive; prim; prim = prim->next) {
+    if (!akb_primitive_supported(prim, options))
+      return 1;
+    if (prim->type != AKB_PRIMITIVE_TRIANGLES
+        || akb_primitive_index_width(prim) != 3)
+      return 1;
+
+    pos_input = akb_primitive_position_input(prim);
+    if (!pos_input || !pos_input->accessor || pos_input->accessor->count == 0)
+      return 1;
+
+    if (!akb_primitive_can_use_fast_extract(prim,
+                                            geom,
+                                            mesh,
+                                            node,
+                                            node && node->geometry
+                                            ? node->geometry->bindMaterial
+                                            : NULL,
+                                            pos_input,
+                                            animation,
+                                            morph_animation))
+      return 1;
+
+    positions = akb_accessor_float_borrow(pos_input->accessor, 3, &pos_count);
+    if (!positions || pos_count == 0)
+      return 1;
+
+    raw_indices = akb_indices_data(prim->indices, &raw_count);
+    stride = prim->indexStride ? prim->indexStride : 1;
+    loop_count = raw_indices ? (uint32_t)(raw_count / stride) : pos_count;
+    loop_count = (loop_count / 3) * 3;
+    if (!loop_count)
+      continue;
+
+    if (total_vertex_count > (SIZE_MAX / (3 * sizeof(float))) - pos_count
+        || total_loop_count > (SIZE_MAX / sizeof(uint32_t)) - loop_count
+        || total_face_count > (SIZE_MAX / (2 * sizeof(int32_t))) - (loop_count / 3))
+      return 0;
+
+    total_vertex_count += pos_count;
+    total_loop_count += loop_count;
+    total_face_count += loop_count / 3;
+    prim_count++;
+  }
+
+  if (prim_count < 2 || !total_vertex_count || !total_loop_count || !total_face_count)
+    return 1;
+  if (total_vertex_count > UINT32_MAX
+      || total_loop_count > UINT32_MAX
+      || total_face_count > UINT32_MAX)
+    return 1;
+
+  *handled = 1;
+  out.node_index = node_index;
+  out.mesh_key = (uintptr_t)mesh;
+  out.primitive_index = 0;
+  out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
+  out.primitive_type = AKB_PRIMITIVE_TRIANGLES;
+  out.primitive_mode = AK_TRIANGLES;
+  out.vertex_count = (uint32_t)total_vertex_count;
+  out.loop_count = (uint32_t)total_loop_count;
+  out.face_count = (uint32_t)total_face_count;
+
+  if (node) {
+    snprintf(out.object_name, sizeof(out.object_name), "%s", akb_name(node->name, "AssetKitObject"));
+    ak_transformCombine(node->transform, out.matrix);
+    out.has_node = 1;
+  }
+
+  base_name = akb_name(mesh->name, akb_name(geom->name, "AssetKitMesh"));
+  snprintf(out.name, sizeof(out.name), "%s", base_name);
+
+  out.vertices = (float *)akb_owned_alloc(arena,
+                                          total_vertex_count * 3 * sizeof(float),
+                                          sizeof(float),
+                                          &out.arena_vertices);
+  out.indices = (uint32_t *)akb_owned_alloc(arena,
+                                            total_loop_count * sizeof(uint32_t),
+                                            sizeof(uint32_t),
+                                            &out.arena_indices);
+  out.loop_meta = (int32_t *)akb_owned_alloc(arena,
+                                             total_face_count * 2 * sizeof(int32_t),
+                                             sizeof(int32_t),
+                                             &out.arena_loop_meta);
+  if (!out.vertices || !out.indices || !out.loop_meta) {
+    akb_primitive_free(&out);
+    return 0;
+  }
+  out.loop_starts = out.loop_meta;
+  out.loop_totals = out.loop_meta + total_face_count;
+
+  for (prim = mesh->primitive; prim; prim = prim->next) {
+    pos_input = akb_primitive_position_input(prim);
+    positions = akb_accessor_float_borrow(pos_input->accessor, 3, &pos_count);
+    raw_indices = akb_indices_data(prim->indices, &raw_count);
+    stride = prim->indexStride ? prim->indexStride : 1;
+    pos_offset = pos_input->offset;
+    loop_count = raw_indices ? (uint32_t)(raw_count / stride) : pos_count;
+    loop_count = (loop_count / 3) * 3;
+    if (!loop_count)
+      continue;
+
+    memcpy(out.vertices + vertex_offset * 3,
+           positions,
+           (size_t)pos_count * 3 * sizeof(float));
+
+    if (raw_indices) {
+      for (i = 0; i < loop_count; i++)
+        out.indices[loop_offset + i] = raw_indices[(size_t)i * stride + pos_offset]
+                                       + (uint32_t)vertex_offset;
+    } else {
+      for (i = 0; i < loop_count; i++)
+        out.indices[loop_offset + i] = (uint32_t)(vertex_offset + i);
+    }
+
+    for (i = 0; i < loop_count / 3; i++) {
+      out.loop_starts[face_offset + i] = (int32_t)(loop_offset + (size_t)i * 3);
+      out.loop_totals[face_offset + i] = 3;
+    }
+
+    vertex_offset += pos_count;
+    loop_offset += loop_count;
+    face_offset += loop_count / 3;
+  }
+
+  if (!akb_list_push(list, &out)) {
+    akb_primitive_free(&out);
+    return 0;
+  }
+
+  return 1;
+}
+
+static int
+akb_extract_primitive(AkbArena *arena,
+                      AkbPrimitiveList *list,
                       AkbSceneNodeList *nodes,
                       AkDoc *doc,
                       AkbSharedDoc *doc_owner,
@@ -5334,21 +5814,27 @@ akb_extract_primitive(AkbPrimitiveList *list,
   uint32_t i;
   uint32_t index_width;
   int ok;
+  int fast_extract;
   const char *base_name;
+  AkBindMaterial *bind_material;
 
   index_width = akb_primitive_index_width(prim);
   if (!index_width)
     return 1;
 
-  pos_input = prim->pos && prim->pos->accessor && prim->pos->accessor->count > 0
-              ? prim->pos
-              : akb_find_input_with_accessor(prim,
-                                             AK_INPUT_POSITION,
-                                             AK_INPUT_POSITION,
-                                             "POSITION",
-                                             NULL);
+  pos_input = akb_primitive_position_input(prim);
   if (!pos_input || !pos_input->accessor || pos_input->accessor->count == 0)
     return 1;
+
+  bind_material = node && node->geometry ? node->geometry->bindMaterial : NULL;
+  fast_extract = akb_primitive_can_use_fast_extract(prim,
+                                                    geom,
+                                                    mesh,
+                                                    node,
+                                                    bind_material,
+                                                    pos_input,
+                                                    animation,
+                                                    morph_animation);
 
   out.node_index = node_index;
   out.mesh_key = (uintptr_t)mesh;
@@ -5356,43 +5842,40 @@ akb_extract_primitive(AkbPrimitiveList *list,
   out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
   out.primitive_type = (uint32_t)prim->type;
   out.primitive_mode = akb_primitive_mode(prim);
-  out.primitive_extra = ak_extra(prim);
-  out.mesh_extra = ak_extra(mesh);
-  out.geometry_extra = ak_extra(geom);
-  if (prim->gsplat) {
-    out.has_gsplat = 1;
-    out.gsplat.kernel = (uint32_t)prim->gsplat->kernel;
-    out.gsplat.color_space = (uint32_t)prim->gsplat->colorSpace;
-    out.gsplat.projection = (uint32_t)prim->gsplat->projection;
-    out.gsplat.sorting_method = (uint32_t)prim->gsplat->sortingMethod;
-    out.gsplat.decoded_count = prim->gsplat->decodedCount;
-  }
-  akb_extract_material(doc,
-                       prim,
-                       node && node->geometry ? node->geometry->bindMaterial : NULL,
-                       &out);
-  out.material_animation = akb_material_animation_new(doc,
-                                                      doc_owner,
-                                                      anim_index,
-                                                      prim,
-                                                      node && node->geometry
-                                                      ? node->geometry->bindMaterial
-                                                      : NULL,
-                                                      NULL,
-                                                      &ok);
-  if (!ok) {
-    akb_primitive_free(&out);
-    return 0;
-  }
-  if (!akb_extract_material_variants(doc, prim, &out)) {
-    akb_primitive_free(&out);
-    return 0;
-  }
-  out.animation = akb_animation_retain(animation);
-  out.morph_animation = akb_animation_retain(morph_animation);
-  if (!akb_extract_instancing(&out, node)) {
-    akb_primitive_free(&out);
-    return 0;
+  if (!fast_extract) {
+    out.primitive_extra = ak_extra(prim);
+    out.mesh_extra = ak_extra(mesh);
+    out.geometry_extra = ak_extra(geom);
+    if (prim->gsplat) {
+      out.has_gsplat = 1;
+      out.gsplat.kernel = (uint32_t)prim->gsplat->kernel;
+      out.gsplat.color_space = (uint32_t)prim->gsplat->colorSpace;
+      out.gsplat.projection = (uint32_t)prim->gsplat->projection;
+      out.gsplat.sorting_method = (uint32_t)prim->gsplat->sortingMethod;
+      out.gsplat.decoded_count = prim->gsplat->decodedCount;
+    }
+    akb_extract_material(doc, prim, bind_material, &out);
+    out.material_animation = akb_material_animation_new(doc,
+                                                        doc_owner,
+                                                        anim_index,
+                                                        prim,
+                                                        bind_material,
+                                                        NULL,
+                                                        &ok);
+    if (!ok) {
+      akb_primitive_free(&out);
+      return 0;
+    }
+    if (!akb_extract_material_variants(doc, prim, &out)) {
+      akb_primitive_free(&out);
+      return 0;
+    }
+    out.animation = akb_animation_retain(animation);
+    out.morph_animation = akb_animation_retain(morph_animation);
+    if (!akb_extract_instancing(arena, &out, node)) {
+      akb_primitive_free(&out);
+      return 0;
+    }
   }
 
   if (node) {
@@ -5408,8 +5891,10 @@ akb_extract_primitive(AkbPrimitiveList *list,
     akb_primitive_retain_doc(&out, doc_owner);
   } else {
     out.vertices = akb_accessor_float_copy(pos_input->accessor, 3, &pos_count);
-    if (!out.vertices)
+    if (!out.vertices) {
+      akb_primitive_free(&out);
       return 0;
+    }
   }
   out.vertex_count = pos_count;
 
@@ -5425,7 +5910,10 @@ akb_extract_primitive(AkbPrimitiveList *list,
       out.zero_copy_flags |= 2;
       akb_primitive_retain_doc(&out, doc_owner);
     } else {
-      out.indices = (uint32_t *)malloc((size_t)out.loop_count * sizeof(uint32_t));
+      out.indices = (uint32_t *)akb_owned_alloc(arena,
+                                                 (size_t)out.loop_count * sizeof(uint32_t),
+                                                 sizeof(uint32_t),
+                                                 &out.arena_indices);
       if (!out.indices) {
         akb_primitive_free(&out);
         return 0;
@@ -5436,7 +5924,10 @@ akb_extract_primitive(AkbPrimitiveList *list,
     }
   } else {
     out.loop_count = out.vertex_count;
-    out.indices = (uint32_t *)malloc((size_t)out.loop_count * sizeof(uint32_t));
+    out.indices = (uint32_t *)akb_owned_alloc(arena,
+                                               (size_t)out.loop_count * sizeof(uint32_t),
+                                               sizeof(uint32_t),
+                                               &out.arena_indices);
     if (!out.indices) {
       akb_primitive_free(&out);
       return 0;
@@ -5451,7 +5942,10 @@ akb_extract_primitive(AkbPrimitiveList *list,
                    ? out.loop_count / index_width
                    : 0;
   if (out.face_count) {
-    out.loop_meta = (int32_t *)malloc((size_t)out.face_count * 2 * sizeof(int32_t));
+    out.loop_meta = (int32_t *)akb_owned_alloc(arena,
+                                                (size_t)out.face_count * 2 * sizeof(int32_t),
+                                                sizeof(int32_t),
+                                                &out.arena_loop_meta);
     if (!out.loop_meta) {
       akb_primitive_free(&out);
       return 0;
@@ -5465,12 +5959,12 @@ akb_extract_primitive(AkbPrimitiveList *list,
     out.loop_totals[i] = 3;
   }
 
-  if (!akb_extract_point_float_attrs(&out, prim, doc_owner)) {
+  if (!fast_extract && !akb_extract_point_float_attrs(&out, prim, doc_owner)) {
     akb_primitive_free(&out);
     return 0;
   }
 
-  if (out.primitive_type == AKB_PRIMITIVE_TRIANGLES) {
+  if (!fast_extract && out.primitive_type == AKB_PRIMITIVE_TRIANGLES) {
     normal_input = akb_find_input(prim, AK_INPUT_NORMAL, AK_INPUT_NORMAL, "NORMAL", NULL);
     out.normals = akb_loop_attribute_copy(prim,
                                           normal_input,
@@ -5564,7 +6058,8 @@ akb_extract_primitive(AkbPrimitiveList *list,
     }
 
     if (node && node->geometry && node->geometry->skinner) {
-      if (!akb_extract_skin(&out,
+      if (!akb_extract_skin(arena,
+                            &out,
                             nodes,
                             prim,
                             prim_index,
@@ -5597,7 +6092,8 @@ akb_extract_primitive(AkbPrimitiveList *list,
 }
 
 static int
-akb_extract_mesh(AkbPrimitiveList *list,
+akb_extract_mesh(AkbArena *arena,
+                 AkbPrimitiveList *list,
                  AkbSceneNodeList *nodes,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
@@ -5612,6 +6108,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
   AkMesh *mesh;
   AkMeshPrimitive *prim;
   uint32_t prim_index = 0;
+  int handled_group = 0;
 
   if (!geom || !(gdata = geom->gdata) || gdata->type != AKB_GEOMETRY_MESH)
     return 1;
@@ -5620,10 +6117,26 @@ akb_extract_mesh(AkbPrimitiveList *list,
   if (!mesh)
     return 1;
 
+  if (!akb_extract_simple_mesh_group(arena,
+                                     list,
+                                     doc,
+                                     node,
+                                     node_index,
+                                     geom,
+                                     mesh,
+                                     options,
+                                     animation,
+                                     morph_animation,
+                                     &handled_group))
+    return 0;
+  if (handled_group)
+    return 1;
+
   for (prim = mesh->primitive; prim; prim = prim->next, prim_index++) {
     if (!akb_primitive_supported(prim, options))
       continue;
-    if (!akb_extract_primitive(list,
+    if (!akb_extract_primitive(arena,
+                               list,
                                nodes,
                                doc,
                                doc_owner,
@@ -5643,7 +6156,8 @@ akb_extract_mesh(AkbPrimitiveList *list,
 }
 
 static int
-akb_extract_node(AkbPrimitiveList *list,
+akb_extract_node(AkbArena *arena,
+                 AkbPrimitiveList *list,
                  AkbSceneNodeList *nodes,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
@@ -5693,7 +6207,8 @@ akb_extract_node(AkbPrimitiveList *list,
     }
 
     geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
-    if (!akb_extract_mesh(list,
+    if (!akb_extract_mesh(arena,
+                          list,
                           nodes,
                           doc,
                           doc_owner,
@@ -5713,7 +6228,7 @@ akb_extract_node(AkbPrimitiveList *list,
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(list, nodes, doc, doc_owner, child, anim_index, coord, options, node_index))
+    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, child, anim_index, coord, options, node_index))
       return 0;
   }
 
@@ -5721,7 +6236,7 @@ akb_extract_node(AkbPrimitiveList *list,
     inst_node = (AkNode *)ak_instanceObject(inst);
     if (!inst_node || inst_node == node)
       continue;
-    if (!akb_extract_node(list, nodes, doc, doc_owner, inst_node, anim_index, coord, options, node_index))
+    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, inst_node, anim_index, coord, options, node_index))
       return 0;
   }
 
@@ -5761,10 +6276,106 @@ akb_selected_visual_scene(AkDoc *doc, const AkbLoadOptions *options) {
   return scene ? scene : akb_default_visual_scene(doc);
 }
 
+typedef struct AkbSceneEstimate {
+  size_t nodes;
+  size_t primitives;
+} AkbSceneEstimate;
+
+static size_t
+akb_count_geometry_primitives(AkGeometry *geom, const AkbLoadOptions *options) {
+  AkObject *gdata;
+  AkMesh *mesh;
+  AkMeshPrimitive *prim;
+  size_t count = 0;
+
+  if (!geom || !(gdata = geom->gdata) || gdata->type != AKB_GEOMETRY_MESH)
+    return 0;
+
+  mesh = (AkMesh *)ak_objGet(gdata);
+  if (!mesh)
+    return 0;
+
+  for (prim = mesh->primitive; prim; prim = prim->next) {
+    if (akb_primitive_supported(prim, options))
+      count++;
+  }
+
+  return count;
+}
+
+static void
+akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate *estimate) {
+  AkNode *child;
+  AkNode *inst_node;
+  AkInstanceBase *inst;
+  AkGeometry *geom;
+
+  if (!node || !estimate)
+    return;
+
+  estimate->nodes++;
+  if (node->geometry) {
+    geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
+    estimate->primitives += akb_count_geometry_primitives(geom, options);
+  }
+
+  for (child = node->chld; child; child = child->next)
+    akb_estimate_node(child, options, estimate);
+
+  for (inst = node->node ? &node->node->base : NULL; inst; inst = inst->next) {
+    inst_node = (AkNode *)ak_instanceObject(inst);
+    if (!inst_node || inst_node == node)
+      continue;
+    akb_estimate_node(inst_node, options, estimate);
+  }
+}
+
+static AkbSceneEstimate
+akb_estimate_scene(AkDoc *doc, const AkbLoadOptions *options) {
+  AkbSceneEstimate estimate = {0};
+  AkVisualScene *scene;
+  AkInstanceBase *inst;
+  AkNode *node;
+
+  scene = akb_selected_visual_scene(doc, options);
+  if (!scene || !scene->node)
+    return estimate;
+
+  if (scene->node->node) {
+    for (inst = &scene->node->node->base; inst; inst = inst->next) {
+      node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
+      akb_estimate_node(node, options, &estimate);
+    }
+  } else {
+    for (node = scene->node; node; node = node->next)
+      akb_estimate_node(node, options, &estimate);
+  }
+
+  return estimate;
+}
+
+static size_t
+akb_estimate_library_primitives(AkDoc *doc, const AkbLoadOptions *options) {
+  AkLibrary *lib;
+  AkGeometry *geom;
+  size_t count = 0;
+
+  if (!doc)
+    return 0;
+
+  for (lib = doc->lib.geometries; lib; lib = lib->next) {
+    for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next)
+      count += akb_count_geometry_primitives(geom, options);
+  }
+
+  return count;
+}
+
 static int
 akb_extract_scene(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
                   const AkbAnimationIndex *anim_index,
+                  AkbArena *arena,
                   AkbPrimitiveList *list,
                   AkbSceneNodeList *nodes,
                   const AkbCoordContext *coord,
@@ -5783,12 +6394,12 @@ akb_extract_scene(AkDoc *doc,
   if (scene->node->node) {
     for (inst = &scene->node->node->base; inst; inst = inst->next) {
       node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-      if (!akb_extract_node(list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
+      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
         return 0;
     }
   } else {
     for (node = scene->node; node; node = node->next) {
-      if (!akb_extract_node(list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
+      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
         return 0;
     }
   }
@@ -5803,8 +6414,11 @@ akb_extract_doc(AkDoc *doc,
                 const AkbLoadOptions *options) {
   AkbCoordContext coord;
   AkbAnimationIndex anim_index;
+  AkbSceneEstimate estimate;
   AkLibrary *lib;
   AkGeometry *geom;
+  size_t fallback_estimate;
+  size_t skin_count;
   double total_started_at = 0.0;
   double phase_started_at = 0.0;
   double coord_ms = 0.0;
@@ -5833,9 +6447,17 @@ akb_extract_doc(AkDoc *doc,
     phase_started_at = akb_now_ms();
   }
 
+  estimate = akb_estimate_scene(doc, options);
+  if ((estimate.primitives && !akb_list_reserve(&import->primitives, estimate.primitives))
+      || (estimate.nodes && !akb_node_list_reserve(&import->nodes, estimate.nodes))) {
+    akb_animation_index_free(&anim_index);
+    return 0;
+  }
+
   if (!akb_extract_scene(doc,
                          doc_owner,
                          &anim_index,
+                         &import->arena,
                          &import->primitives,
                          &import->nodes,
                          &coord,
@@ -5848,15 +6470,18 @@ akb_extract_doc(AkDoc *doc,
     phase_started_at = akb_now_ms();
   }
 
-  akb_resolve_skin_joint_nodes(&import->primitives, &import->nodes);
-  if (profile) {
-    resolve_skin_ms = akb_now_ms() - phase_started_at;
-    phase_started_at = akb_now_ms();
-  }
-  akb_build_skin_pose_animations(&import->primitives, &import->nodes);
-  if (profile) {
-    pose_anim_ms = akb_now_ms() - phase_started_at;
-    phase_started_at = akb_now_ms();
+  skin_count = akb_list_count_skin_primitives(&import->primitives);
+  if (skin_count) {
+    akb_resolve_skin_joint_nodes(&import->primitives, &import->nodes);
+    if (profile) {
+      resolve_skin_ms = akb_now_ms() - phase_started_at;
+      phase_started_at = akb_now_ms();
+    }
+    akb_build_skin_pose_animations(&import->primitives, &import->nodes);
+    if (profile) {
+      pose_anim_ms = akb_now_ms() - phase_started_at;
+      phase_started_at = akb_now_ms();
+    }
   }
 
   if (import->primitives.count > 0) {
@@ -5882,9 +6507,15 @@ akb_extract_doc(AkDoc *doc,
 
   if (profile)
     phase_started_at = akb_now_ms();
+  fallback_estimate = akb_estimate_library_primitives(doc, options);
+  if (fallback_estimate && !akb_list_reserve(&import->primitives, fallback_estimate)) {
+    akb_animation_index_free(&anim_index);
+    return 0;
+  }
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
-      if (!akb_extract_mesh(&import->primitives,
+      if (!akb_extract_mesh(&import->arena,
+                            &import->primitives,
                             &import->nodes,
                             doc,
                             doc_owner,
@@ -5931,6 +6562,7 @@ akb_import_free(AkbImport *import) {
     return;
   akb_list_free(&import->primitives);
   akb_node_list_free(&import->nodes);
+  akb_arena_free(&import->arena);
 }
 
 static void
@@ -6443,6 +7075,135 @@ akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
 static PyObject *
 akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner);
 
+static int
+akb_primitive_is_simple_py(const AkbPrimitive *prim) {
+  return prim
+         && !prim->material_name[0]
+         && !prim->material_key
+         && !prim->texture_info_count
+         && !prim->uv_set_count
+         && !prim->color_set_count
+         && !prim->point_attr_count
+         && !prim->has_skin
+         && !prim->has_gsplat
+         && !prim->has_sheen
+         && !prim->double_sided
+         && !prim->alpha_mode
+         && !prim->transparent_opaque
+         && !prim->material_type
+         && !prim->primitive_extra
+         && !prim->mesh_extra
+         && !prim->geometry_extra
+         && !prim->material_extra
+         && !prim->effect_extra
+         && !prim->material_variant_count
+         && !prim->morph_target_count
+         && !prim->morph_preset_count
+         && !(prim->animation && prim->animation->count)
+         && !(prim->morph_animation && prim->morph_animation->count)
+         && !(prim->material_animation && prim->material_animation->count)
+         && !prim->base_color_texture[0]
+         && !prim->metallic_roughness_texture[0]
+         && !prim->occlusion_texture[0]
+         && !prim->normal_texture[0]
+         && !prim->emissive_texture[0]
+         && !prim->transparent_texture[0]
+         && !prim->specular_texture[0]
+         && !prim->specular_color_texture[0]
+         && !prim->clearcoat_texture[0]
+         && !prim->clearcoat_roughness_texture[0]
+         && !prim->clearcoat_normal_texture[0]
+         && !prim->transmission_texture[0]
+         && !prim->sheen_color_texture[0]
+         && !prim->sheen_roughness_texture[0]
+         && !prim->iridescence_texture[0]
+         && !prim->iridescence_thickness_texture[0]
+         && !prim->volume_thickness_texture[0]
+         && !prim->anisotropy_texture[0]
+         && !prim->diffuse_transmission_texture[0]
+         && !prim->diffuse_transmission_color_texture[0];
+}
+
+static PyObject *
+akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
+  PyObject *tuple;
+  PyObject *value;
+
+  tuple = PyTuple_New(AKB_PY_SIMPLE_FIELD_COUNT);
+  if (!tuple)
+    return NULL;
+
+#define AKB_SIMPLE_SET(INDEX, OBJ) do {                   \
+    value = (OBJ);                                        \
+    if (!value) { Py_DECREF(tuple); return NULL; }        \
+    PyTuple_SET_ITEM(tuple, (INDEX), value);              \
+  } while (0)
+
+  Py_INCREF(owner);
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_OWNER, owner);
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_NAME, akb_unicode_from_cstr(prim->name));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_OBJECT_NAME, akb_unicode_from_cstr(prim->object_name));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_VERTEX_COUNT, PyLong_FromUnsignedLong(prim->vertex_count));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_LOOP_COUNT, PyLong_FromUnsignedLong(prim->loop_count));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_FACE_COUNT, PyLong_FromUnsignedLong(prim->face_count));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_PRIMITIVE_TYPE, PyLong_FromUnsignedLong(prim->primitive_type));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_PRIMITIVE_MODE, PyLong_FromUnsignedLong(prim->primitive_mode));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_FILE_TYPE, PyLong_FromUnsignedLong(prim->file_type));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_MESH_KEY,
+                 PyLong_FromUnsignedLongLong((unsigned long long)prim->mesh_key));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_PRIMITIVE_INDEX,
+                 PyLong_FromUnsignedLong(prim->primitive_index));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_ZERO_COPY_FLAGS,
+                 PyLong_FromUnsignedLong(prim->zero_copy_flags));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_HAS_NODE, PyBool_FromLong(prim->has_node));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_NODE_INDEX, PyLong_FromLong(prim->node_index));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_MATRIX_F32,
+                 akb_memoryview_or_empty(prim->matrix,
+                                         prim->has_node ? 16 * sizeof(float) : 0));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_COORD_MATRIX_F32,
+                 akb_memoryview_or_empty(prim->coord_matrix,
+                                         prim->has_coord_matrix ? 16 * sizeof(float) : 0));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_INSTANCE_COUNT,
+                 PyLong_FromUnsignedLong(prim->instance_count));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_INSTANCE_MATRICES_F32,
+                 akb_memoryview_or_empty(prim->instance_matrices,
+                                         prim->instance_count
+                                         ? (size_t)prim->instance_count
+                                           * 16
+                                           * sizeof(float)
+                                         : 0));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_VERTICES_F32,
+                 akb_memoryview_or_empty(prim->vertices,
+                                         (size_t)prim->vertex_count * 3 * sizeof(float)));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_INDICES_U32,
+                 akb_memoryview_or_empty(prim->indices,
+                                         (size_t)prim->loop_count * sizeof(uint32_t)));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_LOOP_STARTS_I32,
+                 akb_memoryview_or_empty(prim->loop_starts,
+                                         (size_t)prim->face_count * sizeof(int32_t)));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_LOOP_TOTALS_I32,
+                 akb_memoryview_or_empty(prim->loop_totals,
+                                         (size_t)prim->face_count * sizeof(int32_t)));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_NORMALS_F32,
+                 akb_memoryview_or_empty(prim->normals,
+                                         prim->has_normals
+                                         ? (size_t)prim->loop_count
+                                           * 3
+                                           * sizeof(float)
+                                         : 0));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_TANGENTS_F32,
+                 akb_memoryview_or_empty(prim->tangents,
+                                         prim->has_tangents
+                                         ? (size_t)prim->loop_count
+                                           * 4
+                                           * sizeof(float)
+                                         : 0));
+
+#undef AKB_SIMPLE_SET
+
+  return tuple;
+}
+
 static PyObject *
 akb_material_variants_to_py(AkbPrimitive *prim, PyObject *owner) {
   PyObject *list;
@@ -6636,244 +7397,278 @@ akb_morph_presets_to_py(AkbPrimitive *prim) {
 
 static PyObject *
 akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
-  PyObject *dict;
+  PyObject *tuple;
   PyObject *value;
 
-  dict = PyDict_New();
-  if (!dict)
+  if (akb_primitive_is_simple_py(prim))
+    return akb_primitive_simple_to_py(prim, owner);
+
+  tuple = PyTuple_New(AKB_PY_PRIM_FIELD_COUNT);
+  if (!tuple)
     return NULL;
 
-#define AKB_SET_OBJ(KEY, OBJ) do {                 \
+#define AKB_SET_OBJ(INDEX, OBJ) do {               \
     value = (OBJ);                                 \
-    if (!value) { Py_DECREF(dict); return NULL; }  \
-    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
-      Py_DECREF(value);                            \
-      Py_DECREF(dict);                             \
-      return NULL;                                 \
-    }                                              \
-    Py_DECREF(value);                              \
+    if (!value) { Py_DECREF(tuple); return NULL; } \
+    PyTuple_SET_ITEM(tuple, (INDEX), value);       \
   } while (0)
 
-  if (PyDict_SetItemString(dict, "_owner", owner) < 0) {
-    Py_DECREF(dict);
-    return NULL;
-  }
-
-  AKB_SET_OBJ("name", akb_unicode_from_cstr(prim->name));
-  AKB_SET_OBJ("object_name", akb_unicode_from_cstr(prim->object_name));
-  AKB_SET_OBJ("vertex_count", PyLong_FromUnsignedLong(prim->vertex_count));
-  AKB_SET_OBJ("loop_count", PyLong_FromUnsignedLong(prim->loop_count));
-  AKB_SET_OBJ("face_count", PyLong_FromUnsignedLong(prim->face_count));
-  AKB_SET_OBJ("primitive_type", PyLong_FromUnsignedLong(prim->primitive_type));
-  AKB_SET_OBJ("primitive_mode", PyLong_FromUnsignedLong(prim->primitive_mode));
-  AKB_SET_OBJ("material_name", akb_unicode_from_cstr(prim->material_name));
-  AKB_SET_OBJ("base_color", Py_BuildValue("(ffff)",
+  Py_INCREF(owner);
+  AKB_SET_OBJ(AKB_PY_PRIM_OWNER, owner);
+  AKB_SET_OBJ(AKB_PY_PRIM_NAME, akb_unicode_from_cstr(prim->name));
+  AKB_SET_OBJ(AKB_PY_PRIM_OBJECT_NAME, akb_unicode_from_cstr(prim->object_name));
+  AKB_SET_OBJ(AKB_PY_PRIM_VERTEX_COUNT, PyLong_FromUnsignedLong(prim->vertex_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_LOOP_COUNT, PyLong_FromUnsignedLong(prim->loop_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_FACE_COUNT, PyLong_FromUnsignedLong(prim->face_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_PRIMITIVE_TYPE, PyLong_FromUnsignedLong(prim->primitive_type));
+  AKB_SET_OBJ(AKB_PY_PRIM_PRIMITIVE_MODE, PyLong_FromUnsignedLong(prim->primitive_mode));
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_NAME, akb_unicode_from_cstr(prim->material_name));
+  AKB_SET_OBJ(AKB_PY_PRIM_BASE_COLOR, Py_BuildValue("(ffff)",
                                           prim->base_color[0],
                                           prim->base_color[1],
                                           prim->base_color[2],
                                           prim->base_color[3]));
-  AKB_SET_OBJ("transparent_color", Py_BuildValue("(ffff)",
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_COLOR, Py_BuildValue("(ffff)",
                                                  prim->transparent_color[0],
                                                  prim->transparent_color[1],
                                                  prim->transparent_color[2],
                                                  prim->transparent_color[3]));
-  AKB_SET_OBJ("emissive_color", Py_BuildValue("(fff)",
+  AKB_SET_OBJ(AKB_PY_PRIM_EMISSIVE_COLOR, Py_BuildValue("(fff)",
                                              prim->emissive_color[0],
                                              prim->emissive_color[1],
                                              prim->emissive_color[2]));
-  AKB_SET_OBJ("specular_color", Py_BuildValue("(fff)",
+  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_COLOR, Py_BuildValue("(fff)",
                                              prim->specular_color[0],
                                              prim->specular_color[1],
                                              prim->specular_color[2]));
-  AKB_SET_OBJ("sheen_color", Py_BuildValue("(fff)",
+  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_COLOR, Py_BuildValue("(fff)",
                                           prim->sheen_color[0],
                                           prim->sheen_color[1],
                                           prim->sheen_color[2]));
-  AKB_SET_OBJ("volume_attenuation_color", Py_BuildValue("(fff)",
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_ATTENUATION_COLOR, Py_BuildValue("(fff)",
                                                         prim->volume_attenuation_color[0],
                                                         prim->volume_attenuation_color[1],
                                                         prim->volume_attenuation_color[2]));
-  AKB_SET_OBJ("diffuse_transmission_color", Py_BuildValue("(fff)",
+  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR, Py_BuildValue("(fff)",
                                                           prim->diffuse_transmission_color[0],
                                                           prim->diffuse_transmission_color[1],
                                                           prim->diffuse_transmission_color[2]));
-  AKB_SET_OBJ("metallic", PyFloat_FromDouble(prim->metallic));
-  AKB_SET_OBJ("roughness", PyFloat_FromDouble(prim->roughness));
-  AKB_SET_OBJ("alpha_cutoff", PyFloat_FromDouble(prim->alpha_cutoff));
-  AKB_SET_OBJ("transparent_amount", PyFloat_FromDouble(prim->transparent_amount));
-  AKB_SET_OBJ("opacity", PyFloat_FromDouble(prim->opacity));
-  AKB_SET_OBJ("normal_scale", PyFloat_FromDouble(prim->normal_scale));
-  AKB_SET_OBJ("occlusion_strength", PyFloat_FromDouble(prim->occlusion_strength));
-  AKB_SET_OBJ("emissive_strength", PyFloat_FromDouble(prim->emissive_strength));
-  AKB_SET_OBJ("specular_strength", PyFloat_FromDouble(prim->specular_strength));
-  AKB_SET_OBJ("ior", PyFloat_FromDouble(prim->ior));
-  AKB_SET_OBJ("clearcoat", PyFloat_FromDouble(prim->clearcoat));
-  AKB_SET_OBJ("clearcoat_roughness", PyFloat_FromDouble(prim->clearcoat_roughness));
-  AKB_SET_OBJ("clearcoat_normal_scale", PyFloat_FromDouble(prim->clearcoat_normal_scale));
-  AKB_SET_OBJ("transmission", PyFloat_FromDouble(prim->transmission));
-  AKB_SET_OBJ("sheen_roughness", PyFloat_FromDouble(prim->sheen_roughness));
-  AKB_SET_OBJ("iridescence", PyFloat_FromDouble(prim->iridescence));
-  AKB_SET_OBJ("iridescence_ior", PyFloat_FromDouble(prim->iridescence_ior));
-  AKB_SET_OBJ("iridescence_thickness_minimum",
+  AKB_SET_OBJ(AKB_PY_PRIM_METALLIC, PyFloat_FromDouble(prim->metallic));
+  AKB_SET_OBJ(AKB_PY_PRIM_ROUGHNESS, PyFloat_FromDouble(prim->roughness));
+  AKB_SET_OBJ(AKB_PY_PRIM_ALPHA_CUTOFF, PyFloat_FromDouble(prim->alpha_cutoff));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_AMOUNT, PyFloat_FromDouble(prim->transparent_amount));
+  AKB_SET_OBJ(AKB_PY_PRIM_OPACITY, PyFloat_FromDouble(prim->opacity));
+  AKB_SET_OBJ(AKB_PY_PRIM_NORMAL_SCALE, PyFloat_FromDouble(prim->normal_scale));
+  AKB_SET_OBJ(AKB_PY_PRIM_OCCLUSION_STRENGTH, PyFloat_FromDouble(prim->occlusion_strength));
+  AKB_SET_OBJ(AKB_PY_PRIM_EMISSIVE_STRENGTH, PyFloat_FromDouble(prim->emissive_strength));
+  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_STRENGTH, PyFloat_FromDouble(prim->specular_strength));
+  AKB_SET_OBJ(AKB_PY_PRIM_IOR, PyFloat_FromDouble(prim->ior));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT, PyFloat_FromDouble(prim->clearcoat));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_ROUGHNESS, PyFloat_FromDouble(prim->clearcoat_roughness));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_NORMAL_SCALE, PyFloat_FromDouble(prim->clearcoat_normal_scale));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSMISSION, PyFloat_FromDouble(prim->transmission));
+  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_ROUGHNESS, PyFloat_FromDouble(prim->sheen_roughness));
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE, PyFloat_FromDouble(prim->iridescence));
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_IOR, PyFloat_FromDouble(prim->iridescence_ior));
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_THICKNESS_MINIMUM,
               PyFloat_FromDouble(prim->iridescence_thickness_minimum));
-  AKB_SET_OBJ("iridescence_thickness_maximum",
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_THICKNESS_MAXIMUM,
               PyFloat_FromDouble(prim->iridescence_thickness_maximum));
-  AKB_SET_OBJ("volume_thickness", PyFloat_FromDouble(prim->volume_thickness));
-  AKB_SET_OBJ("volume_attenuation_distance",
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_THICKNESS, PyFloat_FromDouble(prim->volume_thickness));
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_ATTENUATION_DISTANCE,
               PyFloat_FromDouble(prim->volume_attenuation_distance));
-  AKB_SET_OBJ("anisotropy", PyFloat_FromDouble(prim->anisotropy));
-  AKB_SET_OBJ("anisotropy_rotation", PyFloat_FromDouble(prim->anisotropy_rotation));
-  AKB_SET_OBJ("diffuse_transmission", PyFloat_FromDouble(prim->diffuse_transmission));
-  AKB_SET_OBJ("dispersion", PyFloat_FromDouble(prim->dispersion));
-  AKB_SET_OBJ("alpha_mode", PyLong_FromUnsignedLong(prim->alpha_mode));
-  AKB_SET_OBJ("transparent_opaque", PyLong_FromUnsignedLong(prim->transparent_opaque));
-  AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
-  AKB_SET_OBJ("material_type", PyLong_FromUnsignedLong(prim->material_type));
-  AKB_SET_OBJ("file_type", PyLong_FromUnsignedLong(prim->file_type));
-  AKB_SET_OBJ("mesh_key", PyLong_FromUnsignedLongLong((unsigned long long)prim->mesh_key));
-  AKB_SET_OBJ("material_key", PyLong_FromUnsignedLongLong((unsigned long long)prim->material_key));
-  AKB_SET_OBJ("primitive_index", PyLong_FromUnsignedLong(prim->primitive_index));
-  AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
-  AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
-  AKB_SET_OBJ("instance_count", PyLong_FromUnsignedLong(prim->instance_count));
-  AKB_SET_OBJ("has_gsplat", PyBool_FromLong(prim->has_gsplat));
-  AKB_SET_OBJ("gsplat_kernel", PyLong_FromUnsignedLong(prim->gsplat.kernel));
-  AKB_SET_OBJ("gsplat_color_space", PyLong_FromUnsignedLong(prim->gsplat.color_space));
-  AKB_SET_OBJ("gsplat_projection", PyLong_FromUnsignedLong(prim->gsplat.projection));
-  AKB_SET_OBJ("gsplat_sorting_method", PyLong_FromUnsignedLong(prim->gsplat.sorting_method));
-  AKB_SET_OBJ("gsplat_decoded_count", PyLong_FromUnsignedLong(prim->gsplat.decoded_count));
-  AKB_SET_OBJ("has_skin", PyBool_FromLong(prim->has_skin));
-  AKB_SET_OBJ("has_sheen", PyBool_FromLong(prim->has_sheen));
-  AKB_SET_OBJ("skin_vertex_count", PyLong_FromUnsignedLong(prim->skin_vertex_count));
-  AKB_SET_OBJ("skin_joint_count", PyLong_FromUnsignedLong(prim->skin_joint_count));
-  AKB_SET_OBJ("skin_joint_width", PyLong_FromUnsignedLong(prim->skin_joint_width));
-  AKB_SET_OBJ("skin_root_node_index", PyLong_FromLong(prim->skin_root_node_index));
-  AKB_SET_OBJ("skin_mesh_in_bind_pose", PyBool_FromLong(prim->skin_mesh_in_bind_pose));
-  AKB_SET_OBJ("skin_pose_anim_channels", akb_skin_pose_anim_channels_to_py(prim));
-  AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
-  AKB_SET_OBJ("uv_set_count", PyLong_FromUnsignedLong(prim->uv_set_count));
-  AKB_SET_OBJ("color_set_count", PyLong_FromUnsignedLong(prim->color_set_count));
-  AKB_SET_OBJ("point_attr_count", PyLong_FromUnsignedLong(prim->point_attr_count));
-  AKB_SET_OBJ("anim_count",
+  AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY, PyFloat_FromDouble(prim->anisotropy));
+  AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY_ROTATION, PyFloat_FromDouble(prim->anisotropy_rotation));
+  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION, PyFloat_FromDouble(prim->diffuse_transmission));
+  AKB_SET_OBJ(AKB_PY_PRIM_DISPERSION, PyFloat_FromDouble(prim->dispersion));
+  AKB_SET_OBJ(AKB_PY_PRIM_ALPHA_MODE, PyLong_FromUnsignedLong(prim->alpha_mode));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_OPAQUE, PyLong_FromUnsignedLong(prim->transparent_opaque));
+  AKB_SET_OBJ(AKB_PY_PRIM_DOUBLE_SIDED, PyBool_FromLong(prim->double_sided));
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_TYPE, PyLong_FromUnsignedLong(prim->material_type));
+  AKB_SET_OBJ(AKB_PY_PRIM_FILE_TYPE, PyLong_FromUnsignedLong(prim->file_type));
+  AKB_SET_OBJ(AKB_PY_PRIM_MESH_KEY,
+              PyLong_FromUnsignedLongLong((unsigned long long)prim->mesh_key));
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_KEY,
+              PyLong_FromUnsignedLongLong((unsigned long long)prim->material_key));
+  AKB_SET_OBJ(AKB_PY_PRIM_PRIMITIVE_INDEX, PyLong_FromUnsignedLong(prim->primitive_index));
+  AKB_SET_OBJ(AKB_PY_PRIM_HAS_NODE, PyBool_FromLong(prim->has_node));
+  AKB_SET_OBJ(AKB_PY_PRIM_NODE_INDEX, PyLong_FromLong(prim->node_index));
+  AKB_SET_OBJ(AKB_PY_PRIM_INSTANCE_COUNT, PyLong_FromUnsignedLong(prim->instance_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_HAS_GSPLAT, PyBool_FromLong(prim->has_gsplat));
+  AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_KERNEL, PyLong_FromUnsignedLong(prim->gsplat.kernel));
+  AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_COLOR_SPACE, PyLong_FromUnsignedLong(prim->gsplat.color_space));
+  AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_PROJECTION, PyLong_FromUnsignedLong(prim->gsplat.projection));
+  AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_SORTING_METHOD,
+              PyLong_FromUnsignedLong(prim->gsplat.sorting_method));
+  AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_DECODED_COUNT,
+              PyLong_FromUnsignedLong(prim->gsplat.decoded_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_HAS_SKIN, PyBool_FromLong(prim->has_skin));
+  AKB_SET_OBJ(AKB_PY_PRIM_HAS_SHEEN, PyBool_FromLong(prim->has_sheen));
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_VERTEX_COUNT, PyLong_FromUnsignedLong(prim->skin_vertex_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_JOINT_COUNT, PyLong_FromUnsignedLong(prim->skin_joint_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_JOINT_WIDTH, PyLong_FromUnsignedLong(prim->skin_joint_width));
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_ROOT_NODE_INDEX, PyLong_FromLong(prim->skin_root_node_index));
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_MESH_IN_BIND_POSE,
+              PyBool_FromLong(prim->skin_mesh_in_bind_pose));
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_POSE_ANIM_CHANNELS, akb_skin_pose_anim_channels_to_py(prim));
+  AKB_SET_OBJ(AKB_PY_PRIM_ZERO_COPY_FLAGS, PyLong_FromUnsignedLong(prim->zero_copy_flags));
+  AKB_SET_OBJ(AKB_PY_PRIM_UV_SET_COUNT, PyLong_FromUnsignedLong(prim->uv_set_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_COLOR_SET_COUNT, PyLong_FromUnsignedLong(prim->color_set_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_POINT_ATTR_COUNT, PyLong_FromUnsignedLong(prim->point_attr_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_ANIM_COUNT,
               PyLong_FromUnsignedLong(prim->animation
                                       ? (unsigned long)prim->animation->count
                                       : 0));
-  AKB_SET_OBJ("anim_channels", akb_anim_channels_to_py(prim->animation));
-  AKB_SET_OBJ("morph_target_count", PyLong_FromUnsignedLong(prim->morph_target_count));
-  AKB_SET_OBJ("morph_targets", akb_morph_targets_to_py(prim));
-  AKB_SET_OBJ("morph_preset_count", PyLong_FromUnsignedLong(prim->morph_preset_count));
-  AKB_SET_OBJ("morph_presets", akb_morph_presets_to_py(prim));
-  AKB_SET_OBJ("morph_anim_count",
+  AKB_SET_OBJ(AKB_PY_PRIM_ANIM_CHANNELS, akb_anim_channels_to_py(prim->animation));
+  AKB_SET_OBJ(AKB_PY_PRIM_MORPH_TARGET_COUNT,
+              PyLong_FromUnsignedLong(prim->morph_target_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_MORPH_TARGETS, akb_morph_targets_to_py(prim));
+  AKB_SET_OBJ(AKB_PY_PRIM_MORPH_PRESET_COUNT,
+              PyLong_FromUnsignedLong(prim->morph_preset_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_MORPH_PRESETS, akb_morph_presets_to_py(prim));
+  AKB_SET_OBJ(AKB_PY_PRIM_MORPH_ANIM_COUNT,
               PyLong_FromUnsignedLong(prim->morph_animation
                                       ? (unsigned long)prim->morph_animation->count
                                       : 0));
-  AKB_SET_OBJ("morph_anim_channels", akb_anim_channels_to_py(prim->morph_animation));
-  AKB_SET_OBJ("material_anim_count",
+  AKB_SET_OBJ(AKB_PY_PRIM_MORPH_ANIM_CHANNELS, akb_anim_channels_to_py(prim->morph_animation));
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_ANIM_COUNT,
               PyLong_FromUnsignedLong(prim->material_animation
                                       ? (unsigned long)prim->material_animation->count
                                       : 0));
-  AKB_SET_OBJ("material_anim_channels", akb_anim_channels_to_py(prim->material_animation));
-  AKB_SET_OBJ("uv_sets", akb_loop_float_attrs_to_py(prim->uv_sets,
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_ANIM_CHANNELS,
+              akb_anim_channels_to_py(prim->material_animation));
+  AKB_SET_OBJ(AKB_PY_PRIM_UV_SETS, akb_loop_float_attrs_to_py(prim->uv_sets,
                                                     prim->uv_set_count,
                                                     prim->loop_count));
-  AKB_SET_OBJ("color_sets", akb_loop_float_attrs_to_py(prim->color_sets,
+  AKB_SET_OBJ(AKB_PY_PRIM_COLOR_SETS, akb_loop_float_attrs_to_py(prim->color_sets,
                                                        prim->color_set_count,
                                                        prim->loop_count));
-  AKB_SET_OBJ("point_attrs", akb_loop_float_attrs_to_py(prim->point_attrs,
+  AKB_SET_OBJ(AKB_PY_PRIM_POINT_ATTRS, akb_loop_float_attrs_to_py(prim->point_attrs,
                                                         prim->point_attr_count,
                                                         prim->vertex_count));
-  AKB_SET_OBJ("texture_infos", akb_texture_infos_to_py(prim->texture_infos,
+  AKB_SET_OBJ(AKB_PY_PRIM_TEXTURE_INFOS, akb_texture_infos_to_py(prim->texture_infos,
                                                        prim->texture_info_count));
-  AKB_SET_OBJ("primitive_extra", akb_tree_to_py(prim->primitive_extra));
-  AKB_SET_OBJ("mesh_extra", akb_tree_to_py(prim->mesh_extra));
-  AKB_SET_OBJ("geometry_extra", akb_tree_to_py(prim->geometry_extra));
-  AKB_SET_OBJ("material_extra", akb_tree_to_py(prim->material_extra));
-  AKB_SET_OBJ("effect_extra", akb_tree_to_py(prim->effect_extra));
-  AKB_SET_OBJ("material_variant_count",
+  AKB_SET_OBJ(AKB_PY_PRIM_PRIMITIVE_EXTRA, akb_tree_to_py(prim->primitive_extra));
+  AKB_SET_OBJ(AKB_PY_PRIM_MESH_EXTRA, akb_tree_to_py(prim->mesh_extra));
+  AKB_SET_OBJ(AKB_PY_PRIM_GEOMETRY_EXTRA, akb_tree_to_py(prim->geometry_extra));
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_EXTRA, akb_tree_to_py(prim->material_extra));
+  AKB_SET_OBJ(AKB_PY_PRIM_EFFECT_EXTRA, akb_tree_to_py(prim->effect_extra));
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_VARIANT_COUNT,
               PyLong_FromUnsignedLong(prim->material_variant_count));
-  AKB_SET_OBJ("material_variants", akb_material_variants_to_py(prim, owner));
-  AKB_SET_OBJ("matrix_f32", akb_memoryview_or_empty(prim->matrix, prim->has_node ? 16 * sizeof(float) : 0));
-  AKB_SET_OBJ("coord_matrix_f32",
+  AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_VARIANTS, akb_material_variants_to_py(prim, owner));
+  AKB_SET_OBJ(AKB_PY_PRIM_MATRIX_F32,
+              akb_memoryview_or_empty(prim->matrix, prim->has_node ? 16 * sizeof(float) : 0));
+  AKB_SET_OBJ(AKB_PY_PRIM_COORD_MATRIX_F32,
               akb_memoryview_or_empty(prim->coord_matrix,
                                       prim->has_coord_matrix ? 16 * sizeof(float) : 0));
-  AKB_SET_OBJ("instance_matrices_f32",
+  AKB_SET_OBJ(AKB_PY_PRIM_INSTANCE_MATRICES_F32,
               akb_memoryview_or_empty(prim->instance_matrices,
                                       prim->instance_count
                                       ? (size_t)prim->instance_count
                                         * 16
                                         * sizeof(float)
                                       : 0));
-  AKB_SET_OBJ("base_color_texture", akb_unicode_from_cstr(prim->base_color_texture));
-  AKB_SET_OBJ("metallic_roughness_texture", akb_unicode_from_cstr(prim->metallic_roughness_texture));
-  AKB_SET_OBJ("occlusion_texture", akb_unicode_from_cstr(prim->occlusion_texture));
-  AKB_SET_OBJ("normal_texture", akb_unicode_from_cstr(prim->normal_texture));
-  AKB_SET_OBJ("emissive_texture", akb_unicode_from_cstr(prim->emissive_texture));
-  AKB_SET_OBJ("transparent_texture", akb_unicode_from_cstr(prim->transparent_texture));
-  AKB_SET_OBJ("specular_texture", akb_unicode_from_cstr(prim->specular_texture));
-  AKB_SET_OBJ("specular_color_texture", akb_unicode_from_cstr(prim->specular_color_texture));
-  AKB_SET_OBJ("clearcoat_texture", akb_unicode_from_cstr(prim->clearcoat_texture));
-  AKB_SET_OBJ("clearcoat_roughness_texture", akb_unicode_from_cstr(prim->clearcoat_roughness_texture));
-  AKB_SET_OBJ("clearcoat_normal_texture", akb_unicode_from_cstr(prim->clearcoat_normal_texture));
-  AKB_SET_OBJ("transmission_texture", akb_unicode_from_cstr(prim->transmission_texture));
-  AKB_SET_OBJ("sheen_color_texture", akb_unicode_from_cstr(prim->sheen_color_texture));
-  AKB_SET_OBJ("sheen_roughness_texture", akb_unicode_from_cstr(prim->sheen_roughness_texture));
-  AKB_SET_OBJ("iridescence_texture", akb_unicode_from_cstr(prim->iridescence_texture));
-  AKB_SET_OBJ("iridescence_thickness_texture",
+  AKB_SET_OBJ(AKB_PY_PRIM_BASE_COLOR_TEXTURE, akb_unicode_from_cstr(prim->base_color_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_METALLIC_ROUGHNESS_TEXTURE,
+              akb_unicode_from_cstr(prim->metallic_roughness_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_OCCLUSION_TEXTURE, akb_unicode_from_cstr(prim->occlusion_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_NORMAL_TEXTURE, akb_unicode_from_cstr(prim->normal_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_EMISSIVE_TEXTURE, akb_unicode_from_cstr(prim->emissive_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_TEXTURE,
+              akb_unicode_from_cstr(prim->transparent_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_TEXTURE, akb_unicode_from_cstr(prim->specular_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_COLOR_TEXTURE,
+              akb_unicode_from_cstr(prim->specular_color_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_TEXTURE, akb_unicode_from_cstr(prim->clearcoat_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_ROUGHNESS_TEXTURE,
+              akb_unicode_from_cstr(prim->clearcoat_roughness_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_NORMAL_TEXTURE,
+              akb_unicode_from_cstr(prim->clearcoat_normal_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSMISSION_TEXTURE,
+              akb_unicode_from_cstr(prim->transmission_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_COLOR_TEXTURE,
+              akb_unicode_from_cstr(prim->sheen_color_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_ROUGHNESS_TEXTURE,
+              akb_unicode_from_cstr(prim->sheen_roughness_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_TEXTURE,
+              akb_unicode_from_cstr(prim->iridescence_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_THICKNESS_TEXTURE,
               akb_unicode_from_cstr(prim->iridescence_thickness_texture));
-  AKB_SET_OBJ("volume_thickness_texture", akb_unicode_from_cstr(prim->volume_thickness_texture));
-  AKB_SET_OBJ("anisotropy_texture", akb_unicode_from_cstr(prim->anisotropy_texture));
-  AKB_SET_OBJ("diffuse_transmission_texture",
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_THICKNESS_TEXTURE,
+              akb_unicode_from_cstr(prim->volume_thickness_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY_TEXTURE, akb_unicode_from_cstr(prim->anisotropy_texture));
+  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION_TEXTURE,
               akb_unicode_from_cstr(prim->diffuse_transmission_texture));
-  AKB_SET_OBJ("diffuse_transmission_color_texture",
+  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR_TEXTURE,
               akb_unicode_from_cstr(prim->diffuse_transmission_color_texture));
-  AKB_SET_OBJ("vertices_f32", akb_memoryview_or_empty(prim->vertices, (size_t)prim->vertex_count * 3 * sizeof(float)));
-  AKB_SET_OBJ("indices_u32", akb_memoryview_or_empty(prim->indices, (size_t)prim->loop_count * sizeof(uint32_t)));
-  AKB_SET_OBJ("loop_starts_i32", akb_memoryview_or_empty(prim->loop_starts, (size_t)prim->face_count * sizeof(int32_t)));
-  AKB_SET_OBJ("loop_totals_i32", akb_memoryview_or_empty(prim->loop_totals, (size_t)prim->face_count * sizeof(int32_t)));
-  AKB_SET_OBJ("normals_f32", akb_memoryview_or_empty(prim->normals, prim->has_normals ? (size_t)prim->loop_count * 3 * sizeof(float) : 0));
-  AKB_SET_OBJ("uvs_f32", akb_memoryview_or_empty(prim->uvs, prim->has_uvs ? (size_t)prim->loop_count * 2 * sizeof(float) : 0));
-  AKB_SET_OBJ("colors_f32", akb_memoryview_or_empty(prim->colors, prim->has_colors ? (size_t)prim->loop_count * 4 * sizeof(float) : 0));
-  AKB_SET_OBJ("tangents_f32",
+  AKB_SET_OBJ(AKB_PY_PRIM_VERTICES_F32,
+              akb_memoryview_or_empty(prim->vertices,
+                                      (size_t)prim->vertex_count * 3 * sizeof(float)));
+  AKB_SET_OBJ(AKB_PY_PRIM_INDICES_U32,
+              akb_memoryview_or_empty(prim->indices,
+                                      (size_t)prim->loop_count * sizeof(uint32_t)));
+  AKB_SET_OBJ(AKB_PY_PRIM_LOOP_STARTS_I32,
+              akb_memoryview_or_empty(prim->loop_starts,
+                                      (size_t)prim->face_count * sizeof(int32_t)));
+  AKB_SET_OBJ(AKB_PY_PRIM_LOOP_TOTALS_I32,
+              akb_memoryview_or_empty(prim->loop_totals,
+                                      (size_t)prim->face_count * sizeof(int32_t)));
+  AKB_SET_OBJ(AKB_PY_PRIM_NORMALS_F32,
+              akb_memoryview_or_empty(prim->normals,
+                                      prim->has_normals
+                                      ? (size_t)prim->loop_count * 3 * sizeof(float)
+                                      : 0));
+  AKB_SET_OBJ(AKB_PY_PRIM_UVS_F32,
+              akb_memoryview_or_empty(prim->uvs,
+                                      prim->has_uvs
+                                      ? (size_t)prim->loop_count * 2 * sizeof(float)
+                                      : 0));
+  AKB_SET_OBJ(AKB_PY_PRIM_COLORS_F32,
+              akb_memoryview_or_empty(prim->colors,
+                                      prim->has_colors
+                                      ? (size_t)prim->loop_count * 4 * sizeof(float)
+                                      : 0));
+  AKB_SET_OBJ(AKB_PY_PRIM_TANGENTS_F32,
               akb_memoryview_or_empty(prim->tangents,
                                       prim->has_tangents
                                       ? (size_t)prim->loop_count
                                         * 4
                                         * sizeof(float)
                                       : 0));
-  AKB_SET_OBJ("skin_joints_u16",
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_JOINTS_U16,
               akb_memoryview_or_empty(prim->skin_joints,
                                       prim->has_skin
                                       ? (size_t)prim->skin_vertex_count
                                         * prim->skin_joint_width
                                         * sizeof(uint16_t)
                                       : 0));
-  AKB_SET_OBJ("skin_weights_f32",
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_WEIGHTS_F32,
               akb_memoryview_or_empty(prim->skin_weights,
                                       prim->has_skin
                                       ? (size_t)prim->skin_vertex_count
                                         * prim->skin_joint_width
                                         * sizeof(float)
                                       : 0));
-  AKB_SET_OBJ("skin_joint_nodes_i32",
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_JOINT_NODES_I32,
               akb_memoryview_or_empty(prim->skin_joint_nodes,
                                       prim->has_skin
                                       ? (size_t)prim->skin_joint_count
                                         * sizeof(int32_t)
                                       : 0));
-  AKB_SET_OBJ("skin_inverse_bind_matrices_f32",
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_INVERSE_BIND_MATRICES_F32,
               akb_memoryview_or_empty(prim->skin_inverse_bind_matrices,
                                       prim->has_skin && prim->skin_inverse_bind_matrices
                                       ? (size_t)prim->skin_joint_count
                                         * 16
                                         * sizeof(float)
                                       : 0));
-  AKB_SET_OBJ("skin_bind_shape_matrix_f32",
+  AKB_SET_OBJ(AKB_PY_PRIM_SKIN_BIND_SHAPE_MATRIX_F32,
               akb_memoryview_or_empty(prim->skin_bind_shape_matrix,
                                       prim->has_skin ? 16 * sizeof(float) : 0));
 
 #undef AKB_SET_OBJ
 
-  return dict;
+  return tuple;
 }
 
 static PyObject *
@@ -7866,6 +8661,8 @@ akb_skin_group_assignments(PyObject *self, PyObject *args) {
   size_t joint_count;
   size_t vertex_index;
   size_t joint_index;
+  size_t out_index;
+  size_t buffer_count;
   int ok;
 
   (void)self;
@@ -7911,6 +8708,9 @@ akb_skin_group_assignments(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
   }
 
+  joints = (const uint16_t *)joints_view.buf;
+  weights = (const float *)weights_view.buf;
+
   counts = (uint32_t *)calloc(joint_count, sizeof(*counts));
   if (!counts) {
     PyBuffer_Release(&weights_view);
@@ -7918,8 +8718,6 @@ akb_skin_group_assignments(PyObject *self, PyObject *args) {
     return PyErr_NoMemory();
   }
 
-  joints = (const uint16_t *)joints_view.buf;
-  weights = (const float *)weights_view.buf;
   ok = 1;
   for (vertex_index = 0; vertex_index < vertex_count && ok; vertex_index++) {
     size_t base;
@@ -7961,6 +8759,11 @@ akb_skin_group_assignments(PyObject *self, PyObject *args) {
     PyBuffer_Release(&joints_view);
     Py_RETURN_NONE;
   }
+
+  buffer_count = 0;
+  for (joint_index = 0; joint_index < joint_count; joint_index++)
+    if (counts[joint_index])
+      buffer_count++;
 
   buffers = (PyObject **)calloc(joint_count, sizeof(*buffers));
   writes = (int32_t **)calloc(joint_count, sizeof(*writes));
@@ -8004,7 +8807,8 @@ akb_skin_group_assignments(PyObject *self, PyObject *args) {
     }
   }
 
-  out = ok ? PyList_New(0) : NULL;
+  out = ok ? PyList_New((Py_ssize_t)buffer_count) : NULL;
+  out_index = 0;
   if (out) {
     for (joint_index = 0; joint_index < joint_count; joint_index++) {
       PyObject *tuple;
@@ -8030,13 +8834,7 @@ akb_skin_group_assignments(PyObject *self, PyObject *args) {
       PyTuple_SET_ITEM(tuple, 1, weight_obj);
       PyTuple_SET_ITEM(tuple, 2, buffers[joint_index]);
       buffers[joint_index] = NULL;
-      if (PyList_Append(out, tuple) < 0) {
-        Py_DECREF(tuple);
-        Py_DECREF(out);
-        out = NULL;
-        break;
-      }
-      Py_DECREF(tuple);
+      PyList_SET_ITEM(out, (Py_ssize_t)out_index++, tuple);
     }
   }
 
