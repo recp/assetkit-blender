@@ -103,6 +103,10 @@ typedef struct FListItem FListItem;
 #define AKB_SKIN_DEFAULT_JOINTS_PER_VERTEX 4
 #define AKB_SKIN_MAX_JOINTS_PER_VERTEX 64
 #define AKB_TEXTURE_INFO_MAX 24
+#define AKB_MAT4(value) (*(mat4 *)(void *)(value))
+#define AKB_VEC3(value) (*(vec3 *)(void *)(value))
+#define AKB_VEC4(value) (*(vec4 *)(void *)(value))
+#define AKB_VERSOR(value) (*(versor *)(void *)(value))
 
 static double
 akb_now_ms(void) {
@@ -2762,45 +2766,9 @@ akb_extract_skin(AkbPrimitive *out,
 }
 
 static void
-akb_mat4_identity(float m[16]) {
-  memset(m, 0, 16 * sizeof(float));
-  m[0] = 1.0f;
-  m[5] = 1.0f;
-  m[10] = 1.0f;
-  m[15] = 1.0f;
-}
-
-static void
-akb_mat4_mul(const float a[16], const float b[16], float out[16]) {
-  float r[16];
-  int col, row;
-
-  for (col = 0; col < 4; col++) {
-    for (row = 0; row < 4; row++) {
-      r[col * 4 + row] = a[row]      * b[col * 4]
-                       + a[4 + row]  * b[col * 4 + 1]
-                       + a[8 + row]  * b[col * 4 + 2]
-                       + a[12 + row] * b[col * 4 + 3];
-    }
-  }
-
-  memcpy(out, r, sizeof(r));
-}
-
-static void
-akb_mat4_inv(const float m[16], float out[16]) {
-  CGLM_ALIGN_MAT mat4 in;
-  CGLM_ALIGN_MAT mat4 inv;
-
-  memcpy(in, m, 16 * sizeof(float));
-  glm_mat4_inv(in, inv);
-  memcpy(out, inv, 16 * sizeof(float));
-}
-
-static void
 akb_node_world_matrix(AkNode *node, float out[16]) {
   if (!node) {
-    akb_mat4_identity(out);
+    glm_mat4_identity(AKB_MAT4(out));
     return;
   }
 
@@ -2823,43 +2791,6 @@ akb_ensure_owned_vertices(AkbPrimitive *out) {
   out->borrowed_vertices = 0;
   out->zero_copy_flags &= (uint8_t)~1u;
   return 1;
-}
-
-static void
-akb_mat4_mul_point3(const float m[16], float v[3]) {
-  float x = v[0];
-  float y = v[1];
-  float z = v[2];
-  float w;
-
-  v[0] = m[0] * x + m[4] * y + m[8]  * z + m[12];
-  v[1] = m[1] * x + m[5] * y + m[9]  * z + m[13];
-  v[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
-  w    = m[3] * x + m[7] * y + m[11] * z + m[15];
-  if (w != 0.0f && w != 1.0f) {
-    v[0] /= w;
-    v[1] /= w;
-    v[2] /= w;
-  }
-}
-
-static void
-akb_mat4_mul_vec3_normalize(const float m[16], float v[3]) {
-  float x = v[0];
-  float y = v[1];
-  float z = v[2];
-  float len;
-
-  v[0] = m[0] * x + m[4] * y + m[8]  * z;
-  v[1] = m[1] * x + m[5] * y + m[9]  * z;
-  v[2] = m[2] * x + m[6] * y + m[10] * z;
-
-  len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-  if (len > 1.0e-8f) {
-    v[0] /= len;
-    v[1] /= len;
-    v[2] /= len;
-  }
 }
 
 static int
@@ -2967,22 +2898,25 @@ akb_skin_bind_pose_joint_matrices(AkbPrimitive *out, float **joint_mats_out) {
     return 0;
 
   akb_node_world_matrix(out->skin_root_source, root_world);
-  akb_mat4_inv(root_world, root_inv);
+  glm_mat4_inv(AKB_MAT4(root_world), AKB_MAT4(root_inv));
 
   for (i = 0; i < out->skin_joint_count; i++) {
     if (out->skin_inverse_bind_matrices) {
       if (out->skin_joint_sources && out->skin_joint_sources[i])
         akb_node_world_matrix(out->skin_joint_sources[i], bind_world);
       else
-        akb_mat4_inv(out->skin_inverse_bind_matrices + (size_t)i * 16, bind_world);
-      akb_mat4_mul(root_inv, bind_world, bind_arma);
-      akb_mat4_mul(bind_arma,
-                   out->skin_inverse_bind_matrices + (size_t)i * 16,
-                   joint_mats + (size_t)i * 16);
+        glm_mat4_inv(AKB_MAT4(out->skin_inverse_bind_matrices + (size_t)i * 16),
+                     AKB_MAT4(bind_world));
+      glm_mul(AKB_MAT4(root_inv), AKB_MAT4(bind_world), AKB_MAT4(bind_arma));
+      glm_mul(AKB_MAT4(bind_arma),
+              AKB_MAT4(out->skin_inverse_bind_matrices + (size_t)i * 16),
+              AKB_MAT4(joint_mats + (size_t)i * 16));
     } else {
       akb_node_world_matrix(out->skin_joint_sources ? out->skin_joint_sources[i] : NULL,
                             bind_world);
-      akb_mat4_mul(root_inv, bind_world, joint_mats + (size_t)i * 16);
+      glm_mul(AKB_MAT4(root_inv),
+              AKB_MAT4(bind_world),
+              AKB_MAT4(joint_mats + (size_t)i * 16));
     }
   }
 
@@ -2992,6 +2926,8 @@ akb_skin_bind_pose_joint_matrices(AkbPrimitive *out, float **joint_mats_out) {
 
 static void
 akb_skin_bind_pose_apply_loop_vectors(AkbPrimitive *out, const float *vertex_mats) {
+  const float *matrix;
+  float *vector;
   uint32_t loop_index;
   uint32_t vertex_index;
 
@@ -3003,8 +2939,10 @@ akb_skin_bind_pose_apply_loop_vectors(AkbPrimitive *out, const float *vertex_mat
       vertex_index = out->indices[loop_index];
       if (vertex_index >= out->vertex_count)
         continue;
-      akb_mat4_mul_vec3_normalize(vertex_mats + (size_t)vertex_index * 16,
-                                  out->normals + (size_t)loop_index * 3);
+      matrix = vertex_mats + (size_t)vertex_index * 16;
+      vector = out->normals + (size_t)loop_index * 3;
+      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
+      glm_vec3_normalize(AKB_VEC3(vector));
     }
   }
 
@@ -3013,8 +2951,10 @@ akb_skin_bind_pose_apply_loop_vectors(AkbPrimitive *out, const float *vertex_mat
       vertex_index = out->indices[loop_index];
       if (vertex_index >= out->vertex_count)
         continue;
-      akb_mat4_mul_vec3_normalize(vertex_mats + (size_t)vertex_index * 16,
-                                  out->tangents + (size_t)loop_index * 4);
+      matrix = vertex_mats + (size_t)vertex_index * 16;
+      vector = out->tangents + (size_t)loop_index * 4;
+      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
+      glm_vec3_normalize(AKB_VEC3(vector));
     }
   }
 }
@@ -3024,6 +2964,7 @@ akb_skin_bind_pose_apply_loop_vectors_rigid(AkbPrimitive *out,
                                             const float *joint_mats,
                                             const uint16_t *vertex_joints) {
   const float *matrix;
+  float *vector;
   uint32_t loop_index;
   uint32_t vertex_index;
 
@@ -3036,7 +2977,9 @@ akb_skin_bind_pose_apply_loop_vectors_rigid(AkbPrimitive *out,
       if (vertex_index >= out->vertex_count)
         continue;
       matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
-      akb_mat4_mul_vec3_normalize(matrix, out->normals + (size_t)loop_index * 3);
+      vector = out->normals + (size_t)loop_index * 3;
+      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
+      glm_vec3_normalize(AKB_VEC3(vector));
     }
   }
 
@@ -3046,7 +2989,9 @@ akb_skin_bind_pose_apply_loop_vectors_rigid(AkbPrimitive *out,
       if (vertex_index >= out->vertex_count)
         continue;
       matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
-      akb_mat4_mul_vec3_normalize(matrix, out->tangents + (size_t)loop_index * 4);
+      vector = out->tangents + (size_t)loop_index * 4;
+      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
+      glm_vec3_normalize(AKB_VEC3(vector));
     }
   }
 }
@@ -3057,12 +3002,14 @@ akb_skin_into_bind_pose_rigid(AkbPrimitive *out,
                               const uint16_t *vertex_joints) {
   AkbMorphTarget *target;
   const float *matrix;
+  float *position;
   uint32_t vertex_index;
   uint32_t target_index;
 
   for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
     matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
-    akb_mat4_mul_point3(matrix, out->vertices + (size_t)vertex_index * 3);
+    position = out->vertices + (size_t)vertex_index * 3;
+    glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(position), 1.0f, AKB_VEC3(position));
   }
 
   for (target_index = 0; target_index < out->morph_target_count; target_index++) {
@@ -3071,7 +3018,8 @@ akb_skin_into_bind_pose_rigid(AkbPrimitive *out,
       continue;
     for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
       matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
-      akb_mat4_mul_point3(matrix, target->positions + (size_t)vertex_index * 3);
+      position = target->positions + (size_t)vertex_index * 3;
+      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(position), 1.0f, AKB_VEC3(position));
     }
   }
 
@@ -3083,6 +3031,8 @@ static int
 akb_skin_into_bind_pose(AkbPrimitive *out) {
   float *joint_mats;
   float *vertex_mats;
+  const float *matrix;
+  float *position;
   uint16_t *rigid_vertex_joints;
   AkbMorphTarget *target;
   uint32_t vertex_index;
@@ -3120,8 +3070,9 @@ akb_skin_into_bind_pose(AkbPrimitive *out) {
                            joint_mats,
                            vertex_index,
                            vertex_mats + (size_t)vertex_index * 16);
-    akb_mat4_mul_point3(vertex_mats + (size_t)vertex_index * 16,
-                        out->vertices + (size_t)vertex_index * 3);
+    matrix = vertex_mats + (size_t)vertex_index * 16;
+    position = out->vertices + (size_t)vertex_index * 3;
+    glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(position), 1.0f, AKB_VEC3(position));
   }
 
   for (target_index = 0; target_index < out->morph_target_count; target_index++) {
@@ -3129,8 +3080,9 @@ akb_skin_into_bind_pose(AkbPrimitive *out) {
     if (!target->positions || target->vertex_count != out->vertex_count)
       continue;
     for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
-      akb_mat4_mul_point3(vertex_mats + (size_t)vertex_index * 16,
-                          target->positions + (size_t)vertex_index * 3);
+      matrix = vertex_mats + (size_t)vertex_index * 16;
+      position = target->positions + (size_t)vertex_index * 3;
+      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(position), 1.0f, AKB_VEC3(position));
     }
   }
 
@@ -3280,39 +3232,15 @@ akb_mat4_to_trs(const float m[16],
                 float translation[3],
                 versor rotation_xyzw,
                 float scale[3]) {
-  mat4 rotation_matrix = GLM_MAT4_IDENTITY_INIT;
-  float cx, cy, cz, det;
-  float inv_scale;
-  int col;
-  int row;
+  mat4 rotation_matrix;
+  vec4 translation4;
 
-  translation[0] = m[12];
-  translation[1] = m[13];
-  translation[2] = m[14];
-
-  for (col = 0; col < 3; col++) {
-    scale[col] = sqrtf(m[col * 4] * m[col * 4]
-                       + m[col * 4 + 1] * m[col * 4 + 1]
-                       + m[col * 4 + 2] * m[col * 4 + 2]);
-    inv_scale = scale[col] > 1.0e-8f ? 1.0f / scale[col] : 1.0f;
-    for (row = 0; row < 3; row++)
-      rotation_matrix[col][row] = m[col * 4 + row] * inv_scale;
-  }
-
-  cx  = m[1] * m[6] - m[2] * m[5];
-  cy  = m[2] * m[4] - m[0] * m[6];
-  cz  = m[0] * m[5] - m[1] * m[4];
-  det = cx * m[8] + cy * m[9] + cz * m[10];
-  if (det < 0.0f) {
-    for (col = 0; col < 3; col++) {
-      scale[col] = -scale[col];
-      for (row = 0; row < 3; row++)
-        rotation_matrix[col][row] = -rotation_matrix[col][row];
-    }
-  }
+  glm_decompose(AKB_MAT4(m), translation4, rotation_matrix, scale);
+  translation[0] = translation4[0];
+  translation[1] = translation4[1];
+  translation[2] = translation4[2];
 
   glm_mat4_quat(rotation_matrix, rotation_xyzw);
-  glm_quat_normalize(rotation_xyzw);
 }
 
 static void
@@ -3320,22 +3248,10 @@ akb_pose_transform_translation(float *dst,
                                const float *src,
                                const float edit_translation[3],
                                const versor edit_rotation_inv) {
-  vec3 value;
   vec3 relative;
-  vec3 corrected;
-  versor inv;
 
-  value[0] = src[0];
-  value[1] = src[1];
-  value[2] = src[2];
-  relative[0] = value[0] - edit_translation[0];
-  relative[1] = value[1] - edit_translation[1];
-  relative[2] = value[2] - edit_translation[2];
-  memcpy(inv, edit_rotation_inv, sizeof(inv));
-  glm_quat_rotatev(inv, relative, corrected);
-  dst[0] = corrected[0];
-  dst[1] = corrected[1];
-  dst[2] = corrected[2];
+  glm_vec3_sub(AKB_VEC3(src), AKB_VEC3(edit_translation), relative);
+  glm_quat_rotatev(AKB_VERSOR(edit_rotation_inv), relative, AKB_VEC3(dst));
 }
 
 static void
@@ -3344,16 +3260,13 @@ akb_pose_transform_rotation(float *dst,
                             const versor edit_rotation_inv) {
   versor rotation;
   versor corrected;
-  versor inv;
 
   rotation[0] = src[1];
   rotation[1] = src[2];
   rotation[2] = src[3];
   rotation[3] = src[0];
   glm_quat_normalize(rotation);
-  memcpy(inv, edit_rotation_inv, sizeof(inv));
-  glm_quat_mul(inv, rotation, corrected);
-  glm_quat_normalize(corrected);
+  glm_quat_mul(AKB_VERSOR(edit_rotation_inv), rotation, corrected);
 
   dst[0] = corrected[3];
   dst[1] = corrected[0];
@@ -3663,7 +3576,7 @@ akb_build_skin_pose_animations(AkbPrimitiveList *list, AkbSceneNodeList *nodes) 
     prim->skin_pose_animation_count = prim->skin_joint_count;
 
     akb_node_world_matrix(prim->skin_root_source, root_world);
-    akb_mat4_inv(root_world, root_inv);
+    glm_mat4_inv(AKB_MAT4(root_world), AKB_MAT4(root_inv));
 
     rest_mats = (float *)malloc((size_t)prim->skin_joint_count * 16 * sizeof(*rest_mats));
     if (!rest_mats)
@@ -3687,7 +3600,9 @@ akb_build_skin_pose_animations(AkbPrimitiveList *list, AkbSceneNodeList *nodes) 
         continue;
 
       akb_node_world_matrix(node->source, joint_world);
-      akb_mat4_mul(root_inv, joint_world, rest_mats + (size_t)i * 16);
+      glm_mul(AKB_MAT4(root_inv),
+              AKB_MAT4(joint_world),
+              AKB_MAT4(rest_mats + (size_t)i * 16));
     }
 
     for (i = 0; i < prim->skin_joint_count; i++) {
@@ -3701,8 +3616,11 @@ akb_build_skin_pose_animations(AkbPrimitiveList *list, AkbSceneNodeList *nodes) 
       memcpy(rest, rest_mats + (size_t)i * 16, 16 * sizeof(float));
       parent_joint_index = akb_skin_pose_parent_joint_index(prim, nodes, node_to_joint, i);
       if (parent_joint_index >= 0) {
-        akb_mat4_inv(rest_mats + (size_t)parent_joint_index * 16, parent_inv);
-        akb_mat4_mul(parent_inv, rest_mats + (size_t)i * 16, rest);
+        glm_mat4_inv(AKB_MAT4(rest_mats + (size_t)parent_joint_index * 16),
+                     AKB_MAT4(parent_inv));
+        glm_mul(AKB_MAT4(parent_inv),
+                AKB_MAT4(rest_mats + (size_t)i * 16),
+                AKB_MAT4(rest));
       }
 
       prim->skin_pose_animations[i] = akb_animation_new_pose_for_joint(node->animation,
@@ -4953,15 +4871,8 @@ akb_baked_matrix_to_trs(const float m[16],
   rotation[3] = rotation_xyzw[2];
 
   if (previous_rotation) {
-    if (rotation[0] * previous_rotation[0]
-        + rotation[1] * previous_rotation[1]
-        + rotation[2] * previous_rotation[2]
-        + rotation[3] * previous_rotation[3] < 0.0f) {
-      rotation[0] = -rotation[0];
-      rotation[1] = -rotation[1];
-      rotation[2] = -rotation[2];
-      rotation[3] = -rotation[3];
-    }
+    if (glm_vec4_dot(AKB_VEC4(rotation), AKB_VEC4(previous_rotation)) < 0.0f)
+      glm_vec4_negate(AKB_VEC4(rotation));
   }
 }
 
