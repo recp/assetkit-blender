@@ -7935,7 +7935,7 @@ def _load_texture_image(path: str, colorspace: str):
     except RuntimeError:
         image = None
 
-    if image and _image_has_size(image):
+    if image:
         _register_texture_image(image, source_path, colorspace)
         return image
 
@@ -7958,7 +7958,7 @@ def _find_texture_image(path: str, colorspace: str):
     cached = _TEXTURE_IMAGE_CACHE.get(key)
     if cached is not None:
         try:
-            if bpy.data.images.get(cached.name) == cached and _image_has_size(cached):
+            if bpy.data.images.get(cached.name) == cached:
                 if _image_colorspace(cached) == colorspace:
                     return cached
         except ReferenceError:
@@ -7967,8 +7967,6 @@ def _find_texture_image(path: str, colorspace: str):
 
     source_path = key[0]
     for image in bpy.data.images:
-        if not _image_has_size(image):
-            continue
         image_path = image.get("assetkit_source_path") or image.filepath
         if not image_path:
             continue
