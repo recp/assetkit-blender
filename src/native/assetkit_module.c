@@ -2854,12 +2854,13 @@ akb_skin_vertex_matrix(const AkbPrimitive *out,
                        const float *joint_mats,
                        uint32_t vertex_index,
                        float matrix[16]) {
+  const float *joint_matrix;
   uint32_t slot, index;
-  uint32_t i;
   float weight, weight_sum;
+  int has_matrix;
 
-  memset(matrix, 0, 16 * sizeof(float));
   weight_sum = 0.0f;
+  has_matrix = 0;
 
   for (slot = 0; slot < out->skin_joint_width; slot++) {
     index = out->skin_joints[(size_t)vertex_index * out->skin_joint_width + slot];
@@ -2867,17 +2868,30 @@ akb_skin_vertex_matrix(const AkbPrimitive *out,
     if (weight <= 0.0f || index >= out->skin_joint_count)
       continue;
 
-    for (i = 0; i < 16; i++)
-      matrix[i] += joint_mats[(size_t)index * 16 + i] * weight;
+    joint_matrix = joint_mats + (size_t)index * 16;
+    if (!has_matrix) {
+      glm_vec4_scale(AKB_VEC4(joint_matrix),      weight, AKB_VEC4(matrix));
+      glm_vec4_scale(AKB_VEC4(joint_matrix + 4),  weight, AKB_VEC4(matrix + 4));
+      glm_vec4_scale(AKB_VEC4(joint_matrix + 8),  weight, AKB_VEC4(matrix + 8));
+      glm_vec4_scale(AKB_VEC4(joint_matrix + 12), weight, AKB_VEC4(matrix + 12));
+      has_matrix = 1;
+    } else {
+      glm_vec4_muladds(AKB_VEC4(joint_matrix),      weight, AKB_VEC4(matrix));
+      glm_vec4_muladds(AKB_VEC4(joint_matrix + 4),  weight, AKB_VEC4(matrix + 4));
+      glm_vec4_muladds(AKB_VEC4(joint_matrix + 8),  weight, AKB_VEC4(matrix + 8));
+      glm_vec4_muladds(AKB_VEC4(joint_matrix + 12), weight, AKB_VEC4(matrix + 12));
+    }
     weight_sum += weight;
   }
 
   if (weight_sum > 1.0e-8f) {
     weight = 1.0f / weight_sum;
-    for (slot = 0; slot < 16; slot++)
-      matrix[slot] *= weight;
+    glm_vec4_scale(AKB_VEC4(matrix),      weight, AKB_VEC4(matrix));
+    glm_vec4_scale(AKB_VEC4(matrix + 4),  weight, AKB_VEC4(matrix + 4));
+    glm_vec4_scale(AKB_VEC4(matrix + 8),  weight, AKB_VEC4(matrix + 8));
+    glm_vec4_scale(AKB_VEC4(matrix + 12), weight, AKB_VEC4(matrix + 12));
   } else {
-    memcpy(matrix, joint_mats, 16 * sizeof(float));
+    glm_mat4_copy(AKB_MAT4(joint_mats), AKB_MAT4(matrix));
   }
 }
 
