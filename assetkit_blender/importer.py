@@ -702,7 +702,6 @@ def _create_grouped_mesh_object(
     vertices = bytearray(total_vertex_count * 3 * 4)
     indices = bytearray(total_loop_count * 4)
     loop_starts = bytearray(total_face_count * 4)
-    loop_totals = bytearray(total_face_count * 4)
     normals = bytearray(total_loop_count * 3 * 4) if first.normals_f32 else None
     tangents = bytearray(total_loop_count * 4 * 4) if first.tangents_f32 else None
     skin_joints = bytearray(total_vertex_count * skin_joint_width * 2) if first.has_skin else None
@@ -735,7 +734,6 @@ def _create_grouped_mesh_object(
             _copy_buffer_bytes(indices, loop_offset * 4, tmp_indices, "i")
 
         primitive_loop_starts = _buffer_view(primitive.loop_starts_i32, "i")
-        primitive_loop_totals = _buffer_view(primitive.loop_totals_i32, "i")
         if primitive_loop_starts is not None:
             shifted_starts = native_offset_i32(primitive_loop_starts, loop_offset)
             if shifted_starts is not None:
@@ -752,10 +750,6 @@ def _create_grouped_mesh_object(
                 array("i", range(loop_offset, loop_offset + int(primitive.loop_count), 3)),
                 "i",
             )
-        if primitive_loop_totals is not None:
-            _copy_buffer_bytes(loop_totals, face_offset * 4, primitive_loop_totals, "i")
-        else:
-            _copy_buffer_bytes(loop_totals, face_offset * 4, array("i", [3]) * int(primitive.face_count), "i")
 
         if has_materials:
             _copy_buffer_bytes(material_indices, face_offset * 4, array("i", [slot_index]) * int(primitive.face_count), "i")
@@ -790,7 +784,7 @@ def _create_grouped_mesh_object(
         vertices_f32=vertices,
         indices_u32=indices,
         loop_starts_i32=loop_starts,
-        loop_totals_i32=loop_totals,
+        loop_totals_i32=b"",
         normals_f32=normals or b"",
         tangents_f32=tangents or b"",
         uv_sets=uv_sets,
@@ -909,7 +903,7 @@ def _create_grouped_mesh_object_bulk(
     indices = _buffer_view(data.indices_u32, "i")
     loop_starts = _buffer_view(data.loop_starts_i32, "i")
     loop_totals = _buffer_view(data.loop_totals_i32, "i")
-    if vertices is None or indices is None or loop_starts is None or loop_totals is None:
+    if vertices is None or indices is None or loop_starts is None:
         raise RuntimeError("AssetKit native bridge returned incomplete grouped mesh buffers")
     if profile_detail:
         now = time.perf_counter()
@@ -919,7 +913,8 @@ def _create_grouped_mesh_object_bulk(
     _set_mesh_positions(mesh, vertices)
     _set_mesh_loop_vertex_indices(mesh, indices)
     mesh.polygons.foreach_set("loop_start", loop_starts)
-    mesh.polygons.foreach_set("loop_total", loop_totals)
+    if loop_totals is not None and int(data.loop_count) != int(data.face_count) * 3:
+        mesh.polygons.foreach_set("loop_total", loop_totals)
     _set_mesh_material_indices(mesh, material_indices)
     if profile_detail:
         now = time.perf_counter()
@@ -1300,6 +1295,20 @@ def _set_fcurve_group(fcurve: bpy.types.FCurve, channelbag, group_name: str) -> 
         fcurve.group = _channelbag_group(channelbag, group_name)
     except Exception:
         pass
+
+
+def _new_channelbag_fcurve(channelbag, data_path: str, index: int | None, group_name: str):
+    try:
+        if index is None:
+            return channelbag.fcurves.new(data_path=data_path, group_name=group_name)
+        return channelbag.fcurves.new(data_path=data_path, index=index, group_name=group_name)
+    except TypeError:
+        if index is None:
+            fcurve = channelbag.fcurves.new(data_path=data_path)
+        else:
+            fcurve = channelbag.fcurves.new(data_path=data_path, index=index)
+        _set_fcurve_group(fcurve, channelbag, group_name)
+        return fcurve
 
 
 def _channelbag_group(channelbag, group_name: str):
@@ -2184,14 +2193,14 @@ def _create_mesh_object_bulk(
 
     if vertices is None or indices is None:
         raise RuntimeError("AssetKit native bridge returned incomplete mesh buffers")
-    if loop_starts is None or loop_totals is None:
+    if loop_starts is None:
         loop_starts = array("i", range(0, data.loop_count, 3))
-        loop_totals = array("i", [3]) * data.face_count
 
     _set_mesh_positions(mesh, vertices)
     _set_mesh_loop_vertex_indices(mesh, indices)
     mesh.polygons.foreach_set("loop_start", loop_starts)
-    mesh.polygons.foreach_set("loop_total", loop_totals)
+    if loop_totals is not None and int(data.loop_count) != int(data.face_count) * 3:
+        mesh.polygons.foreach_set("loop_total", loop_totals)
     _apply_point_attributes(mesh, data)
 
     if data.uv_sets:
@@ -4933,12 +4942,7 @@ def _ensure_fcurve(
         existing = _find_fcurve(channelbag.fcurves, data_path, index)
         if existing is not None:
             return existing
-        if index is None:
-            fcurve = channelbag.fcurves.new(data_path=data_path)
-        else:
-            fcurve = channelbag.fcurves.new(data_path=data_path, index=index)
-        _set_fcurve_group(fcurve, channelbag, group_name)
-        return fcurve
+        return _new_channelbag_fcurve(channelbag, data_path, index, group_name)
 
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None:
@@ -4974,13 +4978,12 @@ def _ensure_fcurve(
         existing = _find_fcurve(channelbag.fcurves, data_path, index)
         if existing is not None:
             return existing
-        fcurve = channelbag.fcurves.new(data_path=data_path)
+        fcurve = _new_channelbag_fcurve(channelbag, data_path, None, group_name)
     else:
         existing = _find_fcurve(channelbag.fcurves, data_path, index)
         if existing is not None:
             return existing
-        fcurve = channelbag.fcurves.new(data_path=data_path, index=index)
-    _set_fcurve_group(fcurve, channelbag, group_name)
+        fcurve = _new_channelbag_fcurve(channelbag, data_path, index, group_name)
     return fcurve
 
 
@@ -5104,7 +5107,8 @@ def _keyframe_enum_array(enum_value: int, count: int) -> array:
     cached = _KEYFRAME_ENUM_ARRAYS.get(key)
     if cached is not None:
         return cached
-    values = array("i", [enum_value]) * count
+    typecode = "B" if 0 <= int(enum_value) <= 255 else "i"
+    values = array(typecode, [enum_value]) * count
     _KEYFRAME_ENUM_ARRAYS[key] = values
     return values
 
