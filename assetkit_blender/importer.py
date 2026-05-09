@@ -1291,6 +1291,12 @@ def _set_fcurve_group(fcurve: bpy.types.FCurve, channelbag, group_name: str) -> 
     if not group_name or not channelbag:
         return
     try:
+        current = getattr(fcurve, "group", None)
+        if current is not None and getattr(current, "name", None) == group_name:
+            return
+    except Exception:
+        pass
+    try:
         fcurve.group = _channelbag_group(channelbag, group_name)
     except Exception:
         pass
@@ -4924,6 +4930,9 @@ def _ensure_fcurve(
 ):
     slot, channelbag = _ensure_action_channelbag(action, obj)
     if channelbag is not None:
+        existing = _find_fcurve(channelbag.fcurves, data_path, index)
+        if existing is not None:
+            return existing
         if index is None:
             fcurve = channelbag.fcurves.new(data_path=data_path)
         else:
@@ -4933,6 +4942,9 @@ def _ensure_fcurve(
 
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None:
+        existing = _find_fcurve(fcurves, data_path, index)
+        if existing is not None:
+            return existing
         if index is None:
             return fcurves.new(data_path=data_path, action_group=group_name)
         return fcurves.new(data_path=data_path, index=index, action_group=group_name)
@@ -4959,11 +4971,39 @@ def _ensure_fcurve(
     if not channelbag:
         return fcurve
     if index is None:
+        existing = _find_fcurve(channelbag.fcurves, data_path, index)
+        if existing is not None:
+            return existing
         fcurve = channelbag.fcurves.new(data_path=data_path)
     else:
+        existing = _find_fcurve(channelbag.fcurves, data_path, index)
+        if existing is not None:
+            return existing
         fcurve = channelbag.fcurves.new(data_path=data_path, index=index)
     _set_fcurve_group(fcurve, channelbag, group_name)
     return fcurve
+
+
+def _find_fcurve(fcurves, data_path: str, index: int | None):
+    try:
+        if index is None:
+            found = fcurves.find(data_path)
+        else:
+            found = fcurves.find(data_path, index=index)
+        if found is not None:
+            return found
+    except Exception:
+        pass
+
+    for fcurve in fcurves:
+        try:
+            if fcurve.data_path != data_path:
+                continue
+            if index is None or int(fcurve.array_index) == int(index):
+                return fcurve
+        except Exception:
+            continue
+    return None
 
 
 def _channel_tangents(channel: dict) -> tuple[object | None, object | None]:
@@ -4991,6 +5031,7 @@ def _write_fcurve_points(
     tangent_value=None,
 ) -> None:
     count = len(coords) // 2
+    _clear_fcurve_points(fcurve)
     fcurve.keyframe_points.add(count)
     fcurve.keyframe_points.foreach_set("co", coords)
 
@@ -5025,6 +5066,24 @@ def _write_fcurve_points(
 
     if use_cubic:
         fcurve.update()
+
+
+def _clear_fcurve_points(fcurve) -> None:
+    points = fcurve.keyframe_points
+    if not points:
+        return
+    try:
+        points.clear()
+        return
+    except Exception:
+        pass
+    while points:
+        try:
+            points.remove(points[-1], fast=True)
+        except TypeError:
+            points.remove(points[-1])
+        except Exception:
+            break
 
 
 def _foreach_set_keyframe_enum(points, prop: str, value: str, count: int) -> None:

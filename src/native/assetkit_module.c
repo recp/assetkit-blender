@@ -821,7 +821,7 @@ akb_load_options_default(AkbLoadOptions *options) {
   options->import_lines = 1;
   options->cvt_line_loop = 1;
   options->cvt_line_strip = 1;
-  options->use_mmap = 0;
+  options->use_mmap = 1;
 }
 
 static int
@@ -1252,6 +1252,65 @@ akb_fnv1a64(const unsigned char *data, size_t length) {
   return hash;
 }
 
+static uint64_t
+akb_fnv1a64_mix_u64(uint64_t hash, uint64_t value) {
+  unsigned int i;
+
+  for (i = 0; i < 8; i++) {
+    hash ^= (unsigned char)((value >> (i * 8)) & 0xFFu);
+    hash *= UINT64_C(1099511628211);
+  }
+
+  return hash;
+}
+
+static size_t
+akb_doc_image_index(AkDoc *doc, AkImage *image) {
+  FListItem *item;
+  size_t index;
+
+  if (!doc || !image)
+    return 0;
+
+  index = 0;
+  for (item = doc->lib.images; item; item = item->next, index++)
+    if ((AkImage *)item->data == image)
+      return index;
+
+  return 0;
+}
+
+static uint64_t
+akb_embedded_image_cache_hash(AkDoc *doc, AkImage *image, size_t length) {
+  const char *path;
+  uint64_t hash;
+  size_t image_index;
+#if defined(_WIN32)
+  struct _stat st;
+#else
+  struct stat st;
+#endif
+
+  path = (doc && doc->inf && doc->inf->name) ? doc->inf->name : "";
+  hash = akb_fnv1a64((const unsigned char *)path, strlen(path));
+  image_index = akb_doc_image_index(doc, image);
+  hash = akb_fnv1a64_mix_u64(hash, (uint64_t)image_index);
+  hash = akb_fnv1a64_mix_u64(hash, (uint64_t)length);
+
+  if (path[0]
+#if defined(_WIN32)
+      && _stat(path, &st) == 0
+#else
+      && stat(path, &st) == 0
+#endif
+  ) {
+    hash = akb_fnv1a64_mix_u64(hash, (uint64_t)st.st_size);
+    hash = akb_fnv1a64_mix_u64(hash, (uint64_t)st.st_mtime);
+  }
+
+  return hash;
+}
+
 static const char *
 akb_embedded_image_extension(const unsigned char *data, size_t length, const char *mime) {
   if (mime) {
@@ -1319,7 +1378,7 @@ akb_write_file_once(const char *path, const unsigned char *data, size_t length) 
 }
 
 static int
-akb_copy_embedded_texture_path(AkImage *image, char *dest, size_t capacity) {
+akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
   AkInitFrom *init_from;
   AkBuffer *buff;
   const unsigned char *data;
@@ -1329,16 +1388,24 @@ akb_copy_embedded_texture_path(AkImage *image, char *dest, size_t capacity) {
   char filename[128];
   uint64_t hash;
   size_t length;
+  int borrowed_slice;
 
   if (!image || !dest || capacity == 0)
     return 0;
 
   init_from = image->initFrom;
+  if (init_from && init_from->resolvedFullPath) {
+    snprintf(dest, capacity, "%s", init_from->resolvedFullPath);
+    return dest[0] != '\0';
+  }
+
   buff = init_from ? init_from->buff : NULL;
   data = buff ? (const unsigned char *)buff->data : NULL;
   length = buff ? buff->length : 0;
   if (!data || length == 0)
     return 0;
+  borrowed_slice = buff->name
+                   && strcmp(buff->name, "assetkit:gltf-buffer-view-slice") == 0;
 
   tmpdir = getenv("TMPDIR");
   if (!tmpdir || !tmpdir[0])
@@ -1348,7 +1415,9 @@ akb_copy_embedded_texture_path(AkImage *image, char *dest, size_t capacity) {
   if (!akb_mkdir_if_needed(dir))
     return 0;
 
-  hash = akb_fnv1a64(data, length);
+  hash = borrowed_slice
+           ? akb_embedded_image_cache_hash(doc, image, length)
+           : akb_fnv1a64(data, length);
   ext = akb_embedded_image_extension(data, length, init_from->buffMime);
   snprintf(filename,
            sizeof(filename),
@@ -1361,6 +1430,9 @@ akb_copy_embedded_texture_path(AkImage *image, char *dest, size_t capacity) {
     dest[0] = '\0';
     return 0;
   }
+
+  if (!init_from->resolvedFullPath)
+    init_from->resolvedFullPath = ak_strdup(init_from, dest);
 
   return 1;
 }
@@ -1384,7 +1456,7 @@ akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
 
   path = init_from->resolvedFullPath ? init_from->resolvedFullPath : init_from->ref;
   if (!path || !path[0]) {
-    akb_copy_embedded_texture_path(image, dest, capacity);
+    akb_copy_embedded_texture_path(doc, image, dest, capacity);
     return;
   }
 
