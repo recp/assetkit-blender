@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.18)
 project(assetkit_blender_native LANGUAGES C)
 
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(ASSETKIT_ROOT "" CACHE PATH "AssetKit source or install root")
 set(ASSETKIT_BLENDER_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assetkit_blender" CACHE PATH "Output directory for the native Python module")
 set(ASSETKIT_BLENDER_PYTHON_SOABI "" CACHE STRING "Override Python extension ABI tag, for example cpython-313-darwin")
@@ -74,6 +78,7 @@ if(ASSETKIT_BLENDER_PYTHON_SOABI)
     SUFFIX ".${ASSETKIT_BLENDER_PYTHON_SOABI_CLEAN}${CMAKE_SHARED_MODULE_SUFFIX}")
 endif()
 target_include_directories(_assetkit_blender PRIVATE "${ASSETKIT_INCLUDE_DIR}" "${CGLM_INCLUDE_DIR}")
+target_compile_definitions(_assetkit_blender PRIVATE CGLM_ALL_UNALIGNED)
 target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_LIBRARY}")
 if(UNIX AND NOT APPLE)
   target_link_libraries(_assetkit_blender PRIVATE m)

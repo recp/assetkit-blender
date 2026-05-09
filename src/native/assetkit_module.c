@@ -2,6 +2,7 @@
 #include <Python.h>
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include <direct.h>
 #else
 #include <dlfcn.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -101,6 +103,58 @@ typedef struct FListItem FListItem;
 #define AKB_SKIN_DEFAULT_JOINTS_PER_VERTEX 4
 #define AKB_SKIN_MAX_JOINTS_PER_VERTEX 64
 #define AKB_TEXTURE_INFO_MAX 24
+
+static double
+akb_now_ms(void) {
+#if defined(_WIN32)
+  static LARGE_INTEGER freq;
+  LARGE_INTEGER now;
+
+  if (!freq.QuadPart)
+    QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&now);
+  return (double)now.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#endif
+}
+
+static int
+akb_profile_enabled(void) {
+  static int cached = -1;
+  const char *env = getenv("ASSETKIT_BLENDER_PROFILE");
+
+  if (cached >= 0)
+    return cached;
+
+  if (!env || !env[0])
+    return cached = 0;
+
+  cached = strcmp(env, "0") != 0
+           && strcmp(env, "false") != 0
+           && strcmp(env, "FALSE") != 0
+           && strcmp(env, "off") != 0
+           && strcmp(env, "OFF") != 0;
+  return cached;
+}
+
+static void
+akb_profile_log(const char *fmt, ...) {
+  va_list args;
+
+  if (!akb_profile_enabled())
+    return;
+
+  fputs("[AssetKit native] ", stderr);
+  va_start(args, fmt);
+  vfprintf(stderr, fmt, args);
+  va_end(args);
+  fputc('\n', stderr);
+  fflush(stderr);
+}
 
 typedef enum AkbTextureRoleId {
   AKB_TEX_ROLE_BASE_COLOR = 0,
@@ -223,6 +277,7 @@ typedef struct AkbPrimitive {
   AkbMaterialVariantMap *material_variants;
   AkbGaussianSplatInfo gsplat;
   AkbTextureInfo texture_infos[AKB_TEXTURE_INFO_MAX];
+  struct AkbAnimation **skin_pose_animations;
   AkNode   **skin_joint_sources;
   AkNode    *skin_root_source;
   char     name[512];
@@ -297,6 +352,8 @@ typedef struct AkbPrimitive {
   float    dispersion;
   float    matrix[16];
   float    coord_matrix[16];
+  uintptr_t mesh_key;
+  uintptr_t material_key;
   int32_t  node_index;
   int32_t  skin_root_node_index;
   uint32_t instance_count;
@@ -309,11 +366,13 @@ typedef struct AkbPrimitive {
   uint32_t color_set_count;
   uint32_t point_attr_count;
   uint32_t texture_info_count;
+  uint32_t skin_pose_animation_count;
   uint32_t morph_target_count;
   uint32_t morph_preset_count;
   uint32_t material_variant_count;
   uint32_t material_type;
   uint32_t file_type;
+  uint32_t primitive_index;
   uint32_t skin_vertex_count;
   uint32_t skin_joint_count;
   uint32_t skin_joint_width;
@@ -429,7 +488,25 @@ typedef struct AkbAnimChannel {
   uint8_t     borrowed_values;
   uint8_t     borrowed_in_tangents;
   uint8_t     borrowed_out_tangents;
+  uint8_t     pose_ready;
 } AkbAnimChannel;
+
+typedef enum AkbPyAnimChannelField {
+  AKB_PY_ANIM_TARGET = 0,
+  AKB_PY_ANIM_TARGET_OFFSET,
+  AKB_PY_ANIM_CLIP_INDEX,
+  AKB_PY_ANIM_CLIP_NAME,
+  AKB_PY_ANIM_VALUE_WIDTH,
+  AKB_PY_ANIM_COUNT,
+  AKB_PY_ANIM_INTERPOLATION,
+  AKB_PY_ANIM_IS_PARTIAL,
+  AKB_PY_ANIM_POSE_READY,
+  AKB_PY_ANIM_TIMES_F32,
+  AKB_PY_ANIM_VALUES_F32,
+  AKB_PY_ANIM_IN_TANGENTS_F32,
+  AKB_PY_ANIM_OUT_TANGENTS_F32,
+  AKB_PY_ANIM_FIELD_COUNT
+} AkbPyAnimChannelField;
 
 typedef struct AkbAnimation {
   AkbSharedDoc  *doc_owner;
@@ -446,6 +523,19 @@ typedef struct AkbAnimBinding {
   uint32_t kind;
   uint32_t width;
 } AkbAnimBinding;
+
+typedef struct AkbResolvedAnimChannel {
+  AkChannel        *channel;
+  AkResolvedTarget resolved;
+  const char      *clip_name;
+  uint32_t         clip_index;
+} AkbResolvedAnimChannel;
+
+typedef struct AkbAnimationIndex {
+  AkbResolvedAnimChannel *items;
+  size_t                  count;
+  size_t                  capacity;
+} AkbAnimationIndex;
 
 static void
 akb_shared_doc_retain(AkbSharedDoc *owner) {
@@ -697,6 +787,22 @@ akb_animation_release(AkbAnimation *animation) {
   }
 }
 
+static void
+akb_anim_channel_free(AkbAnimChannel *channel) {
+  if (!channel)
+    return;
+
+  if (!channel->borrowed_times)
+    free(channel->times);
+  if (!channel->borrowed_values)
+    free(channel->values);
+  if (!channel->borrowed_in_tangents)
+    free(channel->in_tangents);
+  if (!channel->borrowed_out_tangents)
+    free(channel->out_tangents);
+  memset(channel, 0, sizeof(*channel));
+}
+
 static const char *
 akb_name(const char *value, const char *fallback) {
   return value && value[0] ? value : fallback;
@@ -782,6 +888,9 @@ akb_primitive_free(AkbPrimitive *prim) {
   free(prim->skin_weights);
   free(prim->skin_inverse_bind_matrices);
   free(prim->skin_joint_sources);
+  for (i = 0; i < prim->skin_pose_animation_count; i++)
+    akb_animation_release(prim->skin_pose_animations[i]);
+  free(prim->skin_pose_animations);
   free(prim->material_variants);
   for (i = 0; i < prim->morph_target_count; i++)
     free(prim->morph_targets[i].positions);
@@ -1434,6 +1543,13 @@ akb_extract_material(AkDoc *doc,
 
   if (!mat && !effect)
     return;
+
+  if (mat)
+    out->material_key = (uintptr_t)mat;
+  else if (effect)
+    out->material_key = (uintptr_t)effect;
+  else
+    out->material_key = (uintptr_t)inst_mat;
 
   if (mat && mat->name) {
     snprintf(out->material_name,
@@ -2746,6 +2862,62 @@ akb_mat4_mul_vec3_normalize(const float m[16], float v[3]) {
   }
 }
 
+static int
+akb_skin_vertex_rigid_joint(const AkbPrimitive *out,
+                            uint32_t vertex_index,
+                            uint16_t *joint_out) {
+  size_t base;
+  uint16_t joint;
+  uint32_t slot;
+  int found;
+
+  if (!out || !joint_out || !out->skin_joints || !out->skin_weights
+      || vertex_index >= out->vertex_count || !out->skin_joint_width)
+    return 0;
+
+  base = (size_t)vertex_index * out->skin_joint_width;
+  joint = 0;
+  found = 0;
+  for (slot = 0; slot < out->skin_joint_width; slot++) {
+    if (out->skin_weights[base + slot] <= 0.0f)
+      continue;
+    if (found)
+      return 0;
+    joint = out->skin_joints[base + slot];
+    if ((uint32_t)joint >= out->skin_joint_count)
+      return 0;
+    found = 1;
+  }
+
+  if (!found)
+    return 0;
+
+  *joint_out = joint;
+  return 1;
+}
+
+static uint16_t *
+akb_skin_rigid_vertex_joints(const AkbPrimitive *out) {
+  uint16_t *vertex_joints;
+  uint32_t vertex_index;
+
+  if (!out || !out->vertex_count || !out->skin_joint_count)
+    return NULL;
+
+  vertex_joints = (uint16_t *)malloc((size_t)out->vertex_count * sizeof(*vertex_joints));
+  if (!vertex_joints)
+    return NULL;
+
+  for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
+    if (!akb_skin_vertex_rigid_joint(out, vertex_index, &vertex_joints[vertex_index])) {
+      free(vertex_joints);
+      return NULL;
+    }
+  }
+
+  return vertex_joints;
+}
+
 static void
 akb_skin_vertex_matrix(const AkbPrimitive *out,
                        const float *joint_mats,
@@ -2847,10 +3019,71 @@ akb_skin_bind_pose_apply_loop_vectors(AkbPrimitive *out, const float *vertex_mat
   }
 }
 
+static void
+akb_skin_bind_pose_apply_loop_vectors_rigid(AkbPrimitive *out,
+                                            const float *joint_mats,
+                                            const uint16_t *vertex_joints) {
+  const float *matrix;
+  uint32_t loop_index;
+  uint32_t vertex_index;
+
+  if (!out || !joint_mats || !vertex_joints || !out->indices)
+    return;
+
+  if (out->normals) {
+    for (loop_index = 0; loop_index < out->loop_count; loop_index++) {
+      vertex_index = out->indices[loop_index];
+      if (vertex_index >= out->vertex_count)
+        continue;
+      matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
+      akb_mat4_mul_vec3_normalize(matrix, out->normals + (size_t)loop_index * 3);
+    }
+  }
+
+  if (out->tangents) {
+    for (loop_index = 0; loop_index < out->loop_count; loop_index++) {
+      vertex_index = out->indices[loop_index];
+      if (vertex_index >= out->vertex_count)
+        continue;
+      matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
+      akb_mat4_mul_vec3_normalize(matrix, out->tangents + (size_t)loop_index * 4);
+    }
+  }
+}
+
+static void
+akb_skin_into_bind_pose_rigid(AkbPrimitive *out,
+                              const float *joint_mats,
+                              const uint16_t *vertex_joints) {
+  AkbMorphTarget *target;
+  const float *matrix;
+  uint32_t vertex_index;
+  uint32_t target_index;
+
+  for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
+    matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
+    akb_mat4_mul_point3(matrix, out->vertices + (size_t)vertex_index * 3);
+  }
+
+  for (target_index = 0; target_index < out->morph_target_count; target_index++) {
+    target = &out->morph_targets[target_index];
+    if (!target->positions || target->vertex_count != out->vertex_count)
+      continue;
+    for (vertex_index = 0; vertex_index < out->vertex_count; vertex_index++) {
+      matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
+      akb_mat4_mul_point3(matrix, target->positions + (size_t)vertex_index * 3);
+    }
+  }
+
+  akb_skin_bind_pose_apply_loop_vectors_rigid(out, joint_mats, vertex_joints);
+  out->skin_mesh_in_bind_pose = 1;
+}
+
 static int
 akb_skin_into_bind_pose(AkbPrimitive *out) {
   float *joint_mats;
   float *vertex_mats;
+  uint16_t *rigid_vertex_joints;
   AkbMorphTarget *target;
   uint32_t vertex_index;
   uint32_t target_index;
@@ -2867,6 +3100,14 @@ akb_skin_into_bind_pose(AkbPrimitive *out) {
     return 0;
   if (!akb_skin_bind_pose_joint_matrices(out, &joint_mats))
     return 0;
+
+  rigid_vertex_joints = akb_skin_rigid_vertex_joints(out);
+  if (rigid_vertex_joints) {
+    akb_skin_into_bind_pose_rigid(out, joint_mats, rigid_vertex_joints);
+    free(rigid_vertex_joints);
+    free(joint_mats);
+    return 1;
+  }
 
   vertex_mats = (float *)malloc((size_t)out->vertex_count * 16 * sizeof(*vertex_mats));
   if (!vertex_mats) {
@@ -2916,11 +3157,14 @@ akb_resolve_skin_joint_nodes(AkbPrimitiveList *list, AkbSceneNodeList *nodes) {
       continue;
 
     for (i = 0; i < prim->skin_joint_count; i++) {
+      if (prim->skin_joint_nodes[i] >= 0)
+        continue;
       prim->skin_joint_nodes[i] = akb_scene_node_index_for(nodes,
                                                            prim->skin_joint_sources[i]);
     }
-    prim->skin_root_node_index = akb_scene_node_index_for(nodes,
-                                                          prim->skin_root_source);
+    if (prim->skin_root_node_index < 0)
+      prim->skin_root_node_index = akb_scene_node_index_for(nodes,
+                                                            prim->skin_root_source);
   }
 }
 
@@ -2999,6 +3243,475 @@ akb_animation_push(AkbAnimation *animation, AkbAnimChannel *channel) {
   animation->channels[animation->count++] = *channel;
   memset(channel, 0, sizeof(*channel));
   return 1;
+}
+
+static void
+akb_pose_basis_from_rest(const float rest[16],
+                         float edit_translation[3],
+                         versor edit_rotation_inv) {
+  mat4 rotation_matrix = GLM_MAT4_IDENTITY_INIT;
+  versor edit_rotation;
+  float len;
+  int col;
+  int row;
+
+  edit_translation[0] = rest[12];
+  edit_translation[1] = rest[13];
+  edit_translation[2] = rest[14];
+
+  for (col = 0; col < 3; col++) {
+    len = sqrtf(rest[col * 4] * rest[col * 4]
+                + rest[col * 4 + 1] * rest[col * 4 + 1]
+                + rest[col * 4 + 2] * rest[col * 4 + 2]);
+    if (len <= 1.0e-8f)
+      len = 1.0f;
+    for (row = 0; row < 3; row++)
+      rotation_matrix[col][row] = rest[col * 4 + row] / len;
+  }
+
+  glm_mat4_quat(rotation_matrix, edit_rotation);
+  glm_quat_normalize(edit_rotation);
+  glm_quat_inv(edit_rotation, edit_rotation_inv);
+  glm_quat_normalize(edit_rotation_inv);
+}
+
+static void
+akb_mat4_to_trs(const float m[16],
+                float translation[3],
+                versor rotation_xyzw,
+                float scale[3]) {
+  mat4 rotation_matrix = GLM_MAT4_IDENTITY_INIT;
+  float cx, cy, cz, det;
+  float inv_scale;
+  int col;
+  int row;
+
+  translation[0] = m[12];
+  translation[1] = m[13];
+  translation[2] = m[14];
+
+  for (col = 0; col < 3; col++) {
+    scale[col] = sqrtf(m[col * 4] * m[col * 4]
+                       + m[col * 4 + 1] * m[col * 4 + 1]
+                       + m[col * 4 + 2] * m[col * 4 + 2]);
+    inv_scale = scale[col] > 1.0e-8f ? 1.0f / scale[col] : 1.0f;
+    for (row = 0; row < 3; row++)
+      rotation_matrix[col][row] = m[col * 4 + row] * inv_scale;
+  }
+
+  cx  = m[1] * m[6] - m[2] * m[5];
+  cy  = m[2] * m[4] - m[0] * m[6];
+  cz  = m[0] * m[5] - m[1] * m[4];
+  det = cx * m[8] + cy * m[9] + cz * m[10];
+  if (det < 0.0f) {
+    for (col = 0; col < 3; col++) {
+      scale[col] = -scale[col];
+      for (row = 0; row < 3; row++)
+        rotation_matrix[col][row] = -rotation_matrix[col][row];
+    }
+  }
+
+  glm_mat4_quat(rotation_matrix, rotation_xyzw);
+  glm_quat_normalize(rotation_xyzw);
+}
+
+static void
+akb_pose_transform_translation(float *dst,
+                               const float *src,
+                               const float edit_translation[3],
+                               const versor edit_rotation_inv) {
+  vec3 value;
+  vec3 relative;
+  vec3 corrected;
+  versor inv;
+
+  value[0] = src[0];
+  value[1] = src[1];
+  value[2] = src[2];
+  relative[0] = value[0] - edit_translation[0];
+  relative[1] = value[1] - edit_translation[1];
+  relative[2] = value[2] - edit_translation[2];
+  memcpy(inv, edit_rotation_inv, sizeof(inv));
+  glm_quat_rotatev(inv, relative, corrected);
+  dst[0] = corrected[0];
+  dst[1] = corrected[1];
+  dst[2] = corrected[2];
+}
+
+static void
+akb_pose_transform_rotation(float *dst,
+                            const float *src,
+                            const versor edit_rotation_inv) {
+  versor rotation;
+  versor corrected;
+  versor inv;
+
+  rotation[0] = src[1];
+  rotation[1] = src[2];
+  rotation[2] = src[3];
+  rotation[3] = src[0];
+  glm_quat_normalize(rotation);
+  memcpy(inv, edit_rotation_inv, sizeof(inv));
+  glm_quat_mul(inv, rotation, corrected);
+  glm_quat_normalize(corrected);
+
+  dst[0] = corrected[3];
+  dst[1] = corrected[0];
+  dst[2] = corrected[1];
+  dst[3] = corrected[2];
+}
+
+static int
+akb_pose_channel_is_default(const AkbAnimChannel *channel) {
+  const float *values;
+  uint32_t i;
+
+  if (!channel || channel->is_partial || !channel->values || !channel->count)
+    return 0;
+
+  values = channel->values;
+  if (channel->target == AKB_ANIM_TRANSLATION && channel->value_width >= 3) {
+    for (i = 0; i < channel->count; i++) {
+      const float *sample = values + (size_t)i * channel->value_width;
+      if (fabsf(sample[0]) > 1.0e-6f
+          || fabsf(sample[1]) > 1.0e-6f
+          || fabsf(sample[2]) > 1.0e-6f)
+        return 0;
+    }
+    return 1;
+  }
+
+  if (channel->target == AKB_ANIM_ROTATION_QUAT && channel->value_width >= 4) {
+    for (i = 0; i < channel->count; i++) {
+      const float *sample = values + (size_t)i * channel->value_width;
+      if (fabsf(sample[0] - 1.0f) > 1.0e-6f
+          || fabsf(sample[1]) > 1.0e-6f
+          || fabsf(sample[2]) > 1.0e-6f
+          || fabsf(sample[3]) > 1.0e-6f)
+        return 0;
+    }
+    return 1;
+  }
+
+  if (channel->target == AKB_ANIM_SCALE && channel->value_width >= 3) {
+    for (i = 0; i < channel->count; i++) {
+      const float *sample = values + (size_t)i * channel->value_width;
+      if (fabsf(sample[0] - 1.0f) > 1.0e-6f
+          || fabsf(sample[1] - 1.0f) > 1.0e-6f
+          || fabsf(sample[2] - 1.0f) > 1.0e-6f)
+        return 0;
+    }
+    return 1;
+  }
+
+  return 0;
+}
+
+static int
+akb_pose_channel_clone(AkbAnimChannel *dst,
+                       const AkbAnimChannel *src,
+                       const float edit_translation[3],
+                       const versor edit_rotation_inv) {
+  size_t value_count;
+  size_t value_bytes;
+  uint32_t i;
+  int pose_ready;
+  int transform_values;
+
+  if (!dst || !src)
+    return 0;
+
+  memset(dst, 0, sizeof(*dst));
+  dst->times = src->times;
+  dst->clip_name = src->clip_name;
+  dst->count = src->count;
+  dst->value_width = src->value_width;
+  dst->target = src->target;
+  dst->target_offset = src->target_offset;
+  dst->clip_index = src->clip_index;
+  dst->interpolation = src->interpolation;
+  dst->is_partial = src->is_partial;
+  dst->borrowed_times = 1;
+
+  pose_ready = !src->is_partial
+               && src->values
+               && src->count
+               && ((src->target == AKB_ANIM_TRANSLATION && src->value_width >= 3)
+                   || (src->target == AKB_ANIM_ROTATION_QUAT && src->value_width >= 4)
+                   || (src->target == AKB_ANIM_SCALE && src->value_width >= 3));
+  transform_values = pose_ready
+                     && (src->target == AKB_ANIM_TRANSLATION
+                         || src->target == AKB_ANIM_ROTATION_QUAT);
+
+  value_count = (size_t)src->count * src->value_width;
+  value_bytes = value_count * sizeof(float);
+  if (value_bytes && src->values) {
+    if (transform_values) {
+      dst->values = (float *)malloc(value_bytes);
+      if (!dst->values)
+        return 0;
+      if ((src->target == AKB_ANIM_TRANSLATION && src->value_width != 3)
+          || (src->target == AKB_ANIM_ROTATION_QUAT && src->value_width != 4))
+        memcpy(dst->values, src->values, value_bytes);
+    } else {
+      dst->values = src->values;
+      dst->borrowed_values = 1;
+    }
+  }
+
+  if (value_bytes && src->in_tangents) {
+    dst->in_tangents = src->in_tangents;
+    dst->borrowed_in_tangents = 1;
+  }
+  if (value_bytes && src->out_tangents) {
+    dst->out_tangents = src->out_tangents;
+    dst->borrowed_out_tangents = 1;
+  }
+
+  if (!transform_values) {
+    dst->pose_ready = pose_ready ? 1 : 0;
+    return 1;
+  }
+
+  for (i = 0; i < src->count; i++) {
+    float *sample = dst->values + (size_t)i * dst->value_width;
+    const float *source = src->values + (size_t)i * src->value_width;
+
+    if (src->target == AKB_ANIM_TRANSLATION)
+      akb_pose_transform_translation(sample,
+                                     source,
+                                     edit_translation,
+                                     edit_rotation_inv);
+    else if (src->target == AKB_ANIM_ROTATION_QUAT)
+      akb_pose_transform_rotation(sample,
+                                  source,
+                                  edit_rotation_inv);
+  }
+
+  dst->pose_ready = 1;
+  return 1;
+}
+
+static AkbAnimation *
+akb_animation_new_pose_for_joint(AkbAnimation *source,
+                                 const float rest[16]) {
+  AkbAnimation *animation;
+  AkbAnimChannel channel;
+  float edit_translation[3];
+  versor edit_rotation_inv;
+  size_t i;
+
+  if (!source || !source->count)
+    return NULL;
+
+  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+  if (!animation)
+    return NULL;
+
+  animation->refcount = 1;
+  animation->doc_owner = source->doc_owner;
+  akb_shared_doc_retain(animation->doc_owner);
+  akb_pose_basis_from_rest(rest, edit_translation, edit_rotation_inv);
+
+  for (i = 0; i < source->count; i++) {
+    if (!akb_pose_channel_clone(&channel,
+                                &source->channels[i],
+                                edit_translation,
+                                edit_rotation_inv)) {
+      akb_animation_release(animation);
+      return NULL;
+    }
+    if (akb_pose_channel_is_default(&channel)) {
+      akb_anim_channel_free(&channel);
+      continue;
+    }
+    if (!akb_animation_push(animation, &channel)) {
+      akb_anim_channel_free(&channel);
+      akb_animation_release(animation);
+      return NULL;
+    }
+  }
+
+  if (!animation->count) {
+    akb_animation_release(animation);
+    return NULL;
+  }
+
+  return animation;
+}
+
+static int
+akb_skin_pose_is_same_skin(const AkbPrimitive *a, const AkbPrimitive *b) {
+  uint32_t i;
+
+  if (!a || !b)
+    return 0;
+  if (!a->skin_mesh_in_bind_pose || !b->skin_mesh_in_bind_pose)
+    return 0;
+  if (a->skin_root_source != b->skin_root_source)
+    return 0;
+  if (a->skin_joint_count != b->skin_joint_count)
+    return 0;
+  if (!a->skin_joint_sources || !b->skin_joint_sources)
+    return 0;
+
+  for (i = 0; i < a->skin_joint_count; i++)
+    if (a->skin_joint_sources[i] != b->skin_joint_sources[i])
+      return 0;
+
+  return 1;
+}
+
+static int
+akb_skin_pose_retain_from(AkbPrimitive *dst, AkbPrimitive *src) {
+  uint32_t i;
+
+  if (!dst || !src || !src->skin_pose_animation_count)
+    return 0;
+
+  dst->skin_pose_animations = (AkbAnimation **)calloc((size_t)src->skin_pose_animation_count,
+                                                      sizeof(*dst->skin_pose_animations));
+  if (!dst->skin_pose_animations)
+    return 0;
+
+  dst->skin_pose_animation_count = src->skin_pose_animation_count;
+  for (i = 0; i < dst->skin_pose_animation_count; i++)
+    dst->skin_pose_animations[i] = akb_animation_retain(src->skin_pose_animations[i]);
+
+  return 1;
+}
+
+static int
+akb_skin_pose_reuse(AkbPrimitiveList *list, AkbPrimitive *prim, size_t current_index) {
+  size_t i;
+
+  if (!list || !prim)
+    return 0;
+
+  for (i = 0; i < current_index; i++) {
+    AkbPrimitive *candidate = &list->items[i];
+    if (!candidate->skin_pose_animation_count || !candidate->skin_pose_animations)
+      continue;
+    if (akb_skin_pose_is_same_skin(prim, candidate))
+      return akb_skin_pose_retain_from(prim, candidate);
+  }
+
+  return 0;
+}
+
+static int32_t
+akb_skin_pose_parent_joint_index(const AkbPrimitive *prim,
+                                 const AkbSceneNodeList *nodes,
+                                 const int32_t *node_to_joint,
+                                 uint32_t joint_index) {
+  int32_t parent_index;
+
+  if (!prim || !nodes || !node_to_joint || !prim->skin_joint_nodes
+      || joint_index >= prim->skin_joint_count)
+    return -1;
+
+  parent_index = prim->skin_joint_nodes[joint_index];
+  if (parent_index < 0 || (size_t)parent_index >= nodes->count)
+    return -1;
+
+  parent_index = nodes->items[parent_index].parent_index;
+  while (parent_index >= 0) {
+    if ((size_t)parent_index >= nodes->count)
+      break;
+    if (node_to_joint[parent_index] >= 0)
+      return node_to_joint[parent_index];
+    parent_index = nodes->items[parent_index].parent_index;
+  }
+
+  return -1;
+}
+
+static void
+akb_build_skin_pose_animations(AkbPrimitiveList *list, AkbSceneNodeList *nodes) {
+  AkbPrimitive *prim;
+  AkbSceneNode *node;
+  float *rest_mats;
+  float root_world[16];
+  float root_inv[16];
+  float joint_world[16];
+  float rest[16];
+  float parent_inv[16];
+  int32_t *node_to_joint;
+  uint32_t i;
+  size_t j;
+  size_t node_table_index;
+  int32_t node_index;
+  int32_t parent_joint_index;
+
+  if (!list || !nodes)
+    return;
+
+  for (j = 0; j < list->count; j++) {
+    prim = &list->items[j];
+    if (!prim->has_skin || !prim->skin_mesh_in_bind_pose
+        || !prim->skin_joint_count || !prim->skin_joint_nodes
+        || !prim->skin_root_source)
+      continue;
+
+    if (akb_skin_pose_reuse(list, prim, j))
+      continue;
+
+    prim->skin_pose_animations = (AkbAnimation **)calloc((size_t)prim->skin_joint_count,
+                                                         sizeof(*prim->skin_pose_animations));
+    if (!prim->skin_pose_animations)
+      continue;
+    prim->skin_pose_animation_count = prim->skin_joint_count;
+
+    akb_node_world_matrix(prim->skin_root_source, root_world);
+    akb_mat4_inv(root_world, root_inv);
+
+    rest_mats = (float *)malloc((size_t)prim->skin_joint_count * 16 * sizeof(*rest_mats));
+    if (!rest_mats)
+      continue;
+
+    node_to_joint = (int32_t *)malloc(nodes->count * sizeof(*node_to_joint));
+    if (!node_to_joint) {
+      free(rest_mats);
+      continue;
+    }
+    for (node_table_index = 0; node_table_index < nodes->count; node_table_index++)
+      node_to_joint[node_table_index] = -1;
+
+    for (i = 0; i < prim->skin_joint_count; i++) {
+      node_index = prim->skin_joint_nodes[i];
+      if (node_index < 0 || (size_t)node_index >= nodes->count)
+        continue;
+      node_to_joint[node_index] = (int32_t)i;
+      node = &nodes->items[node_index];
+      if (!node->source)
+        continue;
+
+      akb_node_world_matrix(node->source, joint_world);
+      akb_mat4_mul(root_inv, joint_world, rest_mats + (size_t)i * 16);
+    }
+
+    for (i = 0; i < prim->skin_joint_count; i++) {
+      node_index = prim->skin_joint_nodes[i];
+      if (node_index < 0 || (size_t)node_index >= nodes->count)
+        continue;
+      node = &nodes->items[node_index];
+      if (!node->animation || !node->animation->count || !node->source)
+        continue;
+
+      memcpy(rest, rest_mats + (size_t)i * 16, 16 * sizeof(float));
+      parent_joint_index = akb_skin_pose_parent_joint_index(prim, nodes, node_to_joint, i);
+      if (parent_joint_index >= 0) {
+        akb_mat4_inv(rest_mats + (size_t)parent_joint_index * 16, parent_inv);
+        akb_mat4_mul(parent_inv, rest_mats + (size_t)i * 16, rest);
+      }
+
+      prim->skin_pose_animations[i] = akb_animation_new_pose_for_joint(node->animation,
+                                                                       rest);
+    }
+
+    free(node_to_joint);
+    free(rest_mats);
+  }
 }
 
 static int
@@ -3415,9 +4128,159 @@ akb_animation_collect_walk(AkbAnimation *animation,
   return 1;
 }
 
+static void
+akb_animation_index_free(AkbAnimationIndex *index) {
+  if (!index)
+    return;
+  free(index->items);
+  memset(index, 0, sizeof(*index));
+}
+
+static int
+akb_animation_index_push(AkbAnimationIndex *index,
+                         AkChannel *channel,
+                         const AkResolvedTarget *resolved,
+                         uint32_t clip_index,
+                         const char *clip_name) {
+  AkbResolvedAnimChannel *items;
+  size_t capacity;
+
+  if (!index || !channel || !resolved || !resolved->target)
+    return 1;
+
+  if (index->count == index->capacity) {
+    capacity = index->capacity ? index->capacity * 2 : 64;
+    items = (AkbResolvedAnimChannel *)realloc(index->items,
+                                              capacity * sizeof(*items));
+    if (!items)
+      return 0;
+    index->items = items;
+    index->capacity = capacity;
+  }
+
+  index->items[index->count].channel = channel;
+  index->items[index->count].resolved = *resolved;
+  index->items[index->count].clip_name = clip_name;
+  index->items[index->count].clip_index = clip_index;
+  index->count++;
+  return 1;
+}
+
+static int
+akb_animation_index_collect_walk(AkbAnimationIndex *index,
+                                 AkAnimation *source,
+                                 AkContext *context) {
+  struct AkbAnimationStackItem {
+    AkAnimation *source;
+    uint32_t index;
+    const char *name;
+  } stack[256];
+  AkAnimation *next;
+  AkChannel *channel;
+  AkResolvedTarget resolved;
+  const char *clip_name;
+  uint32_t clip_index;
+  int top;
+
+  top = 0;
+  clip_index = 0;
+  clip_name = source ? source->name : NULL;
+  while (source) {
+    for (channel = source->channel; channel; channel = channel->next) {
+      resolved = ak_channelTarget(context, channel);
+      if (!resolved.target)
+        continue;
+      if (!akb_animation_index_push(index, channel, &resolved, clip_index, clip_name))
+        return 0;
+    }
+
+    if (source->animation) {
+      next = (AkAnimation *)source->base.next;
+      if (next && top < 256) {
+        stack[top].source = next;
+        stack[top].index = clip_index + 1;
+        stack[top].name = next->name;
+        top++;
+      }
+      source = source->animation;
+    } else if (source->base.next) {
+      source = (AkAnimation *)source->base.next;
+      clip_index++;
+      clip_name = source->name;
+    } else if (top > 0) {
+      top--;
+      source = stack[top].source;
+      clip_index = stack[top].index;
+      clip_name = stack[top].name;
+    } else {
+      source = NULL;
+    }
+  }
+
+  return 1;
+}
+
+static int
+akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
+  AkLibrary *library;
+  AkContext context;
+
+  if (!index || !doc)
+    return 1;
+
+  memset(index, 0, sizeof(*index));
+  memset(&context, 0, sizeof(context));
+  context.doc = doc;
+
+  for (library = doc->lib.animations; library; library = library->next) {
+    if (!akb_animation_index_collect_walk(index,
+                                          (AkAnimation *)library->chld,
+                                          &context)) {
+      akb_animation_index_free(index);
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+static int
+akb_animation_collect_index(AkbAnimation *animation,
+                            const AkbAnimationIndex *index,
+                            const AkbAnimBinding *bindings,
+                            int binding_count,
+                            const AkbCoordContext *coord) {
+  size_t j;
+  int i;
+
+  if (!animation || !index || !bindings || binding_count <= 0)
+    return 1;
+
+  for (j = 0; j < index->count; j++) {
+    const AkbResolvedAnimChannel *item = &index->items[j];
+    for (i = 0; i < binding_count; i++) {
+      if (item->resolved.target == bindings[i].target) {
+        AkResolvedTarget resolved = item->resolved;
+        if (!akb_animation_add_channel(animation,
+                                       item->channel,
+                                       &resolved,
+                                       &bindings[i],
+                                       coord,
+                                       item->clip_index,
+                                       item->clip_name))
+          return 0;
+        break;
+      }
+    }
+  }
+
+  return 1;
+}
+
 static AkbAnimation *
 akb_animation_new_for_bindings(AkDoc *doc,
                                AkbSharedDoc *doc_owner,
+                               const AkbAnimationIndex *index,
                                const AkbAnimBinding *bindings,
                                int binding_count,
                                const AkbCoordContext *coord,
@@ -3440,19 +4303,31 @@ akb_animation_new_for_bindings(AkDoc *doc,
   animation->doc_owner = doc_owner;
   akb_shared_doc_retain(doc_owner);
 
-  memset(&context, 0, sizeof(context));
-  context.doc = doc;
-
-  for (library = doc->lib.animations; library; library = library->next) {
-    if (!akb_animation_collect_walk(animation,
-                                    (AkAnimation *)library->chld,
-                                    &context,
-                                    bindings,
-                                    binding_count,
-                                    coord)) {
+  if (index) {
+    if (!akb_animation_collect_index(animation,
+                                     index,
+                                     bindings,
+                                     binding_count,
+                                     coord)) {
       akb_animation_release(animation);
       *ok = 0;
       return NULL;
+    }
+  } else {
+    memset(&context, 0, sizeof(context));
+    context.doc = doc;
+
+    for (library = doc->lib.animations; library; library = library->next) {
+      if (!akb_animation_collect_walk(animation,
+                                      (AkAnimation *)library->chld,
+                                      &context,
+                                      bindings,
+                                      binding_count,
+                                      coord)) {
+        akb_animation_release(animation);
+        *ok = 0;
+        return NULL;
+      }
     }
   }
 
@@ -4018,6 +4893,7 @@ akb_material_bindings(AkTechniqueFxCommon *cmn, AkbAnimBinding *bindings, int ca
 static AkbAnimation *
 akb_material_animation_new(AkDoc *doc,
                            AkbSharedDoc *doc_owner,
+                           const AkbAnimationIndex *index,
                            AkMeshPrimitive *prim,
                            AkBindMaterial *bind_material,
                            const AkbCoordContext *coord,
@@ -4034,6 +4910,7 @@ akb_material_animation_new(AkDoc *doc,
 
   return akb_animation_new_for_bindings(doc,
                                         doc_owner,
+                                        index,
                                         bindings,
                                         binding_count,
                                         coord,
@@ -4066,38 +4943,26 @@ akb_baked_matrix_to_trs(const float m[16],
                         float *rotation,
                         float *scale,
                         const float *previous_rotation) {
-  CGLM_ALIGN_MAT mat4 matrix;
-  CGLM_ALIGN_MAT mat4 rotation_matrix;
-  CGLM_ALIGN(16) vec4 translation4;
-  CGLM_ALIGN(16) vec4 rotation_wxyz;
-  CGLM_ALIGN(16) vec4 previous_wxyz;
-  CGLM_ALIGN(8) vec3 scale3;
   versor rotation_xyzw;
 
-  memcpy(matrix, m, sizeof(matrix));
-  glm_decompose(matrix, translation4, rotation_matrix, scale3);
-  glm_mat4_quat(rotation_matrix, rotation_xyzw);
-  glm_quat_normalize(rotation_xyzw);
+  akb_mat4_to_trs(m, translation, rotation_xyzw, scale);
 
-  translation[0] = translation4[0];
-  translation[1] = translation4[1];
-  translation[2] = translation4[2];
-  scale[0] = scale3[0];
-  scale[1] = scale3[1];
-  scale[2] = scale3[2];
-
-  rotation_wxyz[0] = rotation_xyzw[3];
-  rotation_wxyz[1] = rotation_xyzw[0];
-  rotation_wxyz[2] = rotation_xyzw[1];
-  rotation_wxyz[3] = rotation_xyzw[2];
+  rotation[0] = rotation_xyzw[3];
+  rotation[1] = rotation_xyzw[0];
+  rotation[2] = rotation_xyzw[1];
+  rotation[3] = rotation_xyzw[2];
 
   if (previous_rotation) {
-    memcpy(previous_wxyz, previous_rotation, sizeof(previous_wxyz));
-    if (glm_vec4_dot(rotation_wxyz, previous_wxyz) < 0.0f)
-      glm_vec4_negate(rotation_wxyz);
+    if (rotation[0] * previous_rotation[0]
+        + rotation[1] * previous_rotation[1]
+        + rotation[2] * previous_rotation[2]
+        + rotation[3] * previous_rotation[3] < 0.0f) {
+      rotation[0] = -rotation[0];
+      rotation[1] = -rotation[1];
+      rotation[2] = -rotation[2];
+      rotation[3] = -rotation[3];
+    }
   }
-
-  memcpy(rotation, rotation_wxyz, sizeof(rotation_wxyz));
 }
 
 static AkbAnimation *
@@ -4204,6 +5069,7 @@ static AkbAnimation *
 akb_animation_new(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
                   AkNode *node,
+                  const AkbAnimationIndex *index,
                   const AkbCoordContext *coord,
                   int *ok) {
   AkbAnimation *animation;
@@ -4212,9 +5078,11 @@ akb_animation_new(AkDoc *doc,
   AkContext context;
   int binding_count;
   int needs_bake;
+  int is_gltf;
 
   *ok = 1;
-  needs_bake = ak_nodeNeedsBaking(node) || akb_node_has_rotate(node);
+  is_gltf = doc && doc->inf && doc->inf->ftype == AK_FILE_TYPE_GLTF;
+  needs_bake = ak_nodeNeedsBaking(node) || (!is_gltf && akb_node_has_rotate(node));
 
   if (needs_bake) {
     animation = akb_animation_new_baked(doc, doc_owner, node, ok);
@@ -4246,19 +5114,31 @@ akb_animation_new(AkDoc *doc,
     akb_shared_doc_retain(doc_owner);
   }
 
-  memset(&context, 0, sizeof(context));
-  context.doc = doc;
-
-  for (library = doc->lib.animations; library; library = library->next) {
-    if (!akb_animation_collect_walk(animation,
-                                    (AkAnimation *)library->chld,
-                                    &context,
-                                    bindings,
-                                    binding_count,
-                                    coord)) {
+  if (index) {
+    if (!akb_animation_collect_index(animation,
+                                     index,
+                                     bindings,
+                                     binding_count,
+                                     coord)) {
       akb_animation_release(animation);
       *ok = 0;
       return NULL;
+    }
+  } else {
+    memset(&context, 0, sizeof(context));
+    context.doc = doc;
+
+    for (library = doc->lib.animations; library; library = library->next) {
+      if (!akb_animation_collect_walk(animation,
+                                      (AkAnimation *)library->chld,
+                                      &context,
+                                      bindings,
+                                      binding_count,
+                                      coord)) {
+        akb_animation_release(animation);
+        *ok = 0;
+        return NULL;
+      }
     }
   }
 
@@ -4273,6 +5153,7 @@ akb_animation_new(AkDoc *doc,
 static AkbAnimation *
 akb_morph_animation_new(AkDoc *doc,
                         AkbSharedDoc *doc_owner,
+                        const AkbAnimationIndex *index,
                         AkInstanceMorph *morpher,
                         const AkbCoordContext *coord,
                         int *ok) {
@@ -4299,19 +5180,31 @@ akb_morph_animation_new(AkDoc *doc,
   animation->doc_owner = doc_owner;
   akb_shared_doc_retain(doc_owner);
 
-  memset(&context, 0, sizeof(context));
-  context.doc = doc;
-
-  for (library = doc->lib.animations; library; library = library->next) {
-    if (!akb_animation_collect_walk(animation,
-                                    (AkAnimation *)library->chld,
-                                    &context,
-                                    &binding,
-                                    1,
-                                    coord)) {
+  if (index) {
+    if (!akb_animation_collect_index(animation,
+                                     index,
+                                     &binding,
+                                     1,
+                                     coord)) {
       akb_animation_release(animation);
       *ok = 0;
       return NULL;
+    }
+  } else {
+    memset(&context, 0, sizeof(context));
+    context.doc = doc;
+
+    for (library = doc->lib.animations; library; library = library->next) {
+      if (!akb_animation_collect_walk(animation,
+                                      (AkAnimation *)library->chld,
+                                      &context,
+                                      &binding,
+                                      1,
+                                      coord)) {
+        akb_animation_release(animation);
+        *ok = 0;
+        return NULL;
+      }
     }
   }
 
@@ -4405,6 +5298,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
                        AkDoc *doc,
                        AkbSharedDoc *doc_owner,
                        AkNode *node,
+                       const AkbAnimationIndex *anim_index,
                        const AkbCoordContext *coord,
                        int32_t parent_index,
                        int32_t *node_index) {
@@ -4424,7 +5318,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   out.has_transform = 1;
   akb_extract_node_camera(&out, node);
   akb_extract_node_light(&out, node);
-  out.animation = akb_animation_new(doc, doc_owner, node, coord, &ok);
+  out.animation = akb_animation_new(doc, doc_owner, node, anim_index, coord, &ok);
   if (!ok) {
     akb_scene_node_free(&out);
     return 0;
@@ -4497,6 +5391,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
                       AkbSceneNodeList *nodes,
                       AkDoc *doc,
                       AkbSharedDoc *doc_owner,
+                      const AkbAnimationIndex *anim_index,
                       AkbAnimation *animation,
                       AkbAnimation *morph_animation,
                       AkNode *node,
@@ -4531,6 +5426,8 @@ akb_extract_primitive(AkbPrimitiveList *list,
     return 1;
 
   out.node_index = node_index;
+  out.mesh_key = (uintptr_t)mesh;
+  out.primitive_index = prim_index;
   out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
   out.primitive_type = (uint32_t)prim->type;
   out.primitive_mode = akb_primitive_mode(prim);
@@ -4551,6 +5448,7 @@ akb_extract_primitive(AkbPrimitiveList *list,
                        &out);
   out.material_animation = akb_material_animation_new(doc,
                                                       doc_owner,
+                                                      anim_index,
                                                       prim,
                                                       node && node->geometry
                                                       ? node->geometry->bindMaterial
@@ -4778,6 +5676,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
                  AkbSceneNodeList *nodes,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
+                 const AkbAnimationIndex *anim_index,
                  AkbAnimation *animation,
                  AkbAnimation *morph_animation,
                  AkNode *node,
@@ -4803,6 +5702,7 @@ akb_extract_mesh(AkbPrimitiveList *list,
                                nodes,
                                doc,
                                doc_owner,
+                               anim_index,
                                animation,
                                morph_animation,
                                node,
@@ -4823,6 +5723,7 @@ akb_extract_node(AkbPrimitiveList *list,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
                  AkNode *node,
+                 const AkbAnimationIndex *anim_index,
                  const AkbCoordContext *coord,
                  const AkbLoadOptions *options,
                  int32_t parent_index) {
@@ -4842,6 +5743,7 @@ akb_extract_node(AkbPrimitiveList *list,
                               doc,
                               doc_owner,
                               node,
+                              anim_index,
                               coord,
                               parent_index,
                               &node_index))
@@ -4854,6 +5756,7 @@ akb_extract_node(AkbPrimitiveList *list,
     if (node->geometry->morpher) {
       morph_animation = akb_morph_animation_new(doc,
                                                 doc_owner,
+                                                anim_index,
                                                 node->geometry->morpher,
                                                 coord,
                                                 &ok);
@@ -4869,6 +5772,7 @@ akb_extract_node(AkbPrimitiveList *list,
                           nodes,
                           doc,
                           doc_owner,
+                          anim_index,
                           animation,
                           morph_animation,
                           node,
@@ -4884,7 +5788,7 @@ akb_extract_node(AkbPrimitiveList *list,
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(list, nodes, doc, doc_owner, child, coord, options, node_index))
+    if (!akb_extract_node(list, nodes, doc, doc_owner, child, anim_index, coord, options, node_index))
       return 0;
   }
 
@@ -4892,7 +5796,7 @@ akb_extract_node(AkbPrimitiveList *list,
     inst_node = (AkNode *)ak_instanceObject(inst);
     if (!inst_node || inst_node == node)
       continue;
-    if (!akb_extract_node(list, nodes, doc, doc_owner, inst_node, coord, options, node_index))
+    if (!akb_extract_node(list, nodes, doc, doc_owner, inst_node, anim_index, coord, options, node_index))
       return 0;
   }
 
@@ -4935,6 +5839,7 @@ akb_selected_visual_scene(AkDoc *doc, const AkbLoadOptions *options) {
 static int
 akb_extract_scene(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
+                  const AkbAnimationIndex *anim_index,
                   AkbPrimitiveList *list,
                   AkbSceneNodeList *nodes,
                   const AkbCoordContext *coord,
@@ -4953,12 +5858,12 @@ akb_extract_scene(AkDoc *doc,
   if (scene->node->node) {
     for (inst = &scene->node->node->base; inst; inst = inst->next) {
       node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, options, -1))
+      if (!akb_extract_node(list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
         return 0;
     }
   } else {
     for (node = scene->node; node; node = node->next) {
-      if (!akb_extract_node(list, nodes, doc, doc_owner, node, coord, options, -1))
+      if (!akb_extract_node(list, nodes, doc, doc_owner, node, anim_index, coord, options, -1))
         return 0;
     }
   }
@@ -4972,43 +5877,126 @@ akb_extract_doc(AkDoc *doc,
                 AkbImport *import,
                 const AkbLoadOptions *options) {
   AkbCoordContext coord;
+  AkbAnimationIndex anim_index;
   AkLibrary *lib;
   AkGeometry *geom;
+  double total_started_at = 0.0;
+  double phase_started_at = 0.0;
+  double coord_ms = 0.0;
+  double anim_index_ms = 0.0;
+  double scene_ms = 0.0;
+  double resolve_skin_ms = 0.0;
+  double pose_anim_ms = 0.0;
+  double fallback_mesh_ms = 0.0;
+  double set_coord_ms = 0.0;
+  int profile;
+
+  profile = akb_profile_enabled();
+  if (profile)
+    total_started_at = phase_started_at = akb_now_ms();
 
   akb_prepare_blender_coords(doc, &coord, options);
+  if (profile) {
+    coord_ms = akb_now_ms() - phase_started_at;
+    phase_started_at = akb_now_ms();
+  }
+
+  if (!akb_animation_index_build(&anim_index, doc))
+    return 0;
+  if (profile) {
+    anim_index_ms = akb_now_ms() - phase_started_at;
+    phase_started_at = akb_now_ms();
+  }
 
   if (!akb_extract_scene(doc,
                          doc_owner,
+                         &anim_index,
                          &import->primitives,
                          &import->nodes,
                          &coord,
-                         options))
+                         options)) {
+    akb_animation_index_free(&anim_index);
     return 0;
+  }
+  if (profile) {
+    scene_ms = akb_now_ms() - phase_started_at;
+    phase_started_at = akb_now_ms();
+  }
 
   akb_resolve_skin_joint_nodes(&import->primitives, &import->nodes);
+  if (profile) {
+    resolve_skin_ms = akb_now_ms() - phase_started_at;
+    phase_started_at = akb_now_ms();
+  }
+  akb_build_skin_pose_animations(&import->primitives, &import->nodes);
+  if (profile) {
+    pose_anim_ms = akb_now_ms() - phase_started_at;
+    phase_started_at = akb_now_ms();
+  }
 
   if (import->primitives.count > 0) {
     akb_list_set_coord_matrix(&import->primitives, &coord);
+    if (profile) {
+      set_coord_ms = akb_now_ms() - phase_started_at;
+      akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
+                      import->nodes.count,
+                      import->primitives.count,
+                      anim_index.count,
+                      coord_ms,
+                      anim_index_ms,
+                      scene_ms,
+                      resolve_skin_ms,
+                      pose_anim_ms,
+                      fallback_mesh_ms,
+                      set_coord_ms,
+                      akb_now_ms() - total_started_at);
+    }
+    akb_animation_index_free(&anim_index);
     return 1;
   }
 
+  if (profile)
+    phase_started_at = akb_now_ms();
   for (lib = doc->lib.geometries; lib; lib = lib->next) {
     for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
       if (!akb_extract_mesh(&import->primitives,
                             &import->nodes,
                             doc,
                             doc_owner,
+                            &anim_index,
                             NULL,
                             NULL,
                             NULL,
                             -1,
                             geom,
-                            options))
+                            options)) {
+        akb_animation_index_free(&anim_index);
         return 0;
+      }
     }
+  }
+  if (profile) {
+    fallback_mesh_ms = akb_now_ms() - phase_started_at;
+    phase_started_at = akb_now_ms();
   }
 
   akb_list_set_coord_matrix(&import->primitives, &coord);
+  if (profile) {
+    set_coord_ms = akb_now_ms() - phase_started_at;
+    akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
+                    import->nodes.count,
+                    import->primitives.count,
+                    anim_index.count,
+                    coord_ms,
+                    anim_index_ms,
+                    scene_ms,
+                    resolve_skin_ms,
+                    pose_anim_ms,
+                    fallback_mesh_ms,
+                    set_coord_ms,
+                    akb_now_ms() - total_started_at);
+  }
+  akb_animation_index_free(&anim_index);
   return 1;
 }
 
@@ -5314,7 +6302,7 @@ akb_set_scene_info(PyObject *out, AkDoc *doc, const AkbLoadOptions *options) {
 static PyObject *
 akb_anim_channels_to_py(AkbAnimation *animation) {
   PyObject *list;
-  PyObject *dict;
+  PyObject *tuple;
   PyObject *value;
   AkbAnimChannel *channel;
   size_t i;
@@ -5326,57 +6314,79 @@ akb_anim_channels_to_py(AkbAnimation *animation) {
   if (!list)
     return NULL;
 
-#define AKB_CH_SET_OBJ(KEY, OBJ) do {              \
+#define AKB_CH_SET_OBJ(INDEX, OBJ) do {            \
     value = (OBJ);                                 \
-    if (!value) { Py_DECREF(dict); Py_DECREF(list); return NULL; } \
-    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
-      Py_DECREF(value);                            \
-      Py_DECREF(dict);                             \
-      Py_DECREF(list);                             \
-      return NULL;                                 \
-    }                                              \
-    Py_DECREF(value);                              \
+    if (!value) { Py_DECREF(tuple); Py_DECREF(list); return NULL; } \
+    PyTuple_SET_ITEM(tuple, (INDEX), value);        \
   } while (0)
 
   for (i = 0; i < animation->count; i++) {
     channel = &animation->channels[i];
-    dict = PyDict_New();
-    if (!dict) {
+    tuple = PyTuple_New(AKB_PY_ANIM_FIELD_COUNT);
+    if (!tuple) {
       Py_DECREF(list);
       return NULL;
     }
 
-    AKB_CH_SET_OBJ("target", PyLong_FromUnsignedLong(channel->target));
-    AKB_CH_SET_OBJ("target_offset", PyLong_FromUnsignedLong(channel->target_offset));
-    AKB_CH_SET_OBJ("clip_index", PyLong_FromUnsignedLong(channel->clip_index));
-    AKB_CH_SET_OBJ("clip_name", akb_unicode_from_cstr(channel->clip_name));
-    AKB_CH_SET_OBJ("value_width", PyLong_FromUnsignedLong(channel->value_width));
-    AKB_CH_SET_OBJ("count", PyLong_FromUnsignedLong(channel->count));
-    AKB_CH_SET_OBJ("interpolation", PyLong_FromUnsignedLong(channel->interpolation));
-    AKB_CH_SET_OBJ("is_partial", PyBool_FromLong(channel->is_partial));
-    AKB_CH_SET_OBJ("times_f32",
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_TARGET, PyLong_FromUnsignedLong(channel->target));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_TARGET_OFFSET, PyLong_FromUnsignedLong(channel->target_offset));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_CLIP_INDEX, PyLong_FromUnsignedLong(channel->clip_index));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_CLIP_NAME, akb_unicode_from_cstr(channel->clip_name));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_VALUE_WIDTH, PyLong_FromUnsignedLong(channel->value_width));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_COUNT, PyLong_FromUnsignedLong(channel->count));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_INTERPOLATION, PyLong_FromUnsignedLong(channel->interpolation));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_IS_PARTIAL, PyBool_FromLong(channel->is_partial));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_POSE_READY, PyBool_FromLong(channel->pose_ready));
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_TIMES_F32,
                    akb_memoryview_or_empty(channel->times,
                                            (size_t)channel->count * sizeof(float)));
-    AKB_CH_SET_OBJ("values_f32",
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_VALUES_F32,
                    akb_memoryview_or_empty(channel->values,
                                            (size_t)channel->count
                                            * channel->value_width
                                            * sizeof(float)));
-    AKB_CH_SET_OBJ("in_tangents_f32",
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_IN_TANGENTS_F32,
                    akb_memoryview_or_empty(channel->in_tangents,
                                            (size_t)channel->count
                                            * channel->value_width
                                            * sizeof(float)));
-    AKB_CH_SET_OBJ("out_tangents_f32",
+    AKB_CH_SET_OBJ(AKB_PY_ANIM_OUT_TANGENTS_F32,
                    akb_memoryview_or_empty(channel->out_tangents,
                                            (size_t)channel->count
                                            * channel->value_width
                                            * sizeof(float)));
 
-    PyList_SET_ITEM(list, (Py_ssize_t)i, dict);
+    PyList_SET_ITEM(list, (Py_ssize_t)i, tuple);
   }
 
 #undef AKB_CH_SET_OBJ
+
+  return list;
+}
+
+static PyObject *
+akb_skin_pose_anim_channels_to_py(AkbPrimitive *prim) {
+  PyObject *list;
+  PyObject *channels;
+  uint32_t i;
+
+  if (!prim || !prim->skin_pose_animation_count)
+    return PyList_New(0);
+
+  list = PyList_New((Py_ssize_t)prim->skin_pose_animation_count);
+  if (!list)
+    return NULL;
+
+  for (i = 0; i < prim->skin_pose_animation_count; i++) {
+    channels = akb_anim_channels_to_py(prim->skin_pose_animations
+                                       ? prim->skin_pose_animations[i]
+                                       : NULL);
+    if (!channels) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, (Py_ssize_t)i, channels);
+  }
 
   return list;
 }
@@ -5795,6 +6805,9 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("double_sided", PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ("material_type", PyLong_FromUnsignedLong(prim->material_type));
   AKB_SET_OBJ("file_type", PyLong_FromUnsignedLong(prim->file_type));
+  AKB_SET_OBJ("mesh_key", PyLong_FromUnsignedLongLong((unsigned long long)prim->mesh_key));
+  AKB_SET_OBJ("material_key", PyLong_FromUnsignedLongLong((unsigned long long)prim->material_key));
+  AKB_SET_OBJ("primitive_index", PyLong_FromUnsignedLong(prim->primitive_index));
   AKB_SET_OBJ("has_node", PyBool_FromLong(prim->has_node));
   AKB_SET_OBJ("node_index", PyLong_FromLong(prim->node_index));
   AKB_SET_OBJ("instance_count", PyLong_FromUnsignedLong(prim->instance_count));
@@ -5811,6 +6824,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ("skin_joint_width", PyLong_FromUnsignedLong(prim->skin_joint_width));
   AKB_SET_OBJ("skin_root_node_index", PyLong_FromLong(prim->skin_root_node_index));
   AKB_SET_OBJ("skin_mesh_in_bind_pose", PyBool_FromLong(prim->skin_mesh_in_bind_pose));
+  AKB_SET_OBJ("skin_pose_anim_channels", akb_skin_pose_anim_channels_to_py(prim));
   AKB_SET_OBJ("zero_copy_flags", PyLong_FromUnsignedLong(prim->zero_copy_flags));
   AKB_SET_OBJ("uv_set_count", PyLong_FromUnsignedLong(prim->uv_set_count));
   AKB_SET_OBJ("color_set_count", PyLong_FromUnsignedLong(prim->color_set_count));
@@ -6061,8 +7075,16 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   PyObject *node_list;
   PyObject *owner;
   PyObject *item;
+  double total_started_at;
+  double load_started_at;
+  double load_ms;
+  double extract_started_at;
+  double extract_ms;
+  double py_started_at;
+  double py_ms;
   size_t i;
   int ok;
+  int profile;
 
   (void)self;
 
@@ -6079,15 +7101,27 @@ akb_load_meshes(PyObject *self, PyObject *args) {
     return PyErr_NoMemory();
   doc_owner->refcount = 1;
 
+  profile = akb_profile_enabled();
+  total_started_at = profile ? akb_now_ms() : 0.0;
+  load_ms = 0.0;
+  extract_ms = 0.0;
+
   Py_BEGIN_ALLOW_THREADS
   PyThread_acquire_lock(akb_load_lock, WAIT_LOCK);
   akb_options_apply(&options, &saved_options);
+  load_started_at = profile ? akb_now_ms() : 0.0;
   result = ak_load(&doc, filepath, AK_FILE_TYPE_AUTO);
+  if (profile)
+    load_ms = akb_now_ms() - load_started_at;
   doc_owner->doc = doc;
-  if (result == AK_OK && doc)
+  if (result == AK_OK && doc) {
+    extract_started_at = profile ? akb_now_ms() : 0.0;
     ok = akb_extract_doc(doc, doc_owner, &import, &options);
-  else
+    if (profile)
+      extract_ms = akb_now_ms() - extract_started_at;
+  } else {
     ok = 0;
+  }
   akb_options_restore(&saved_options);
   PyThread_release_lock(akb_load_lock);
   Py_END_ALLOW_THREADS
@@ -6104,6 +7138,8 @@ akb_load_meshes(PyObject *self, PyObject *args) {
     PyErr_SetString(PyExc_MemoryError, "AssetKit bridge could not prepare mesh buffers");
     return NULL;
   }
+
+  py_started_at = profile ? akb_now_ms() : 0.0;
 
   out = PyDict_New();
   if (!out) {
@@ -6220,6 +7256,18 @@ akb_load_meshes(PyObject *self, PyObject *args) {
 
   Py_DECREF(node_list);
   Py_DECREF(mesh_list);
+  if (profile) {
+    py_ms = akb_now_ms() - py_started_at;
+    akb_profile_log("load_meshes file=\"%s\" result=%d nodes=%zu primitives=%zu ak_load=%.3fms extract=%.3fms py_pack=%.3fms total=%.3fms",
+                    filepath,
+                    result,
+                    owner_import->nodes.count,
+                    owner_import->primitives.count,
+                    load_ms,
+                    extract_ms,
+                    py_ms,
+                    akb_now_ms() - total_started_at);
+  }
   Py_DECREF(owner);
   akb_shared_doc_release(doc_owner);
   return out;
@@ -6240,8 +7288,16 @@ akb_open_scene(PyObject *self, PyObject *args) {
   PyObject *node_list;
   PyObject *owner;
   PyObject *item;
+  double total_started_at;
+  double load_started_at;
+  double load_ms;
+  double extract_started_at;
+  double extract_ms;
+  double py_started_at;
+  double py_ms;
   size_t i;
   int ok;
+  int profile;
 
   (void)self;
 
@@ -6258,15 +7314,27 @@ akb_open_scene(PyObject *self, PyObject *args) {
     return PyErr_NoMemory();
   doc_owner->refcount = 1;
 
+  profile = akb_profile_enabled();
+  total_started_at = profile ? akb_now_ms() : 0.0;
+  load_ms = 0.0;
+  extract_ms = 0.0;
+
   Py_BEGIN_ALLOW_THREADS
   PyThread_acquire_lock(akb_load_lock, WAIT_LOCK);
   akb_options_apply(&options, &saved_options);
+  load_started_at = profile ? akb_now_ms() : 0.0;
   result = ak_load(&doc, filepath, AK_FILE_TYPE_AUTO);
+  if (profile)
+    load_ms = akb_now_ms() - load_started_at;
   doc_owner->doc = doc;
-  if (result == AK_OK && doc)
+  if (result == AK_OK && doc) {
+    extract_started_at = profile ? akb_now_ms() : 0.0;
     ok = akb_extract_doc(doc, doc_owner, &import, &options);
-  else
+    if (profile)
+      extract_ms = akb_now_ms() - extract_started_at;
+  } else {
     ok = 0;
+  }
   akb_options_restore(&saved_options);
   PyThread_release_lock(akb_load_lock);
   Py_END_ALLOW_THREADS
@@ -6283,6 +7351,8 @@ akb_open_scene(PyObject *self, PyObject *args) {
     PyErr_SetString(PyExc_MemoryError, "AssetKit bridge could not prepare mesh buffers");
     return NULL;
   }
+
+  py_started_at = profile ? akb_now_ms() : 0.0;
 
   out = PyDict_New();
   if (!out) {
@@ -6387,6 +7457,18 @@ akb_open_scene(PyObject *self, PyObject *args) {
   }
 
   Py_DECREF(node_list);
+  if (profile) {
+    py_ms = akb_now_ms() - py_started_at;
+    akb_profile_log("open_scene file=\"%s\" result=%d nodes=%zu primitives=%zu ak_load=%.3fms extract=%.3fms py_pack=%.3fms total=%.3fms",
+                    filepath,
+                    result,
+                    owner_import->nodes.count,
+                    owner_import->primitives.count,
+                    load_ms,
+                    extract_ms,
+                    py_ms,
+                    akb_now_ms() - total_started_at);
+  }
   Py_DECREF(owner);
   akb_shared_doc_release(doc_owner);
   return out;
@@ -6402,6 +7484,9 @@ akb_read_mesh_batch(PyObject *self, PyObject *args) {
   Py_ssize_t count;
   Py_ssize_t available;
   Py_ssize_t i;
+  double started_at;
+  double py_ms;
+  int profile;
 
   (void)self;
 
@@ -6420,6 +7505,9 @@ akb_read_mesh_batch(PyObject *self, PyObject *args) {
   if ((size_t)start >= import->primitives.count || count == 0)
     return PyList_New(0);
 
+  profile = akb_profile_enabled();
+  started_at = profile ? akb_now_ms() : 0.0;
+
   available = (Py_ssize_t)(import->primitives.count - (size_t)start);
   if (count > available)
     count = available;
@@ -6437,6 +7525,14 @@ akb_read_mesh_batch(PyObject *self, PyObject *args) {
     PyList_SET_ITEM(list, i, item);
   }
 
+  if (profile) {
+    py_ms = akb_now_ms() - started_at;
+    akb_profile_log("read_mesh_batch start=%zd count=%zd returned=%zd py_pack=%.3fms",
+                    start,
+                    count,
+                    count,
+                    py_ms);
+  }
   return list;
 }
 
@@ -6628,11 +7724,419 @@ akb_decode_ktx2(PyObject *self, PyObject *args) {
   return out;
 }
 
+static PyObject *
+akb_anim_coords(PyObject *self, PyObject *args) {
+  PyObject *channel;
+  PyObject *times_obj;
+  PyObject *values_obj;
+  PyObject *coords;
+  Py_buffer times_view;
+  Py_buffer values_view;
+  const float *times;
+  const float *values;
+  float *out;
+  double fps;
+  unsigned long count_ul;
+  unsigned long value_width_ul;
+  uint32_t count;
+  uint32_t value_width;
+  int component;
+  uint32_t i;
+
+  (void)self;
+
+  memset(&times_view, 0, sizeof(times_view));
+  memset(&values_view, 0, sizeof(values_view));
+
+  if (!PyArg_ParseTuple(args, "Oid", &channel, &component, &fps))
+    return NULL;
+
+  if (!PyTuple_Check(channel)
+      || PyTuple_GET_SIZE(channel) < AKB_PY_ANIM_FIELD_COUNT
+      || component < 0) {
+    Py_RETURN_NONE;
+  }
+
+  count_ul = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(channel, AKB_PY_ANIM_COUNT));
+  if (PyErr_Occurred())
+    return NULL;
+  value_width_ul = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(channel, AKB_PY_ANIM_VALUE_WIDTH));
+  if (PyErr_Occurred())
+    return NULL;
+  if (count_ul == 0
+      || count_ul > UINT32_MAX
+      || value_width_ul == 0
+      || value_width_ul > UINT32_MAX
+      || (unsigned long)component >= value_width_ul) {
+    Py_RETURN_NONE;
+  }
+
+  count       = (uint32_t)count_ul;
+  value_width = (uint32_t)value_width_ul;
+  if ((size_t)count > (SIZE_MAX / (2 * sizeof(float)))) {
+    PyErr_SetString(PyExc_OverflowError, "animation coordinate buffer is too large");
+    return NULL;
+  }
+
+  times_obj  = PyTuple_GET_ITEM(channel, AKB_PY_ANIM_TIMES_F32);
+  values_obj = PyTuple_GET_ITEM(channel, AKB_PY_ANIM_VALUES_F32);
+  if (PyObject_GetBuffer(times_obj, &times_view, PyBUF_SIMPLE) < 0)
+    return NULL;
+  if (PyObject_GetBuffer(values_obj, &values_view, PyBUF_SIMPLE) < 0) {
+    PyBuffer_Release(&times_view);
+    return NULL;
+  }
+
+  if ((size_t)times_view.len < (size_t)count * sizeof(float)
+      || (size_t)values_view.len < (size_t)count * value_width * sizeof(float)) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    Py_RETURN_NONE;
+  }
+
+  coords = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)((size_t)count * 2 * sizeof(float)));
+  if (!coords) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    return NULL;
+  }
+
+  times  = (const float *)times_view.buf;
+  values = (const float *)values_view.buf;
+  out    = (float *)PyBytes_AS_STRING(coords);
+  for (i = 0; i < count; i++) {
+    out[i * 2]     = times[i] * (float)fps;
+    out[i * 2 + 1] = values[(size_t)i * value_width + (uint32_t)component];
+  }
+
+  PyBuffer_Release(&values_view);
+  PyBuffer_Release(&times_view);
+  return coords;
+}
+
+static PyObject *
+akb_anim_component_constant(PyObject *self, PyObject *args) {
+  PyObject *channel;
+  PyObject *values_obj;
+  Py_buffer values_view;
+  const float *values;
+  double expected;
+  double epsilon;
+  unsigned long count_ul;
+  unsigned long value_width_ul;
+  uint32_t count;
+  uint32_t value_width;
+  int component;
+  uint32_t i;
+
+  (void)self;
+
+  memset(&values_view, 0, sizeof(values_view));
+  if (!PyArg_ParseTuple(args, "Oidd", &channel, &component, &expected, &epsilon))
+    return NULL;
+
+  if (!PyTuple_Check(channel)
+      || PyTuple_GET_SIZE(channel) < AKB_PY_ANIM_FIELD_COUNT
+      || component < 0) {
+    Py_RETURN_FALSE;
+  }
+
+  count_ul = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(channel, AKB_PY_ANIM_COUNT));
+  if (PyErr_Occurred())
+    return NULL;
+  value_width_ul = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(channel, AKB_PY_ANIM_VALUE_WIDTH));
+  if (PyErr_Occurred())
+    return NULL;
+  if (count_ul == 0
+      || count_ul > UINT32_MAX
+      || value_width_ul == 0
+      || value_width_ul > UINT32_MAX
+      || (unsigned long)component >= value_width_ul) {
+    Py_RETURN_FALSE;
+  }
+
+  count       = (uint32_t)count_ul;
+  value_width = (uint32_t)value_width_ul;
+  values_obj = PyTuple_GET_ITEM(channel, AKB_PY_ANIM_VALUES_F32);
+  if (PyObject_GetBuffer(values_obj, &values_view, PyBUF_SIMPLE) < 0)
+    return NULL;
+  if ((size_t)values_view.len < (size_t)count * value_width * sizeof(float)) {
+    PyBuffer_Release(&values_view);
+    Py_RETURN_FALSE;
+  }
+
+  if (epsilon < 0.0)
+    epsilon = -epsilon;
+
+  values = (const float *)values_view.buf;
+  for (i = 0; i < count; i++) {
+    if (fabs((double)values[(size_t)i * value_width + (uint32_t)component] - expected) > epsilon) {
+      PyBuffer_Release(&values_view);
+      Py_RETURN_FALSE;
+    }
+  }
+
+  PyBuffer_Release(&values_view);
+  Py_RETURN_TRUE;
+}
+
+static PyObject *
+akb_offset_i32(PyObject *self, PyObject *args) {
+  PyObject *buffer_obj;
+  PyObject *out_obj;
+  Py_buffer buffer_view;
+  const int32_t *in;
+  int32_t *out;
+  long offset;
+  size_t count;
+  size_t i;
+
+  (void)self;
+
+  memset(&buffer_view, 0, sizeof(buffer_view));
+  if (!PyArg_ParseTuple(args, "Ol", &buffer_obj, &offset))
+    return NULL;
+  if (PyObject_GetBuffer(buffer_obj, &buffer_view, PyBUF_SIMPLE) < 0)
+    return NULL;
+  if ((size_t)buffer_view.len % sizeof(int32_t) != 0) {
+    PyBuffer_Release(&buffer_view);
+    PyErr_SetString(PyExc_ValueError, "buffer size is not int32-aligned");
+    return NULL;
+  }
+
+  count = (size_t)buffer_view.len / sizeof(int32_t);
+  out_obj = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)(count * sizeof(int32_t)));
+  if (!out_obj) {
+    PyBuffer_Release(&buffer_view);
+    return NULL;
+  }
+
+  in  = (const int32_t *)buffer_view.buf;
+  out = (int32_t *)PyBytes_AS_STRING(out_obj);
+  for (i = 0; i < count; i++)
+    out[i] = (int32_t)((int64_t)in[i] + (int64_t)offset);
+
+  PyBuffer_Release(&buffer_view);
+  return out_obj;
+}
+
+static PyObject *
+akb_skin_group_assignments(PyObject *self, PyObject *args) {
+  PyObject *joints_obj;
+  PyObject *weights_obj;
+  PyObject *out;
+  PyObject **buffers;
+  Py_buffer joints_view;
+  Py_buffer weights_view;
+  const uint16_t *joints;
+  const float *weights;
+  int32_t **writes;
+  uint32_t *counts;
+  uint32_t *filled;
+  Py_ssize_t vertex_count_py;
+  Py_ssize_t width_py;
+  Py_ssize_t joint_count_py;
+  size_t vertex_count;
+  size_t width;
+  size_t joint_count;
+  size_t vertex_index;
+  size_t joint_index;
+  int ok;
+
+  (void)self;
+
+  memset(&joints_view, 0, sizeof(joints_view));
+  memset(&weights_view, 0, sizeof(weights_view));
+
+  if (!PyArg_ParseTuple(args,
+                        "OOnnn",
+                        &joints_obj,
+                        &weights_obj,
+                        &vertex_count_py,
+                        &width_py,
+                        &joint_count_py))
+    return NULL;
+
+  if (vertex_count_py <= 0 || width_py <= 0 || joint_count_py <= 0)
+    Py_RETURN_NONE;
+
+  vertex_count = (size_t)vertex_count_py;
+  width        = (size_t)width_py;
+  joint_count  = (size_t)joint_count_py;
+  if (width > AKB_SKIN_MAX_JOINTS_PER_VERTEX
+      || joint_count > UINT32_MAX
+      || vertex_count > INT32_MAX)
+    Py_RETURN_NONE;
+  if (vertex_count > SIZE_MAX / width) {
+    PyErr_SetString(PyExc_OverflowError, "skin assignment dimensions are too large");
+    return NULL;
+  }
+
+  if (PyObject_GetBuffer(joints_obj, &joints_view, PyBUF_SIMPLE) < 0)
+    return NULL;
+  if (PyObject_GetBuffer(weights_obj, &weights_view, PyBUF_SIMPLE) < 0) {
+    PyBuffer_Release(&joints_view);
+    return NULL;
+  }
+
+  if ((size_t)joints_view.len < vertex_count * width * sizeof(uint16_t)
+      || (size_t)weights_view.len < vertex_count * width * sizeof(float)) {
+    PyBuffer_Release(&weights_view);
+    PyBuffer_Release(&joints_view);
+    Py_RETURN_NONE;
+  }
+
+  counts = (uint32_t *)calloc(joint_count, sizeof(*counts));
+  if (!counts) {
+    PyBuffer_Release(&weights_view);
+    PyBuffer_Release(&joints_view);
+    return PyErr_NoMemory();
+  }
+
+  joints = (const uint16_t *)joints_view.buf;
+  weights = (const float *)weights_view.buf;
+  ok = 1;
+  for (vertex_index = 0; vertex_index < vertex_count && ok; vertex_index++) {
+    size_t base;
+    int found_joint;
+    int found_count;
+    float found_weight;
+    size_t slot;
+
+    base = vertex_index * width;
+    found_joint = -1;
+    found_count = 0;
+    found_weight = 0.0f;
+    for (slot = 0; slot < width; slot++) {
+      float weight;
+
+      weight = weights[base + slot];
+      if (weight <= 0.0f)
+        continue;
+      found_joint = (int)joints[base + slot];
+      found_weight = weight;
+      found_count++;
+      if (found_count > 1)
+        break;
+    }
+
+    if (found_count != 1
+        || found_joint < 0
+        || (size_t)found_joint >= joint_count
+        || fabsf(found_weight - 1.0f) > 1.0e-6f) {
+      ok = 0;
+      break;
+    }
+    counts[found_joint]++;
+  }
+
+  if (!ok) {
+    free(counts);
+    PyBuffer_Release(&weights_view);
+    PyBuffer_Release(&joints_view);
+    Py_RETURN_NONE;
+  }
+
+  buffers = (PyObject **)calloc(joint_count, sizeof(*buffers));
+  writes = (int32_t **)calloc(joint_count, sizeof(*writes));
+  filled = (uint32_t *)calloc(joint_count, sizeof(*filled));
+  if (!buffers || !writes || !filled) {
+    free(filled);
+    free(writes);
+    free(buffers);
+    free(counts);
+    PyBuffer_Release(&weights_view);
+    PyBuffer_Release(&joints_view);
+    return PyErr_NoMemory();
+  }
+
+  for (joint_index = 0; joint_index < joint_count; joint_index++) {
+    if (!counts[joint_index])
+      continue;
+    buffers[joint_index] = PyBytes_FromStringAndSize(NULL,
+                                                     (Py_ssize_t)((size_t)counts[joint_index]
+                                                                  * sizeof(int32_t)));
+    if (!buffers[joint_index]) {
+      ok = 0;
+      break;
+    }
+    writes[joint_index] = (int32_t *)PyBytes_AS_STRING(buffers[joint_index]);
+  }
+
+  if (ok) {
+    for (vertex_index = 0; vertex_index < vertex_count; vertex_index++) {
+      size_t base;
+      size_t slot;
+
+      base = vertex_index * width;
+      for (slot = 0; slot < width; slot++) {
+        if (weights[base + slot] > 0.0f) {
+          joint_index = (size_t)joints[base + slot];
+          writes[joint_index][filled[joint_index]++] = (int32_t)vertex_index;
+          break;
+        }
+      }
+    }
+  }
+
+  out = ok ? PyList_New(0) : NULL;
+  if (out) {
+    for (joint_index = 0; joint_index < joint_count; joint_index++) {
+      PyObject *tuple;
+      PyObject *joint_obj;
+      PyObject *weight_obj;
+
+      if (!buffers[joint_index])
+        continue;
+
+      tuple = PyTuple_New(3);
+      joint_obj = PyLong_FromSize_t(joint_index);
+      weight_obj = PyFloat_FromDouble(1.0);
+      if (!tuple || !joint_obj || !weight_obj) {
+        Py_XDECREF(tuple);
+        Py_XDECREF(joint_obj);
+        Py_XDECREF(weight_obj);
+        Py_DECREF(out);
+        out = NULL;
+        break;
+      }
+
+      PyTuple_SET_ITEM(tuple, 0, joint_obj);
+      PyTuple_SET_ITEM(tuple, 1, weight_obj);
+      PyTuple_SET_ITEM(tuple, 2, buffers[joint_index]);
+      buffers[joint_index] = NULL;
+      if (PyList_Append(out, tuple) < 0) {
+        Py_DECREF(tuple);
+        Py_DECREF(out);
+        out = NULL;
+        break;
+      }
+      Py_DECREF(tuple);
+    }
+  }
+
+  for (joint_index = 0; joint_index < joint_count; joint_index++)
+    Py_XDECREF(buffers[joint_index]);
+  free(filled);
+  free(writes);
+  free(buffers);
+  free(counts);
+  PyBuffer_Release(&weights_view);
+  PyBuffer_Release(&joints_view);
+  if (!out)
+    return NULL;
+  return out;
+}
+
 static PyMethodDef akb_methods[] = {
   {"load_meshes", akb_load_meshes, METH_VARARGS, "Load mesh buffers through AssetKit."},
   {"open_scene", akb_open_scene, METH_VARARGS, "Open an AssetKit scene for batched mesh reads."},
   {"read_mesh_batch", akb_read_mesh_batch, METH_VARARGS, "Read a batch of mesh buffers from an open AssetKit scene."},
   {"decode_ktx2", akb_decode_ktx2, METH_VARARGS, "Decode a KTX2 texture to float RGBA pixels."},
+  {"anim_coords", akb_anim_coords, METH_VARARGS, "Build an interleaved FCurve coordinate buffer for an animation channel."},
+  {"anim_component_constant", akb_anim_component_constant, METH_VARARGS, "Return true when an animation channel component is constant."},
+  {"offset_i32", akb_offset_i32, METH_VARARGS, "Build an int32 buffer with a constant offset added to each element."},
+  {"skin_group_assignments", akb_skin_group_assignments, METH_VARARGS, "Build rigid skin vertex-group assignment buffers."},
   {NULL, NULL, 0, NULL}
 };
 

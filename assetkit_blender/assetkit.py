@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
@@ -28,6 +29,8 @@ AKT_SHORT = 31
 AKT_USHORT = 32
 AKT_INT64 = 34
 AKT_UINT64 = 35
+
+_PROFILE_ENABLED: bool | None = None
 
 
 class AkObject(ctypes.Structure):
@@ -281,7 +284,8 @@ class MeshPrimitiveData:
     skin_joint_nodes_i32: object = b""
     skin_inverse_bind_matrices_f32: object = b""
     skin_bind_shape_matrix_f32: object = b""
-    anim_channels: list[dict] | None = None
+    skin_pose_anim_channels: list[list[object]] | None = None
+    anim_channels: list[object] | None = None
     uv_sets: list[LoopFloatAttributeData] | None = None
     color_sets: list[LoopFloatAttributeData] | None = None
     point_attrs: list[LoopFloatAttributeData] | None = None
@@ -289,8 +293,8 @@ class MeshPrimitiveData:
     morph_targets: list[MorphTargetData] | None = None
     morph_presets: list[dict] | None = None
     material_variants: list[dict] | None = None
-    morph_anim_channels: list[dict] | None = None
-    material_anim_channels: list[dict] | None = None
+    morph_anim_channels: list[object] | None = None
+    material_anim_channels: list[object] | None = None
     object_name: str = ""
     matrix_f32: object = b""
     coord_matrix_f32: object = b""
@@ -363,6 +367,9 @@ class MeshPrimitiveData:
     skin_mesh_in_bind_pose: bool = False
     material_type: int = 0
     file_type: int = 0
+    mesh_key: int = 0
+    material_key: int = 0
+    primitive_index: int = 0
     zero_copy_flags: int = 0
     base_color_texture: str = ""
     metallic_roughness_texture: str = ""
@@ -392,7 +399,7 @@ class SceneNodeData:
     name: str
     parent_index: int = -1
     matrix_f32: object = b""
-    anim_channels: list[dict] | None = None
+    anim_channels: list[object] | None = None
     anim_count: int = 0
     visible: bool = True
     layers: list[str] | None = None
@@ -425,6 +432,25 @@ class AssetKitSceneData:
 
 class AssetKitError(RuntimeError):
     pass
+
+
+_NATIVE_MODULE = None
+_NATIVE_MODULE_FAILED = False
+
+
+def _native_module():
+    global _NATIVE_MODULE, _NATIVE_MODULE_FAILED
+    if _NATIVE_MODULE is not None:
+        return _NATIVE_MODULE
+    if _NATIVE_MODULE_FAILED:
+        return None
+    try:
+        from . import _assetkit_blender
+    except ImportError:
+        _NATIVE_MODULE_FAILED = True
+        return None
+    _NATIVE_MODULE = _assetkit_blender
+    return _NATIVE_MODULE
 
 
 class AssetKit:
@@ -658,25 +684,53 @@ def _decode(value: bytes | None) -> str:
     return value.decode("utf-8", "replace")
 
 
+def _profile_enabled() -> bool:
+    global _PROFILE_ENABLED
+
+    if _PROFILE_ENABLED is not None:
+        return _PROFILE_ENABLED
+
+    value = os.environ.get("ASSETKIT_BLENDER_PROFILE")
+    if value is None or value == "":
+        _PROFILE_ENABLED = False
+    else:
+        _PROFILE_ENABLED = value.lower() not in {"0", "false", "off", "no"}
+    return _PROFILE_ENABLED
+
+
+def _profile_log(message: str) -> None:
+    if _profile_enabled():
+        print(f"[AssetKit python] {message}", flush=True)
+
+
 def native_load_meshes(
     filepath: str | os.PathLike[str],
     options: dict | None = None,
 ) -> AssetKitSceneData | None:
-    try:
-        from . import _assetkit_blender
-    except ImportError:
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
         return None
 
+    profile = _profile_enabled()
+    total_started_at = time.perf_counter() if profile else 0.0
     try:
+        native_started_at = time.perf_counter() if profile else 0.0
         result = _assetkit_blender.load_meshes(os.fspath(filepath), options or None)
+        native_ms = (time.perf_counter() - native_started_at) * 1000.0 if profile else 0.0
     except RuntimeError as exc:
         raise AssetKitError(str(exc)) from exc
     raw_meshes = result.get("meshes", []) if isinstance(result, dict) else result
     raw_nodes = result.get("nodes", []) if isinstance(result, dict) else []
 
-    return AssetKitSceneData(
-        meshes=_native_meshes_from_raw(raw_meshes),
-        nodes=_native_nodes_from_raw(raw_nodes),
+    meshes_started_at = time.perf_counter() if profile else 0.0
+    meshes = _native_meshes_from_raw(raw_meshes)
+    meshes_ms = (time.perf_counter() - meshes_started_at) * 1000.0 if profile else 0.0
+    nodes_started_at = time.perf_counter() if profile else 0.0
+    nodes = _native_nodes_from_raw(raw_nodes)
+    nodes_ms = (time.perf_counter() - nodes_started_at) * 1000.0 if profile else 0.0
+    data = AssetKitSceneData(
+        meshes=meshes,
+        nodes=nodes,
         doc_extra=result.get("doc_extra") if isinstance(result, dict) else None,
         scene_extra=result.get("scene_extra") if isinstance(result, dict) else None,
         images=list(result.get("images") or []) if isinstance(result, dict) else None,
@@ -685,26 +739,42 @@ def native_load_meshes(
         scene_name=str(result.get("scene_name") or "") if isinstance(result, dict) else "",
         scene_names=list(result.get("scene_names") or []) if isinstance(result, dict) else None,
     )
+    if profile:
+        _profile_log(
+            "load_meshes "
+            f"native={native_ms:.3f}ms "
+            f"mesh_dataclass={meshes_ms:.3f}ms "
+            f"node_dataclass={nodes_ms:.3f}ms "
+            f"meshes={len(meshes)} nodes={len(nodes)} "
+            f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
+    return data
 
 
 def native_open_scene_stream(
     filepath: str | os.PathLike[str],
     options: dict | None = None,
 ) -> NativeSceneStream | None:
-    try:
-        from . import _assetkit_blender
-    except ImportError:
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
         return None
 
+    profile = _profile_enabled()
+    total_started_at = time.perf_counter() if profile else 0.0
     try:
+        native_started_at = time.perf_counter() if profile else 0.0
         result = _assetkit_blender.open_scene(os.fspath(filepath), options or None)
+        native_ms = (time.perf_counter() - native_started_at) * 1000.0 if profile else 0.0
     except RuntimeError as exc:
         raise AssetKitError(str(exc)) from exc
-    return NativeSceneStream(
+    nodes_started_at = time.perf_counter() if profile else 0.0
+    nodes = _native_nodes_from_raw(result.get("nodes", []))
+    nodes_ms = (time.perf_counter() - nodes_started_at) * 1000.0 if profile else 0.0
+    stream = NativeSceneStream(
         _assetkit_blender,
         result.get("_owner"),
         int(result.get("mesh_count") or 0),
-        _native_nodes_from_raw(result.get("nodes", [])),
+        nodes,
         result.get("doc_extra"),
         result.get("scene_extra"),
         list(result.get("images") or []),
@@ -713,6 +783,102 @@ def native_open_scene_stream(
         str(result.get("scene_name") or ""),
         list(result.get("scene_names") or []),
     )
+    if profile:
+        _profile_log(
+            "open_scene "
+            f"native={native_ms:.3f}ms "
+            f"node_dataclass={nodes_ms:.3f}ms "
+            f"meshes={stream.mesh_count} nodes={len(nodes)} "
+            f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
+    return stream
+
+
+def native_animation_coords(channel: object, component: int, fps: float) -> memoryview | None:
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        coords = _assetkit_blender.anim_coords(channel, int(component), float(fps))
+    except Exception:
+        return None
+    if not coords:
+        return None
+    return memoryview(coords).cast("f")
+
+
+def native_animation_component_constant(
+    channel: object,
+    component: int,
+    expected: float,
+    epsilon: float = 1.0e-6,
+) -> bool:
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return False
+
+    try:
+        return bool(
+            _assetkit_blender.anim_component_constant(
+                channel,
+                int(component),
+                float(expected),
+                float(epsilon),
+            )
+        )
+    except Exception:
+        return False
+
+
+def native_offset_i32(buffer: object, offset: int) -> memoryview | None:
+    if not buffer:
+        return None
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        shifted = _assetkit_blender.offset_i32(buffer, int(offset))
+    except Exception:
+        return None
+    if not shifted:
+        return None
+    return memoryview(shifted).cast("i")
+
+
+def native_skin_group_assignments(
+    joints: object,
+    weights: object,
+    vertex_count: int,
+    width: int,
+    joint_count: int,
+) -> list[tuple[int, float, memoryview]] | None:
+    if not joints or not weights or vertex_count <= 0 or width <= 0 or joint_count <= 0:
+        return None
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        packed = _assetkit_blender.skin_group_assignments(
+            joints,
+            weights,
+            int(vertex_count),
+            int(width),
+            int(joint_count),
+        )
+    except Exception:
+        return None
+    if not packed:
+        return None
+
+    groups: list[tuple[int, float, memoryview]] = []
+    for joint_index, weight, indices in packed:
+        if not indices:
+            continue
+        groups.append((int(joint_index), float(weight), memoryview(indices).cast("i")))
+    return groups or None
 
 
 class NativeSceneStream:
@@ -743,8 +909,21 @@ class NativeSceneStream:
         self.scene_names = scene_names or []
 
     def read_mesh_batch(self, start: int, count: int) -> list[MeshPrimitiveData]:
+        profile = _profile_enabled()
+        native_started_at = time.perf_counter() if profile else 0.0
         raw_meshes = self._module.read_mesh_batch(self._owner, start, count)
-        return _native_meshes_from_raw(raw_meshes)
+        native_ms = (time.perf_counter() - native_started_at) * 1000.0 if profile else 0.0
+        convert_started_at = time.perf_counter() if profile else 0.0
+        meshes = _native_meshes_from_raw(raw_meshes)
+        convert_ms = (time.perf_counter() - convert_started_at) * 1000.0 if profile else 0.0
+        if profile:
+            _profile_log(
+                "read_mesh_batch "
+                f"start={start} count={count} returned={len(meshes)} "
+                f"native={native_ms:.3f}ms "
+                f"mesh_dataclass={convert_ms:.3f}ms"
+            )
+        return meshes
 
 
 def _native_result_int(result: object, key: str, default: int) -> int:
@@ -922,6 +1101,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 skin_joint_nodes_i32=item.get("skin_joint_nodes_i32") or b"",
                 skin_inverse_bind_matrices_f32=item.get("skin_inverse_bind_matrices_f32") or b"",
                 skin_bind_shape_matrix_f32=item.get("skin_bind_shape_matrix_f32") or b"",
+                skin_pose_anim_channels=item.get("skin_pose_anim_channels") or [],
                 anim_channels=item.get("anim_channels") or [],
                 uv_sets=uv_sets,
                 color_sets=color_sets,
@@ -1020,6 +1200,9 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 skin_mesh_in_bind_pose=bool(item.get("skin_mesh_in_bind_pose")),
                 material_type=int(item.get("material_type") or 0),
                 file_type=int(item.get("file_type") or 0),
+                mesh_key=int(item.get("mesh_key") or 0),
+                material_key=int(item.get("material_key") or 0),
+                primitive_index=int(item.get("primitive_index") or 0),
                 zero_copy_flags=int(item.get("zero_copy_flags") or 0),
                 base_color_texture=item.get("base_color_texture") or "",
                 metallic_roughness_texture=item.get("metallic_roughness_texture") or "",

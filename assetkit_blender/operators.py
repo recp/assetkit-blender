@@ -11,8 +11,8 @@ from .assetkit import AssetKitError
 from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
 from .importer import import_assetkit_file, import_assetkit_file_auto, import_assetkit_file_progressive
 
-_DEFERRED_BLOCKING_DELAY = 0.05
-_DEFERRED_ASYNC_DELAY = 0.05
+_DEFERRED_BLOCKING_DELAY = 0.016
+_DEFERRED_ASYNC_DELAY = 0.016
 
 
 class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
@@ -503,10 +503,6 @@ def _schedule_blocking_import(
                 set_viewport_shading=set_viewport_shading,
                 fit_timeline=fit_timeline,
             )
-            if objects:
-                print(f"AssetKit imported {len(objects)} object(s)")
-            else:
-                print("AssetKit loaded the file but no importable objects were found")
         except (AssetKitError, OSError) as exc:
             print(f"AssetKit import failed: {exc}")
             _show_import_error(str(exc))
@@ -516,6 +512,7 @@ def _schedule_blocking_import(
         return None
 
     start_loading_hud("AssetKit is importing", delay=0.0)
+    _set_status("AssetKit is importing...")
     bpy.app.timers.register(run_import, first_interval=_DEFERRED_BLOCKING_DELAY)
 
 

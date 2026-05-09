@@ -18,13 +18,21 @@ from mathutils import Matrix, Quaternion, Vector
 from .assetkit import (
     AK_PRIMITIVE_LINES,
     AK_PRIMITIVE_POINTS,
+    AK_PRIMITIVE_TRIANGLES,
     AssetKit,
     AssetKitSceneData,
+    LoopFloatAttributeData,
     MeshPrimitiveData,
     SceneNodeData,
     TextureRefData,
+    _profile_enabled,
+    _profile_log,
+    native_animation_component_constant,
+    native_animation_coords,
     native_load_meshes,
+    native_offset_i32,
     native_open_scene_stream,
+    native_skin_group_assignments,
 )
 from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
 
@@ -125,6 +133,43 @@ _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_FIRST_BATCH_SIZE = 8
 _PROGRESSIVE_TIME_BUDGET = 0.025
 _ACTIVE_IMPORT_JOBS: list["_ProgressiveImportJob"] = []
+_ACTION_CHANNELBAGS: dict[tuple[int, int], tuple[object, object]] = {}
+_ACTION_CHANNEL_GROUPS: dict[tuple[int, str], object] = {}
+_IMPORT_SHARED_ACTIONS: dict[tuple[int, str, str], bpy.types.Action] = {}
+_KEYFRAME_ENUM_VALUES: dict[tuple[str, str], int] = {}
+_KEYFRAME_ENUM_ARRAYS: dict[tuple[int, int], array] = {}
+_BOOL_ARRAYS: dict[tuple[int, int], array] = {}
+_ACTION_SLOTS_SUPPORTED: bool | None = None
+_CH_KEYS = (
+    "target",
+    "target_offset",
+    "clip_index",
+    "clip_name",
+    "value_width",
+    "count",
+    "interpolation",
+    "is_partial",
+    "pose_ready",
+    "times_f32",
+    "values_f32",
+    "in_tangents_f32",
+    "out_tangents_f32",
+)
+(
+    _CH_TARGET,
+    _CH_TARGET_OFFSET,
+    _CH_CLIP_INDEX,
+    _CH_CLIP_NAME,
+    _CH_VALUE_WIDTH,
+    _CH_COUNT,
+    _CH_INTERPOLATION,
+    _CH_IS_PARTIAL,
+    _CH_POSE_READY,
+    _CH_TIMES_F32,
+    _CH_VALUES_F32,
+    _CH_IN_TANGENTS_F32,
+    _CH_OUT_TANGENTS_F32,
+) = range(len(_CH_KEYS))
 
 
 def import_assetkit_file(
@@ -141,12 +186,23 @@ def import_assetkit_file(
     set_viewport_shading: bool = True,
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
+    _reset_action_cache()
     existing_actions = _snapshot_actions(fit_timeline)
+    profile_detail = _profile_enabled()
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    load_started_at = total_started_at
     primitives, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
         filepath,
         library_path,
         load_options,
     )
+    if profile_detail:
+        _profile_log(
+            "blocking load "
+            f"meshes={len(primitives)} nodes={len(scene_nodes)} "
+            f"elapsed={(time.perf_counter() - load_started_at) * 1000.0:.3f}ms"
+        )
+    scene_started_at = time.perf_counter() if profile_detail else 0.0
     state = _begin_scene_build(
         primitives,
         scene_nodes,
@@ -156,10 +212,25 @@ def import_assetkit_file(
         scene_info,
         doc_images,
     )
+    if profile_detail:
+        _profile_log(
+            "blocking begin_scene_build "
+            f"nodes={len(scene_nodes)} "
+            f"elapsed={(time.perf_counter() - scene_started_at) * 1000.0:.3f}ms"
+        )
     objects: list[bpy.types.Object] = []
-    for primitive in primitives:
-        objects.extend(_create_import_object(primitive, state, collection or bpy.context.collection, shading_mode))
+    build_started_at = time.perf_counter() if profile_detail else 0.0
+    import_units = _mesh_import_units(primitives)
+    for unit in import_units:
+        objects.extend(_create_import_unit(unit, state, collection or bpy.context.collection, shading_mode))
+    if profile_detail:
+        _profile_log(
+            "blocking build_objects "
+            f"objects={len(objects)} primitives={len(primitives)} units={len(import_units)} "
+            f"elapsed={(time.perf_counter() - build_started_at) * 1000.0:.3f}ms"
+        )
 
+    finish_started_at = time.perf_counter() if profile_detail else 0.0
     _finish_import(
         objects,
         focus_mode,
@@ -172,6 +243,12 @@ def import_assetkit_file(
         set_viewport_shading,
         existing_actions,
     )
+    if profile_detail:
+        _profile_log(
+            "blocking finish "
+            f"elapsed={(time.perf_counter() - finish_started_at) * 1000.0:.3f}ms "
+            f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
     return _import_result_objects(objects, state)
 
 
@@ -190,6 +267,7 @@ def import_assetkit_file_progressive(
     set_viewport_shading: bool = True,
     fit_timeline: bool = False,
 ) -> "_ProgressiveImportJob":
+    _reset_action_cache()
     job = _ProgressiveImportJob(
         filepath,
         library_path,
@@ -204,6 +282,7 @@ def import_assetkit_file_progressive(
         shading_mode,
         set_viewport_shading,
         _snapshot_actions(fit_timeline),
+        prefer_grouped=True,
     )
     job.start()
     return job
@@ -224,6 +303,7 @@ def import_assetkit_file_auto(
     set_viewport_shading: bool = True,
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object] | "_ProgressiveImportJob":
+    _reset_action_cache()
     active_collection = collection or bpy.context.collection
     job = _ProgressiveImportJob(
         filepath,
@@ -239,6 +319,7 @@ def import_assetkit_file_auto(
         shading_mode,
         set_viewport_shading,
         _snapshot_actions(fit_timeline),
+        prefer_grouped=True,
     )
     job.start()
     return job
@@ -285,20 +366,51 @@ def _begin_scene_build(
     scene_extra: object | None = None,
     scene_info: dict | None = None,
     doc_images: list[dict] | None = None,
+    apply_node_animation: bool = True,
 ) -> dict:
+    profile_detail = _profile_enabled()
+    started_at = time.perf_counter() if profile_detail else 0.0
     _set_document_extra_props(collection, doc_extra, scene_extra, scene_info, doc_images)
+    doc_ms = (time.perf_counter() - started_at) * 1000.0 if profile_detail else 0.0
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
     coord_root = _create_coord_root(primitives, collection)
+    coord_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
     node_visibility = _effective_static_node_visibility_map(scene_nodes)
     node_object_visibility = _node_object_visibility_map(scene_nodes, node_visibility)
-    node_objects = _create_scene_nodes(scene_nodes, coord_root, collection, node_object_visibility)
+    visibility_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
+    node_animation_skip_indices = _skinned_node_animation_skip_indices(primitives)
+    node_objects = _create_scene_nodes(
+        scene_nodes,
+        coord_root,
+        collection,
+        node_object_visibility,
+        apply_animation=apply_node_animation,
+        skip_animation_nodes=node_animation_skip_indices,
+    )
+    nodes_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
+    if profile_detail:
+        _profile_log(
+            "begin_scene_build_detail "
+            f"doc_props={doc_ms:.3f}ms "
+            f"coord_root={coord_ms:.3f}ms "
+            f"visibility={visibility_ms:.3f}ms "
+            f"create_nodes={nodes_ms:.3f}ms "
+            f"nodes={len(scene_nodes)}"
+        )
     return {
         "coord_root": coord_root,
         "root_objects": _scene_root_objects(scene_nodes, coord_root, node_objects),
         "node_objects": node_objects,
         "node_data": {index: node for index, node in enumerate(scene_nodes)},
         "node_visibility": node_visibility,
+        "node_animation_skip_indices": node_animation_skip_indices,
         "material_cache": {},
         "skin_cache": {},
+        "node_animation_deferred": not apply_node_animation,
+        "skin_animation_deferred": not apply_node_animation,
+        "deferred_skin_animations": [],
     }
 
 
@@ -511,6 +623,7 @@ def _create_import_object(
     node_parent = node_objects.get(primitive.node_index)
     parent = node_parent or state["coord_root"]
     use_node_parent = node_parent is not None
+    defer_animation = bool(state.get("node_animation_deferred"))
     return _create_mesh_object(
         primitive,
         parent,
@@ -520,10 +633,450 @@ def _create_import_object(
         material_cache=state["material_cache"],
         skin_cache=state["skin_cache"],
         apply_transform=not use_node_parent,
-        apply_animation=not use_node_parent,
+        apply_animation=(not use_node_parent and not defer_animation),
+        apply_skin_animation=not bool(state.get("skin_animation_deferred")),
+        deferred_skin_animations=state.get("deferred_skin_animations"),
         shading_mode=shading_mode,
         collection=collection,
     )
+
+
+def _create_import_unit(
+    unit: MeshPrimitiveData | list[MeshPrimitiveData],
+    state: dict,
+    collection: bpy.types.Collection,
+    shading_mode: str = "AUTO",
+) -> list[bpy.types.Object]:
+    _mark_skinned_node_animation_skip(state, unit if isinstance(unit, list) else [unit])
+    if isinstance(unit, list):
+        return _create_grouped_mesh_object(unit, state, collection, shading_mode)
+    return _create_import_object(unit, state, collection, shading_mode)
+
+
+def _create_grouped_mesh_object(
+    primitives: list[MeshPrimitiveData],
+    state: dict,
+    collection: bpy.types.Collection,
+    shading_mode: str = "AUTO",
+) -> list[bpy.types.Object]:
+    profile_detail = _profile_enabled()
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    first = primitives[0]
+    node_objects = state["node_objects"]
+    node_parent = node_objects.get(first.node_index)
+    parent = node_parent or state["coord_root"]
+    use_node_parent = node_parent is not None
+    defer_animation = bool(state.get("node_animation_deferred"))
+
+    count_started_at = time.perf_counter() if profile_detail else 0.0
+    total_vertex_count = sum(int(primitive.vertex_count) for primitive in primitives)
+    total_loop_count = sum(int(primitive.loop_count) for primitive in primitives)
+    total_face_count = sum(int(primitive.face_count) for primitive in primitives)
+    count_ms = (time.perf_counter() - count_started_at) * 1000.0 if profile_detail else 0.0
+
+    skin_joint_width = max(1, int(first.skin_joint_width or 4))
+    vertices = bytearray(total_vertex_count * 3 * 4)
+    indices = bytearray(total_loop_count * 4)
+    loop_starts = bytearray(total_face_count * 4)
+    loop_totals = bytearray(total_face_count * 4)
+    material_indices = bytearray(total_face_count * 4)
+    normals = bytearray(total_loop_count * 3 * 4) if first.normals_f32 else None
+    tangents = bytearray(total_loop_count * 4 * 4) if first.tangents_f32 else None
+    skin_joints = bytearray(total_vertex_count * skin_joint_width * 2) if first.has_skin else None
+    skin_weights = bytearray(total_vertex_count * skin_joint_width * 4) if first.has_skin else None
+    attr_started_at = time.perf_counter() if profile_detail else 0.0
+    uv_sets = _group_loop_float_attrs(primitives, "uv_sets")
+    color_sets = _group_loop_float_attrs(primitives, "color_sets")
+    attr_ms = (time.perf_counter() - attr_started_at) * 1000.0 if profile_detail else 0.0
+
+    assemble_started_at = time.perf_counter() if profile_detail else 0.0
+    vertex_offset = 0
+    loop_offset = 0
+    face_offset = 0
+    for slot_index, primitive in enumerate(primitives):
+        primitive_vertices = _buffer_view(primitive.vertices_f32, "f")
+        primitive_indices = _buffer_view(primitive.indices_u32, "i")
+        if primitive_vertices is None or primitive_indices is None:
+            return [_create_import_object(primitive, state, collection, shading_mode)[0]]
+
+        _copy_buffer_bytes(vertices, vertex_offset * 3 * 4, primitive_vertices, "f")
+        shifted_indices = native_offset_i32(primitive_indices, vertex_offset)
+        if shifted_indices is not None:
+            _copy_buffer_bytes(indices, loop_offset * 4, shifted_indices, "i")
+        else:
+            tmp_indices = array("i")
+            for index in primitive_indices:
+                tmp_indices.append(int(index) + vertex_offset)
+            _copy_buffer_bytes(indices, loop_offset * 4, tmp_indices, "i")
+
+        primitive_loop_starts = _buffer_view(primitive.loop_starts_i32, "i")
+        primitive_loop_totals = _buffer_view(primitive.loop_totals_i32, "i")
+        if primitive_loop_starts is not None:
+            shifted_starts = native_offset_i32(primitive_loop_starts, loop_offset)
+            if shifted_starts is not None:
+                _copy_buffer_bytes(loop_starts, face_offset * 4, shifted_starts, "i")
+            else:
+                tmp_starts = array("i")
+                for start in primitive_loop_starts:
+                    tmp_starts.append(int(start) + loop_offset)
+                _copy_buffer_bytes(loop_starts, face_offset * 4, tmp_starts, "i")
+        else:
+            _copy_buffer_bytes(
+                loop_starts,
+                face_offset * 4,
+                array("i", range(loop_offset, loop_offset + int(primitive.loop_count), 3)),
+                "i",
+            )
+        if primitive_loop_totals is not None:
+            _copy_buffer_bytes(loop_totals, face_offset * 4, primitive_loop_totals, "i")
+        else:
+            _copy_buffer_bytes(loop_totals, face_offset * 4, array("i", [3]) * int(primitive.face_count), "i")
+
+        _copy_buffer_bytes(material_indices, face_offset * 4, array("i", [slot_index]) * int(primitive.face_count), "i")
+        if normals is not None:
+            view = _buffer_view(primitive.normals_f32, "f")
+            if view is not None:
+                _copy_buffer_bytes(normals, loop_offset * 3 * 4, view, "f")
+        if tangents is not None:
+            view = _buffer_view(primitive.tangents_f32, "f")
+            if view is not None:
+                _copy_buffer_bytes(tangents, loop_offset * 4 * 4, view, "f")
+        if skin_joints is not None and skin_weights is not None:
+            joint_view = _buffer_view(primitive.skin_joints_u16, "H")
+            weight_view = _buffer_view(primitive.skin_weights_f32, "f")
+            if joint_view is not None:
+                _copy_buffer_bytes(skin_joints, vertex_offset * skin_joint_width * 2, joint_view, "H")
+            if weight_view is not None:
+                _copy_buffer_bytes(skin_weights, vertex_offset * skin_joint_width * 4, weight_view, "f")
+
+        vertex_offset += int(primitive.vertex_count)
+        loop_offset += int(primitive.loop_count)
+        face_offset += int(primitive.face_count)
+    assemble_ms = (time.perf_counter() - assemble_started_at) * 1000.0 if profile_detail else 0.0
+
+    replace_started_at = time.perf_counter() if profile_detail else 0.0
+    data = replace(
+        first,
+        name=_group_mesh_name(first),
+        vertex_count=total_vertex_count,
+        loop_count=total_loop_count,
+        face_count=total_face_count,
+        vertices_f32=vertices,
+        indices_u32=indices,
+        loop_starts_i32=loop_starts,
+        loop_totals_i32=loop_totals,
+        normals_f32=normals or b"",
+        tangents_f32=tangents or b"",
+        uv_sets=uv_sets,
+        color_sets=color_sets,
+        skin_joints_u16=skin_joints or b"",
+        skin_weights_f32=skin_weights or b"",
+        skin_vertex_count=total_vertex_count if first.has_skin else 0,
+    )
+    replace_ms = (time.perf_counter() - replace_started_at) * 1000.0 if profile_detail else 0.0
+
+    bulk_started_at = time.perf_counter() if profile_detail else 0.0
+    objects = _create_grouped_mesh_object_bulk(
+        data,
+        primitives,
+        material_indices,
+        parent,
+        node_objects=node_objects,
+        node_data=state["node_data"],
+        node_visibility=state["node_visibility"],
+        material_cache=state["material_cache"],
+        skin_cache=state["skin_cache"],
+        apply_transform=not use_node_parent,
+        apply_animation=(not use_node_parent and not defer_animation),
+        apply_skin_animation=not bool(state.get("skin_animation_deferred")),
+        deferred_skin_animations=state.get("deferred_skin_animations"),
+        shading_mode=shading_mode,
+        collection=collection,
+    )
+    if profile_detail:
+        _profile_log(
+            "create_grouped_mesh_object "
+            f"primitives={len(primitives)} count={count_ms:.3f}ms "
+            f"attrs={attr_ms:.3f}ms assemble={assemble_ms:.3f}ms "
+            f"replace={replace_ms:.3f}ms bulk={(time.perf_counter() - bulk_started_at) * 1000.0:.3f}ms "
+            f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
+    return objects
+
+
+def _group_mesh_name(data: MeshPrimitiveData) -> str:
+    name = data.name
+    suffix = f"_{int(data.primitive_index)}"
+    if suffix != "_0" and name.endswith(suffix):
+        return name[: -len(suffix)]
+    if name.endswith("_0"):
+        return name[:-2]
+    return name
+
+
+def _group_loop_float_attrs(
+    primitives: list[MeshPrimitiveData],
+    attr_name: str,
+) -> list[LoopFloatAttributeData]:
+    first_attrs = getattr(primitives[0], attr_name) or []
+    grouped: list[LoopFloatAttributeData] = []
+    for attr_index, first_attr in enumerate(first_attrs):
+        width = int(first_attr.width or 0)
+        if width <= 0:
+            return []
+        values = bytearray(sum(int(primitive.loop_count) for primitive in primitives) * width * 4)
+        byte_offset = 0
+        for primitive in primitives:
+            attrs = getattr(primitive, attr_name) or []
+            if attr_index >= len(attrs):
+                return []
+            attr = attrs[attr_index]
+            if int(attr.width or 0) != width:
+                return []
+            view = _buffer_view(attrs[attr_index].values_f32, "f")
+            if view is None:
+                return []
+            copied = _copy_buffer_bytes(values, byte_offset, view, "f")
+            if copied == 0:
+                return []
+            byte_offset += copied
+        if byte_offset != len(values):
+            return []
+        grouped.append(replace(first_attr, values_f32=values))
+    return grouped
+
+
+def _create_grouped_mesh_object_bulk(
+    data: MeshPrimitiveData,
+    primitives: list[MeshPrimitiveData],
+    material_indices: array,
+    parent: bpy.types.Object | None = None,
+    *,
+    node_objects: dict[int, bpy.types.Object] | None = None,
+    node_data: dict[int, SceneNodeData] | None = None,
+    node_visibility: dict[int, bool] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+    skin_cache: dict[object, bpy.types.Object] | None = None,
+    apply_transform: bool = True,
+    apply_animation: bool = True,
+    apply_skin_animation: bool = True,
+    deferred_skin_animations: list | None = None,
+    shading_mode: str = "AUTO",
+    collection: bpy.types.Collection | None = None,
+) -> list[bpy.types.Object]:
+    total_started_at = time.perf_counter()
+    profile_detail = _profile_enabled()
+    phase_started_at = total_started_at
+    detail_parts: list[str] = []
+    mesh = bpy.data.meshes.new(data.name)
+    mesh.vertices.add(data.vertex_count)
+    mesh.loops.add(data.loop_count)
+    mesh.polygons.add(data.face_count)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"alloc={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    vertices = _buffer_view(data.vertices_f32, "f")
+    indices = _buffer_view(data.indices_u32, "i")
+    loop_starts = _buffer_view(data.loop_starts_i32, "i")
+    loop_totals = _buffer_view(data.loop_totals_i32, "i")
+    if vertices is None or indices is None or loop_starts is None or loop_totals is None:
+        raise RuntimeError("AssetKit native bridge returned incomplete grouped mesh buffers")
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"views={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    _set_mesh_positions(mesh, vertices)
+    _set_mesh_loop_vertex_indices(mesh, indices)
+    mesh.polygons.foreach_set("loop_start", loop_starts)
+    mesh.polygons.foreach_set("loop_total", loop_totals)
+    _set_mesh_material_indices(mesh, material_indices)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"topology={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    for index, attr in enumerate(data.uv_sets or ()):
+        uvs = _buffer_view(attr.values_f32, "f")
+        uv_layer = mesh.uv_layers.new(name=attr.name or ("UVMap" if index == 0 else f"UVMap.{index:03d}"))
+        if uvs is not None:
+            uv_layer.data.foreach_set("uv", uvs)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"uv={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    for index, attr in enumerate(data.color_sets or ()):
+        colors = _buffer_view(attr.values_f32, "f")
+        if colors is None:
+            continue
+        color_attr = mesh.color_attributes.new(
+            name=attr.name or ("Color" if index == 0 else f"Color.{index:03d}"),
+            type="FLOAT_COLOR",
+            domain="CORNER",
+        )
+        color_attr.data.foreach_set("color", colors)
+    if data.color_sets:
+        _set_render_color_index(mesh)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"color={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    if data.tangents_f32:
+        tangents = _buffer_view(data.tangents_f32, "f")
+        if tangents is not None:
+            if not _apply_vector_attribute(mesh, "assetkit_tangent", tangents, "FLOAT4", "CORNER"):
+                _apply_split_attribute(mesh, "assetkit_tangent", tangents, ("x", "y", "z", "w"), "CORNER")
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"tangent={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    mesh.update(calc_edges=True)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"update={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+    _apply_shading(mesh, shading_mode, _buffer_view(data.normals_f32, "f") if data.normals_f32 else None)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"shading={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    active_collection = collection or bpy.context.collection
+    _apply_skin_bind_shape(mesh, data)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"bind_shape={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+    obj = bpy.data.objects.new(data.object_name or data.name, mesh)
+    _set_parent(obj, parent)
+    if node_visibility is not None and data.node_index >= 0:
+        _set_node_visibility(obj, node_visibility.get(data.node_index, True))
+    if apply_transform:
+        _apply_matrix(obj, data)
+    active_collection.objects.link(obj)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"object={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    for primitive in primitives:
+        material = _create_material(primitive, material_cache)
+        if material:
+            mesh.materials.append(material)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"materials={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+
+    _apply_assetkit_extra_props(obj, data)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"extras={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+    node_lookup = node_data or {}
+    _apply_skin(
+        obj,
+        data,
+        node_objects or {},
+        node_lookup,
+        active_collection,
+        skin_cache,
+        apply_animation=apply_skin_animation,
+        deferred_skin_animations=deferred_skin_animations,
+    )
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"skin={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+    has_node_visibility_animation = _node_has_effective_visibility_animation(data.node_index, node_lookup)
+    if apply_animation:
+        _apply_animation(obj, data, skip_visibility=has_node_visibility_animation)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"animation={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
+    if has_node_visibility_animation:
+        _apply_effective_node_visibility_animation(obj, data.node_index, node_lookup)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"visibility={(now - phase_started_at) * 1000.0:.3f}ms")
+
+    if profile_detail:
+        _profile_log(
+            "finish_grouped_mesh_object "
+            f"name={obj.name!r} primitives={len(primitives)} "
+            f"verts={data.vertex_count} faces={data.face_count} "
+            f"elapsed={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
+        _profile_log(
+            "finish_grouped_mesh_object_detail "
+            f"name={obj.name!r} primitives={len(primitives)} "
+            + " ".join(detail_parts)
+        )
+    return [obj]
+
+
+def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiveData | list[MeshPrimitiveData]]:
+    units: list[MeshPrimitiveData | list[MeshPrimitiveData]] = []
+    index = 0
+    count = len(primitives)
+    while index < count:
+        primitive = primitives[index]
+        key = _mesh_group_key(primitive)
+        if key is None:
+            units.append(primitive)
+            index += 1
+            continue
+
+        group = [primitive]
+        index += 1
+        while index < count and _mesh_group_key(primitives[index]) == key:
+            group.append(primitives[index])
+            index += 1
+        units.append(group if len(group) > 1 else primitive)
+
+    return units
+
+
+def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
+    if int(primitive.primitive_type) != AK_PRIMITIVE_TRIANGLES:
+        return None
+    if not primitive.mesh_key or not primitive.vertices_f32 or not primitive.indices_u32:
+        return None
+    if primitive.instance_count or primitive.has_gsplat:
+        return None
+    if primitive.morph_targets or primitive.morph_anim_channels or primitive.material_anim_channels:
+        return None
+    if primitive.material_variants:
+        return None
+    if primitive.point_attr_count:
+        return None
+
+    uv_sig = _loop_attr_signature(primitive.uv_sets)
+    color_sig = _loop_attr_signature(primitive.color_sets)
+    return (
+        int(primitive.node_index),
+        int(primitive.mesh_key),
+        int(primitive.primitive_mode),
+        bool(primitive.has_skin),
+        int(primitive.skin_root_node_index),
+        int(primitive.skin_joint_count),
+        int(primitive.skin_joint_width),
+        bool(primitive.skin_mesh_in_bind_pose),
+        bool(primitive.normals_f32),
+        bool(primitive.tangents_f32),
+        uv_sig,
+        color_sig,
+    )
+
+
+def _loop_attr_signature(attrs: list[LoopFloatAttributeData] | None) -> tuple:
+    return tuple((attr.name, int(attr.set), int(attr.width)) for attr in (attrs or ()))
 
 
 def _import_result_objects(mesh_objects: list[bpy.types.Object], state: dict) -> list[bpy.types.Object]:
@@ -646,17 +1199,6 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
 
 
 def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
-    min_frame: float | None = None
-    max_frame: float | None = None
-    for fcurve in _iter_action_fcurves(action):
-        for key in fcurve.keyframe_points:
-            frame = float(key.co.x)
-            min_frame = frame if min_frame is None else min(min_frame, frame)
-            max_frame = frame if max_frame is None else max(max_frame, frame)
-
-    if min_frame is not None and max_frame is not None:
-        return min_frame, max_frame
-
     for attr in ("curve_frame_range", "frame_range"):
         value = getattr(action, attr, None)
         if value is None:
@@ -668,6 +1210,17 @@ def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
             continue
         if end > start:
             return start, end
+
+    min_frame: float | None = None
+    max_frame: float | None = None
+    for fcurve in _iter_action_fcurves(action):
+        for key in fcurve.keyframe_points:
+            frame = float(key.co.x)
+            min_frame = frame if min_frame is None else min(min_frame, frame)
+            max_frame = frame if max_frame is None else max(max_frame, frame)
+
+    if min_frame is not None and max_frame is not None:
+        return min_frame, max_frame
 
     return None
 
@@ -706,11 +1259,22 @@ def _set_fcurve_group(fcurve: bpy.types.FCurve, channelbag, group_name: str) -> 
     if not group_name or not channelbag:
         return
     try:
-        if group_name not in channelbag.groups:
-            channelbag.groups.new(group_name)
-        fcurve.group = channelbag.groups[group_name]
+        fcurve.group = _channelbag_group(channelbag, group_name)
     except Exception:
         pass
+
+
+def _channelbag_group(channelbag, group_name: str):
+    key = (id(channelbag), group_name)
+    group = _ACTION_CHANNEL_GROUPS.get(key)
+    if group is not None:
+        return group
+    if group_name not in channelbag.groups:
+        group = channelbag.groups.new(group_name)
+    else:
+        group = channelbag.groups[group_name]
+    _ACTION_CHANNEL_GROUPS[key] = group
+    return group
 
 
 def _focus_imported_objects(
@@ -1086,6 +1650,7 @@ class _ProgressiveImportJob:
         set_viewport_shading: bool,
         existing_actions: set[bpy.types.Action] | None,
         stream: object | None = None,
+        prefer_grouped: bool = False,
     ) -> None:
         self.filepath = filepath
         self.library_path = library_path
@@ -1101,6 +1666,7 @@ class _ProgressiveImportJob:
         self.set_viewport_shading = set_viewport_shading
         self.existing_actions = existing_actions
         self.stream = stream
+        self.prefer_grouped = prefer_grouped
         self.scene_nodes: list[SceneNodeData] = []
         self.doc_extra: object | None = getattr(stream, "doc_extra", None)
         self.scene_extra: object | None = getattr(stream, "scene_extra", None)
@@ -1119,6 +1685,7 @@ class _ProgressiveImportJob:
         self.first_object_at = 0.0
         self.created_count = 0
         self.progress_active = False
+        self.profile_detail = _profile_enabled()
         self._queue: queue.SimpleQueue[list[MeshPrimitiveData]] = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._produce, name="AssetKit progressive import", daemon=True)
 
@@ -1134,8 +1701,15 @@ class _ProgressiveImportJob:
     def _produce(self) -> None:
         try:
             if not self.library_path:
+                open_started_at = time.perf_counter() if self.profile_detail else 0.0
                 stream = self.stream or native_open_scene_stream(self.filepath, self.load_options)
                 if stream is not None:
+                    if self.profile_detail:
+                        _profile_log(
+                            "producer open_scene "
+                            f"elapsed={(time.perf_counter() - open_started_at) * 1000.0:.3f}ms "
+                            f"meshes={stream.mesh_count} nodes={len(stream.nodes)}"
+                        )
                     self.scene_nodes = stream.nodes
                     self.doc_extra = stream.doc_extra
                     self.scene_extra = stream.scene_extra
@@ -1145,18 +1719,37 @@ class _ProgressiveImportJob:
                     start = 0
                     producer_batch_size = max(self.batch_size * 4, 256)
                     while start < stream.mesh_count:
-                        count = min(_PROGRESSIVE_FIRST_BATCH_SIZE, self.batch_size) if start == 0 else producer_batch_size
+                        if self.prefer_grouped and stream.mesh_count <= self.batch_size:
+                            count = stream.mesh_count
+                        elif start == 0:
+                            count = min(_PROGRESSIVE_FIRST_BATCH_SIZE, self.batch_size)
+                        else:
+                            count = producer_batch_size
+                        batch_started_at = time.perf_counter() if self.profile_detail else 0.0
                         batch = stream.read_mesh_batch(start, count)
                         if batch:
                             self._queue.put(batch)
+                        if self.profile_detail:
+                            _profile_log(
+                                "producer batch "
+                                f"start={start} requested={count} got={len(batch)} "
+                                f"elapsed={(time.perf_counter() - batch_started_at) * 1000.0:.3f}ms"
+                            )
                         start += count
                     return
 
+            fallback_started_at = time.perf_counter() if self.profile_detail else 0.0
             primitives, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
                 self.filepath,
                 self.library_path,
                 self.load_options,
             )
+            if self.profile_detail:
+                _profile_log(
+                    "producer fallback_load "
+                    f"elapsed={(time.perf_counter() - fallback_started_at) * 1000.0:.3f}ms "
+                    f"meshes={len(primitives)} nodes={len(scene_nodes)}"
+                )
             self.scene_nodes = scene_nodes
             self.doc_extra = doc_extra
             self.scene_extra = scene_extra
@@ -1187,13 +1780,19 @@ class _ProgressiveImportJob:
             self._finish()
             return None
 
+        if self._waiting_for_grouped_auto_load():
+            self._status_set("AssetKit is importing...")
+            update_loading_hud("AssetKit is importing")
+            return 0.001
+
         if self.state is None:
             if not self.pending_primitives and not self.deferred_primitives and not self.producer_done:
-                self._status_set("AssetKit is reading the scene...")
-                update_loading_hud("AssetKit is reading the scene")
+                self._status_set("AssetKit is importing...")
+                update_loading_hud("AssetKit is importing")
                 return 0.01
             self.build_started_at = time.perf_counter()
             coord_probe = [self.pending_primitives[0]] if self.pending_primitives else list(self.deferred_primitives)[:1]
+            scene_build_started_at = time.perf_counter() if self.profile_detail else 0.0
             self.state = _begin_scene_build(
                 coord_probe,
                 self.scene_nodes,
@@ -1202,16 +1801,32 @@ class _ProgressiveImportJob:
                 self.scene_extra,
                 self.scene_info,
                 self.doc_images,
+                apply_node_animation=False,
             )
-            self._status_set("AssetKit is building Blender objects...")
-            update_loading_hud("AssetKit is building Blender objects")
+            if self.profile_detail:
+                _profile_log(
+                    "begin_scene_build "
+                    f"nodes={len(self.scene_nodes)} "
+                    f"pending={len(self.pending_primitives)} deferred={len(self.deferred_primitives)} "
+                    f"elapsed={(time.perf_counter() - scene_build_started_at) * 1000.0:.3f}ms"
+                )
+            self._status_set("AssetKit is importing...")
+            update_loading_hud("AssetKit is importing")
             if not self.pending_primitives and not self.deferred_primitives and self.producer_done:
                 self._finish_success()
                 return None
 
+        if self._can_build_grouped_auto_slice():
+            self._build_grouped_auto_slice()
+            if self.producer_done and not self.pending_primitives and not self.deferred_primitives:
+                self._finish_success()
+                return None
+            self._progress_update()
+            return 0.001
+
         if not self.pending_primitives and self.deferred_primitives and not self.producer_done:
-            self._status_set("AssetKit is waiting for mesh geometry...")
-            update_loading_hud("AssetKit is waiting for mesh geometry")
+            self._status_set("AssetKit is importing...")
+            update_loading_hud("AssetKit is importing")
             self._drain_queue()
             return 0.005
 
@@ -1237,6 +1852,14 @@ class _ProgressiveImportJob:
             if time.perf_counter() - slice_started_at >= _PROGRESSIVE_TIME_BUDGET:
                 break
 
+        if created_this_step and self.profile_detail:
+            _profile_log(
+                "build_slice "
+                f"created={created_this_step} "
+                f"pending={len(self.pending_primitives)} deferred={len(self.deferred_primitives)} "
+                f"elapsed={(time.perf_counter() - slice_started_at) * 1000.0:.3f}ms"
+            )
+
         self._drain_queue()
         if self.producer_done and not self.pending_primitives and not self.deferred_primitives:
             self._finish_success()
@@ -1257,7 +1880,63 @@ class _ProgressiveImportJob:
                 else:
                     self.pending_primitives.append(primitive)
 
+    def _waiting_for_grouped_auto_load(self) -> bool:
+        return (
+            self.prefer_grouped
+            and not self.producer_done
+            and self.mesh_count > 0
+            and self.mesh_count <= self.batch_size
+        )
+
+    def _can_build_grouped_auto_slice(self) -> bool:
+        return (
+            self.prefer_grouped
+            and self.producer_done
+            and self.mesh_count > 0
+            and self.mesh_count <= self.batch_size
+            and (self.pending_primitives or self.deferred_primitives)
+        )
+
+    def _build_grouped_auto_slice(self) -> None:
+        if self.state is None:
+            return
+
+        slice_started_at = time.perf_counter()
+        primitives = list(self.pending_primitives)
+        deferred = list(self.deferred_primitives)
+        self.pending_primitives.clear()
+        self.deferred_primitives.clear()
+
+        units = _mesh_import_units(primitives)
+        if deferred:
+            units.extend(deferred)
+
+        created_units = 0
+        created_primitives = 0
+        for unit in units:
+            created_objects = _create_import_unit(
+                unit,
+                self.state,
+                self.collection,
+                self.shading_mode,
+            )
+            self.objects.extend(created_objects)
+            created_units += 1
+            created_primitives += len(unit) if isinstance(unit, list) else 1
+            if self.first_object_at == 0.0 and created_objects:
+                self.first_object_at = time.perf_counter()
+
+        self.created_count += created_primitives
+        if self.profile_detail:
+            _profile_log(
+                "build_grouped_auto_slice "
+                f"units={created_units} primitives={created_primitives} "
+                f"elapsed={(time.perf_counter() - slice_started_at) * 1000.0:.3f}ms"
+            )
+
     def _finish_success(self) -> None:
+        _apply_deferred_scene_node_animations(self.state)
+        _apply_deferred_skin_animations(self.state)
         _finish_import(
             self.objects,
             self.focus_mode,
@@ -1274,12 +1953,14 @@ class _ProgressiveImportJob:
         load_seconds = self.build_started_at - self.load_started_at
         build_seconds = finished_at - self.build_started_at
         first_object_seconds = self.first_object_at - self.load_started_at if self.first_object_at else 0.0
-        print(
-            "AssetKit progressive import finished: "
-            f"{len(_import_result_objects(self.objects, self.state or {}))} object(s), "
-            f"first_object={first_object_seconds:.3f}s, "
-            f"load={load_seconds:.3f}s, build={build_seconds:.3f}s, total={finished_at - self.load_started_at:.3f}s"
-        )
+        if self.profile_detail:
+            _profile_log(
+                "progressive finish "
+                f"objects={len(_import_result_objects(self.objects, self.state or {}))} "
+                f"first_object={first_object_seconds:.3f}s "
+                f"load={load_seconds:.3f}s build={build_seconds:.3f}s "
+                f"total={finished_at - self.load_started_at:.3f}s"
+            )
         self._finish()
 
     def _finish(self) -> None:
@@ -1343,6 +2024,8 @@ def _create_mesh_object(
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    apply_skin_animation: bool = True,
+    deferred_skin_animations: list | None = None,
     shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
@@ -1357,6 +2040,8 @@ def _create_mesh_object(
             skin_cache=skin_cache,
             apply_transform=apply_transform,
             apply_animation=apply_animation,
+            apply_skin_animation=apply_skin_animation,
+            deferred_skin_animations=deferred_skin_animations,
             shading_mode=shading_mode,
             collection=collection,
         )
@@ -1382,6 +2067,8 @@ def _create_mesh_object(
         skin_cache=skin_cache,
         apply_transform=apply_transform,
         apply_animation=apply_animation,
+        apply_skin_animation=apply_skin_animation,
+        deferred_skin_animations=deferred_skin_animations,
         collection=collection,
     )
 
@@ -1397,6 +2084,8 @@ def _create_mesh_object_bulk(
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    apply_skin_animation: bool = True,
+    deferred_skin_animations: list | None = None,
     shading_mode: str = "AUTO",
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
@@ -1411,6 +2100,8 @@ def _create_mesh_object_bulk(
             skin_cache=skin_cache,
             apply_transform=apply_transform,
             apply_animation=apply_animation,
+            apply_skin_animation=apply_skin_animation,
+            deferred_skin_animations=deferred_skin_animations,
             collection=collection,
         )
     if data.primitive_type == AK_PRIMITIVE_POINTS:
@@ -1424,6 +2115,8 @@ def _create_mesh_object_bulk(
             skin_cache=skin_cache,
             apply_transform=apply_transform,
             apply_animation=apply_animation,
+            apply_skin_animation=apply_skin_animation,
+            deferred_skin_animations=deferred_skin_animations,
             collection=collection,
         )
 
@@ -1444,8 +2137,8 @@ def _create_mesh_object_bulk(
         loop_starts = array("i", range(0, data.loop_count, 3))
         loop_totals = array("i", [3]) * data.face_count
 
-    mesh.vertices.foreach_set("co", vertices)
-    mesh.loops.foreach_set("vertex_index", indices)
+    _set_mesh_positions(mesh, vertices)
+    _set_mesh_loop_vertex_indices(mesh, indices)
     mesh.polygons.foreach_set("loop_start", loop_starts)
     mesh.polygons.foreach_set("loop_total", loop_totals)
     _apply_point_attributes(mesh, data)
@@ -1500,6 +2193,8 @@ def _create_mesh_object_bulk(
         skin_cache=skin_cache,
         apply_transform=apply_transform,
         apply_animation=apply_animation,
+        apply_skin_animation=apply_skin_animation,
+        deferred_skin_animations=deferred_skin_animations,
         collection=collection,
     )
 
@@ -1515,6 +2210,8 @@ def _create_line_mesh_object_bulk(
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    apply_skin_animation: bool = True,
+    deferred_skin_animations: list | None = None,
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
     mesh = bpy.data.meshes.new(data.name)
@@ -1528,9 +2225,9 @@ def _create_line_mesh_object_bulk(
     if vertices is None or indices is None:
         raise RuntimeError("AssetKit native bridge returned incomplete line buffers")
 
-    mesh.vertices.foreach_set("co", vertices)
+    _set_mesh_positions(mesh, vertices)
     if edge_count:
-        mesh.edges.foreach_set("vertices", indices)
+        _set_mesh_edges(mesh, indices)
     _apply_point_attributes(mesh, data)
     mesh.update(calc_edges=False)
 
@@ -1545,6 +2242,8 @@ def _create_line_mesh_object_bulk(
         skin_cache=skin_cache,
         apply_transform=apply_transform,
         apply_animation=apply_animation,
+        apply_skin_animation=apply_skin_animation,
+        deferred_skin_animations=deferred_skin_animations,
         collection=collection,
     )
 
@@ -1560,6 +2259,8 @@ def _create_point_mesh_object_bulk(
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    apply_skin_animation: bool = True,
+    deferred_skin_animations: list | None = None,
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
     mesh = bpy.data.meshes.new(data.name)
@@ -1569,7 +2270,7 @@ def _create_point_mesh_object_bulk(
     if vertices is None:
         raise RuntimeError("AssetKit native bridge returned incomplete point buffers")
 
-    mesh.vertices.foreach_set("co", vertices)
+    _set_mesh_positions(mesh, vertices)
     _apply_point_attributes(mesh, data)
     mesh.update(calc_edges=False)
 
@@ -1584,6 +2285,8 @@ def _create_point_mesh_object_bulk(
         skin_cache=skin_cache,
         apply_transform=apply_transform,
         apply_animation=apply_animation,
+        apply_skin_animation=apply_skin_animation,
+        deferred_skin_animations=deferred_skin_animations,
         collection=collection,
     )
 
@@ -1600,9 +2303,18 @@ def _finish_mesh_object(
     skin_cache: dict[object, bpy.types.Object] | None = None,
     apply_transform: bool = True,
     apply_animation: bool = True,
+    apply_skin_animation: bool = True,
+    deferred_skin_animations: list | None = None,
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
+    profile_detail = _profile_enabled()
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
     _apply_skin_bind_shape(mesh, data)
+    if profile_detail:
+        now = time.perf_counter()
+        bind_shape_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
     active_collection = collection or bpy.context.collection
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
@@ -1611,22 +2323,75 @@ def _finish_mesh_object(
     if apply_transform:
         _apply_matrix(obj, data)
     active_collection.objects.link(obj)
+    if profile_detail:
+        now = time.perf_counter()
+        object_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
     material = _create_material(data, material_cache)
     if material:
         mesh.materials.append(material)
+    if profile_detail:
+        now = time.perf_counter()
+        material_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
     _apply_assetkit_extra_props(obj, data)
     _apply_material_variants(obj, data, material_cache)
+    if profile_detail:
+        now = time.perf_counter()
+        props_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
     _apply_shape_keys(obj, data)
     _apply_morph_presets(obj, data)
+    if profile_detail:
+        now = time.perf_counter()
+        morph_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
     node_lookup = node_data or {}
-    _apply_skin(obj, data, node_objects or {}, node_lookup, active_collection, skin_cache)
+    _apply_skin(
+        obj,
+        data,
+        node_objects or {},
+        node_lookup,
+        active_collection,
+        skin_cache,
+        apply_animation=apply_skin_animation,
+        deferred_skin_animations=deferred_skin_animations,
+    )
+    if profile_detail:
+        now = time.perf_counter()
+        skin_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
     has_node_visibility_animation = _node_has_effective_visibility_animation(data.node_index, node_lookup)
     if apply_animation:
         _apply_animation(obj, data, skip_visibility=has_node_visibility_animation)
     if has_node_visibility_animation:
         _apply_effective_node_visibility_animation(obj, data.node_index, node_lookup)
+    if profile_detail:
+        now = time.perf_counter()
+        animation_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
 
-    return _apply_instancing(obj, data, active_collection)
+    objects = _apply_instancing(obj, data, active_collection)
+    if profile_detail:
+        now = time.perf_counter()
+        instancing_ms = (now - phase_started_at) * 1000.0
+        total_ms = (now - total_started_at) * 1000.0
+    if profile_detail and total_ms >= 2.0:
+        _profile_log(
+            "finish_mesh_object_detail "
+            f"name={obj.name!r} "
+            f"verts={data.vertex_count} faces={data.face_count} "
+            f"bind_shape={bind_shape_ms:.3f}ms "
+            f"object={object_ms:.3f}ms "
+            f"material={material_ms:.3f}ms "
+            f"props={props_ms:.3f}ms "
+            f"morph={morph_ms:.3f}ms "
+            f"skin={skin_ms:.3f}ms "
+            f"animation={animation_ms:.3f}ms "
+            f"instancing={instancing_ms:.3f}ms "
+            f"total={total_ms:.3f}ms"
+        )
+    return objects
 
 
 def _apply_point_attributes(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> None:
@@ -1716,6 +2481,66 @@ def _domain_element_count(mesh: bpy.types.Mesh, domain: str) -> int:
     return 0
 
 
+def _mesh_attribute_ensure(mesh: bpy.types.Mesh, name: str, data_type: str, domain: str):
+    attrs = getattr(mesh, "attributes", None)
+    if attrs is None:
+        return None
+
+    try:
+        attr = attrs.get(name)
+        if attr is not None and (attr.domain != domain or attr.data_type != data_type):
+            attrs.remove(attr)
+            attr = None
+        return attr or attrs.new(name, data_type, domain)
+    except Exception:
+        return None
+
+
+def _set_mesh_positions(mesh: bpy.types.Mesh, vertices: memoryview) -> None:
+    attr = _mesh_attribute_ensure(mesh, "position", "FLOAT_VECTOR", "POINT")
+    if attr is not None:
+        try:
+            attr.data.foreach_set("vector", vertices)
+            return
+        except Exception:
+            pass
+    mesh.vertices.foreach_set("co", vertices)
+
+
+def _set_mesh_loop_vertex_indices(mesh: bpy.types.Mesh, indices: memoryview) -> None:
+    attr = _mesh_attribute_ensure(mesh, ".corner_vert", "INT", "CORNER")
+    if attr is not None:
+        try:
+            attr.data.foreach_set("value", indices)
+            return
+        except Exception:
+            pass
+    mesh.loops.foreach_set("vertex_index", indices)
+
+
+def _set_mesh_edges(mesh: bpy.types.Mesh, indices: memoryview) -> None:
+    attr = _mesh_attribute_ensure(mesh, ".edge_verts", "INT32_2D", "EDGE")
+    if attr is not None:
+        try:
+            attr.data.foreach_set("value", indices)
+            return
+        except Exception:
+            pass
+    mesh.edges.foreach_set("vertices", indices)
+
+
+def _set_mesh_material_indices(mesh: bpy.types.Mesh, material_indices: object) -> None:
+    values = _buffer_view(material_indices, "i") or material_indices
+    attr = _mesh_attribute_ensure(mesh, "material_index", "INT", "FACE")
+    if attr is not None:
+        try:
+            attr.data.foreach_set("value", values)
+            return
+        except Exception:
+            pass
+    mesh.polygons.foreach_set("material_index", values)
+
+
 def _apply_shading(
     mesh: bpy.types.Mesh,
     mode: str,
@@ -1746,12 +2571,33 @@ def _set_mesh_smooth(mesh: bpy.types.Mesh, smooth: bool) -> None:
     if not mesh.polygons:
         return
 
-    values = array("b", [1 if smooth else 0]) * len(mesh.polygons)
+    count = len(mesh.polygons)
+    sharp = 0 if smooth else 1
+    values = _bool_array(sharp, count)
+    attr = _mesh_attribute_ensure(mesh, "sharp_face", "BOOLEAN", "FACE")
+    if attr is not None:
+        try:
+            attr.data.foreach_set("value", values)
+            return
+        except Exception:
+            pass
+
+    values = _bool_array(1 if smooth else 0, count)
     try:
         mesh.polygons.foreach_set("use_smooth", values)
     except Exception:
         for poly in mesh.polygons:
             poly.use_smooth = smooth
+
+
+def _bool_array(value: int, count: int) -> array:
+    key = (1 if value else 0, count)
+    cached = _BOOL_ARRAYS.get(key)
+    if cached is not None:
+        return cached
+    values = array("b", [key[0]]) * count
+    _BOOL_ARRAYS[key] = values
+    return values
 
 
 def _set_render_color_index(mesh: bpy.types.Mesh) -> None:
@@ -1766,28 +2612,151 @@ def _create_scene_nodes(
     coord_root: bpy.types.Object | None,
     collection: bpy.types.Collection,
     node_visibility: dict[int, bool] | None = None,
+    apply_animation: bool = True,
+    skip_animation_nodes: set[int] | None = None,
 ) -> dict[int, bpy.types.Object]:
     objects: dict[int, bpy.types.Object] = {}
     node_lookup = {index: node for index, node in enumerate(nodes)}
+    skip_animation_nodes = skip_animation_nodes or set()
+    profile_detail = _profile_enabled()
+    create_started_at = time.perf_counter() if profile_detail else 0.0
 
     for index, node in enumerate(nodes):
         obj = _new_scene_node_object(node, index, (node_visibility or {}).get(index, node.visible))
         collection.objects.link(obj)
         objects[index] = obj
 
+    create_ms = (time.perf_counter() - create_started_at) * 1000.0 if profile_detail else 0.0
+    bind_started_at = time.perf_counter() if profile_detail else 0.0
+    animation_ms = 0.0
+    visibility_anim_ms = 0.0
     for index, node in enumerate(nodes):
         obj = objects[index]
         parent = objects.get(node.parent_index) if node.parent_index >= 0 else coord_root
         _set_parent(obj, parent)
         _apply_matrix_buffer(obj, node.matrix_f32)
         has_visibility_animation = _node_has_effective_visibility_animation(index, node_lookup)
-        _apply_animation(obj, node, skip_visibility=has_visibility_animation)
-        if has_visibility_animation:
-            _apply_effective_node_visibility_animation(obj, index, node_lookup)
+        if apply_animation and index not in skip_animation_nodes:
+            anim_started_at = time.perf_counter() if profile_detail else 0.0
+            _apply_animation(obj, node, skip_visibility=has_visibility_animation)
+            if profile_detail:
+                animation_ms += (time.perf_counter() - anim_started_at) * 1000.0
+            if has_visibility_animation:
+                vis_started_at = time.perf_counter() if profile_detail else 0.0
+                _apply_effective_node_visibility_animation(obj, index, node_lookup)
+                if profile_detail:
+                    visibility_anim_ms += (time.perf_counter() - vis_started_at) * 1000.0
         if obj.type == "EMPTY":
             _hide_helper_object(obj)
 
+    if profile_detail:
+        _profile_log(
+            "create_scene_nodes_detail "
+            f"create_link={create_ms:.3f}ms "
+            f"parent_matrix_hide={(time.perf_counter() - bind_started_at) * 1000.0:.3f}ms "
+            f"animation={animation_ms:.3f}ms "
+            f"visibility_animation={visibility_anim_ms:.3f}ms "
+            f"nodes={len(nodes)} "
+            f"skip_animation={len(skip_animation_nodes)} "
+            f"apply_animation={apply_animation}"
+        )
     return objects
+
+
+def _skinned_node_animation_skip_indices(primitives: list[MeshPrimitiveData]) -> set[int]:
+    skip: set[int] = set()
+    _mark_skinned_node_animation_skip({"node_animation_skip_indices": skip}, primitives)
+    return skip
+
+
+def _mark_skinned_node_animation_skip(state: dict | None, primitives: list[MeshPrimitiveData]) -> None:
+    if not state:
+        return
+
+    skip = state.setdefault("node_animation_skip_indices", set())
+    for primitive in primitives:
+        if not primitive.has_skin or not primitive.skin_mesh_in_bind_pose:
+            continue
+
+        root_index = int(primitive.skin_root_node_index)
+        if root_index >= 0:
+            skip.add(root_index)
+
+        joint_nodes = _buffer_view(primitive.skin_joint_nodes_i32, "i")
+        if joint_nodes is None:
+            continue
+        for index in range(min(len(joint_nodes), int(primitive.skin_joint_count))):
+            node_index = int(joint_nodes[index])
+            if node_index >= 0:
+                skip.add(node_index)
+
+
+def _apply_deferred_scene_node_animations(state: dict | None) -> None:
+    if not state or not state.get("node_animation_deferred"):
+        return
+
+    profile_detail = _profile_enabled()
+    started_at = time.perf_counter() if profile_detail else 0.0
+    node_objects = state.get("node_objects") or {}
+    node_data = state.get("node_data") or {}
+    skip_animation_nodes = state.get("node_animation_skip_indices") or set()
+    animation_ms = 0.0
+    visibility_anim_ms = 0.0
+    for index, node in node_data.items():
+        if index in skip_animation_nodes:
+            continue
+        obj = node_objects.get(index)
+        if not obj:
+            continue
+        has_visibility_animation = _node_has_effective_visibility_animation(index, node_data)
+        anim_started_at = time.perf_counter() if profile_detail else 0.0
+        _apply_animation(obj, node, skip_visibility=has_visibility_animation)
+        if profile_detail:
+            animation_ms += (time.perf_counter() - anim_started_at) * 1000.0
+        if has_visibility_animation:
+            vis_started_at = time.perf_counter() if profile_detail else 0.0
+            _apply_effective_node_visibility_animation(obj, index, node_data)
+            if profile_detail:
+                visibility_anim_ms += (time.perf_counter() - vis_started_at) * 1000.0
+
+    state["node_animation_deferred"] = False
+    if profile_detail:
+        _profile_log(
+            "deferred_scene_node_animations "
+            f"nodes={len(node_data)} "
+            f"animation={animation_ms:.3f}ms "
+            f"visibility_animation={visibility_anim_ms:.3f}ms "
+            f"total={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+
+
+def _apply_deferred_skin_animations(state: dict | None) -> None:
+    if not state or not state.get("skin_animation_deferred"):
+        return
+
+    pending = state.get("deferred_skin_animations") or []
+    if not pending:
+        state["skin_animation_deferred"] = False
+        return
+
+    profile_detail = _profile_enabled()
+    started_at = time.perf_counter() if profile_detail else 0.0
+    skin_count = len(pending)
+    for armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, include_root in pending:
+        if include_root:
+            root_node = node_data.get(int(data.skin_root_node_index))
+            if root_node:
+                _apply_animation(armature, root_node)
+        _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels_by_joint)
+
+    state["skin_animation_deferred"] = False
+    pending.clear()
+    if profile_detail:
+        _profile_log(
+            "deferred_skin_animations "
+            f"skins={skin_count} "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
 
 
 def _effective_static_node_visibility_map(nodes: list[SceneNodeData]) -> dict[int, bool]:
@@ -1830,7 +2799,7 @@ def _node_object_visibility_map(
 
 def _node_has_visibility_animation(node: SceneNodeData) -> bool:
     for channel in node.anim_channels or ():
-        if int(channel.get("target") or 0) == _ANIM_VISIBILITY:
+        if _channel_target(channel) == _ANIM_VISIBILITY:
             return True
     return False
 
@@ -1924,7 +2893,7 @@ def _visibility_channels_by_clip(
         if not node:
             continue
         for channel in node.anim_channels or ():
-            if int(channel.get("target") or 0) != _ANIM_VISIBILITY:
+            if _channel_target(channel) != _ANIM_VISIBILITY:
                 continue
             clip_key = _channel_action_clip(channel)
             clips.setdefault(clip_key, {}).setdefault(node_index, []).append(channel)
@@ -1958,13 +2927,13 @@ def _visibility_channels_value(
 ) -> bool:
     value = 1.0 if fallback else 0.0
     for channel in channels:
-        count = int(channel.get("count") or 0)
-        value_width = int(channel.get("value_width") or 0)
-        times = _buffer_view(channel.get("times_f32") or b"", "f")
-        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        count = _channel_count(channel)
+        value_width = _channel_value_width(channel)
+        times = _buffer_view(_channel_times(channel), "f")
+        values = _buffer_view(_channel_values(channel), "f")
         if count <= 0 or value_width <= 0 or times is None or values is None:
             continue
-        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        interpolation = _blender_interpolation(_channel_interpolation(channel))
         value = _sample_anim_scalar(times, values, count, value_width, 0, time_value, interpolation)
     return value >= 0.5
 
@@ -2222,6 +3191,97 @@ def _buffer_view(buffer: object, fmt: str) -> memoryview | None:
     return view.cast(fmt)
 
 
+def _copy_buffer_bytes(dst: bytearray, offset: int, src: object, fmt: str) -> int:
+    view = _buffer_view(src, fmt)
+    if view is None:
+        return 0
+    raw = view.cast("B")
+    end = offset + len(raw)
+    dst[offset:end] = raw
+    return len(raw)
+
+
+def _channel_get(channel: object, index: int, default: object = None) -> object:
+    if isinstance(channel, tuple):
+        return channel[index] if index < len(channel) else default
+    if isinstance(channel, dict):
+        return channel.get(_CH_KEYS[index], default)
+    if isinstance(channel, list):
+        return channel[index] if index < len(channel) else default
+    return default
+
+
+def _channel_int(channel: object, index: int) -> int:
+    value = _channel_get(channel, index, 0)
+    return int(value or 0)
+
+
+def _channel_bool(channel: object, index: int) -> bool:
+    return bool(_channel_get(channel, index, False))
+
+
+def _channel_buffer(channel: object, index: int) -> object:
+    return _channel_get(channel, index, b"") or b""
+
+
+def _channel_target(channel: object) -> int:
+    return _channel_int(channel, _CH_TARGET)
+
+
+def _channel_target_offset(channel: object) -> int:
+    return _channel_int(channel, _CH_TARGET_OFFSET)
+
+
+def _channel_clip_index(channel: object) -> int:
+    return _channel_int(channel, _CH_CLIP_INDEX)
+
+
+def _channel_clip_name(channel: object) -> str:
+    return str(_channel_get(channel, _CH_CLIP_NAME, "") or "")
+
+
+def _channel_value_width(channel: object) -> int:
+    return _channel_int(channel, _CH_VALUE_WIDTH)
+
+
+def _channel_count(channel: object) -> int:
+    return _channel_int(channel, _CH_COUNT)
+
+
+def _channel_interpolation(channel: object) -> int:
+    return _channel_int(channel, _CH_INTERPOLATION)
+
+
+def _channel_is_partial(channel: object) -> bool:
+    return _channel_bool(channel, _CH_IS_PARTIAL)
+
+
+def _channel_pose_ready(channel: object) -> bool:
+    return _channel_bool(channel, _CH_POSE_READY)
+
+
+def _channel_times(channel: object) -> object:
+    return _channel_buffer(channel, _CH_TIMES_F32)
+
+
+def _channel_values(channel: object) -> object:
+    return _channel_buffer(channel, _CH_VALUES_F32)
+
+
+def _channel_in_tangents(channel: object) -> object:
+    return _channel_buffer(channel, _CH_IN_TANGENTS_F32)
+
+
+def _channel_out_tangents(channel: object) -> object:
+    return _channel_buffer(channel, _CH_OUT_TANGENTS_F32)
+
+
+def _reset_action_cache() -> None:
+    _ACTION_CHANNELBAGS.clear()
+    _ACTION_CHANNEL_GROUPS.clear()
+    _IMPORT_SHARED_ACTIONS.clear()
+
+
 def _apply_animation(
     obj: bpy.types.Object,
     data: MeshPrimitiveData,
@@ -2236,7 +3296,7 @@ def _apply_animation(
     fps = scene.render.fps / scene.render.fps_base
     start_frame = 0.0
 
-    if any(int(channel.get("target") or 0) == _ANIM_ROTATION_QUAT for channel in channels):
+    if any(_channel_target(channel) == _ANIM_ROTATION_QUAT for channel in channels):
         obj.rotation_mode = "QUATERNION"
 
     actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
@@ -2253,7 +3313,7 @@ def _apply_animation(
     end_frame = max(end_frame, cone_end_frame)
 
     for channel in channels:
-        target = int(channel.get("target") or 0)
+        target = _channel_target(channel)
         if target in converted_targets:
             continue
         if target == _ANIM_VISIBILITY:
@@ -2267,22 +3327,70 @@ def _apply_animation(
         if not owner or not path:
             continue
 
-        count = int(channel.get("count") or 0)
-        value_width = int(channel.get("value_width") or 0)
-        target_offset = int(channel.get("target_offset") or 0)
-        is_partial = bool(channel.get("is_partial"))
-        times = _buffer_view(channel.get("times_f32") or b"", "f")
-        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        count = _channel_count(channel)
+        value_width = _channel_value_width(channel)
+        target_offset = _channel_target_offset(channel)
+        is_partial = _channel_is_partial(channel)
+        times = _buffer_view(_channel_times(channel), "f")
+        values = _buffer_view(_channel_values(channel), "f")
         if count <= 0 or value_width <= 0 or times is None or values is None:
             continue
 
-        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        interpolation = _blender_interpolation(_channel_interpolation(channel))
         in_tangents, out_tangents = _channel_tangents(channel)
         if target_offset >= width:
             continue
 
         action = _animation_action_for(obj, owner, actions, "" if owner == obj else "_Data", channel)
         component_count = 1 if is_partial else min(width - target_offset, value_width)
+        if not is_partial:
+            if _anim_channel_can_use_native_coords(target):
+                coords_by_component: list[object | None] = [
+                    native_animation_coords(channel, component, fps)
+                    for component in range(component_count)
+                ]
+            else:
+                coords_by_component = [None] * component_count
+
+            if any(coords is None for coords in coords_by_component):
+                coords_by_component = [array("f", [0.0]) * (count * 2) for _ in range(component_count)]
+                for key_index in range(count):
+                    frame = start_frame + times[key_index] * fps
+                    base = key_index * value_width
+                    for component, coords in enumerate(coords_by_component):
+                        coords[key_index * 2] = frame
+                        coords[key_index * 2 + 1] = _anim_channel_value(
+                            obj,
+                            target,
+                            values[base + component],
+                        )
+
+            for component, coords in enumerate(coords_by_component):
+                target_index = target_offset + component
+                fcurve_index = None if width == 1 else target_index
+                write_key = _fcurve_write_key(owner, channel, path, fcurve_index)
+                if write_key in written_fcurves:
+                    continue
+                written_fcurves.add(write_key)
+                fcurve = _ensure_fcurve(action, owner, path, fcurve_index, group_name=group_name)
+                _write_fcurve_points(
+                    fcurve,
+                    coords,
+                    interpolation,
+                    times=times,
+                    fps=fps,
+                    in_tangents=in_tangents,
+                    out_tangents=out_tangents,
+                    value_width=value_width,
+                    value_index=component,
+                    tangent_value=(
+                        lambda value, target=target: _anim_channel_tangent_value(target, value)
+                    ),
+                )
+
+            end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
+            continue
+
         for component in range(component_count):
             target_index = target_offset + component
             value_index = 0 if is_partial else component
@@ -2292,14 +3400,20 @@ def _apply_animation(
                 continue
             written_fcurves.add(write_key)
             fcurve = _ensure_fcurve(action, owner, path, fcurve_index, group_name=group_name)
-            coords = array("f", [0.0]) * (count * 2)
-            for key_index in range(count):
-                coords[key_index * 2] = start_frame + times[key_index] * fps
-                coords[key_index * 2 + 1] = _anim_channel_value(
-                    obj,
-                    target,
-                    values[key_index * value_width + value_index],
-                )
+            coords = (
+                native_animation_coords(channel, value_index, fps)
+                if _anim_channel_can_use_native_coords(target)
+                else None
+            )
+            if coords is None:
+                coords = array("f", [0.0]) * (count * 2)
+                for key_index in range(count):
+                    coords[key_index * 2] = start_frame + times[key_index] * fps
+                    coords[key_index * 2 + 1] = _anim_channel_value(
+                        obj,
+                        target,
+                        values[key_index * value_width + value_index],
+                    )
 
             _write_fcurve_points(
                 fcurve,
@@ -2330,19 +3444,126 @@ def _animation_action_for(
     suffix: str,
     channel: dict | None = None,
 ) -> bpy.types.Action:
-    clip_index, _clip_name = _channel_action_clip(channel)
+    clip_index, clip_name = _channel_action_clip(channel)
     key = (owner.as_pointer(), clip_index, suffix)
     cached = actions.get(key)
     if cached:
         return cached[1]
 
     owner.animation_data_create()
-    action = bpy.data.actions.new(_animation_action_name(obj.name, suffix, channel))
-    action.use_fake_user = True
+    action = _shared_animation_action(suffix, channel)
+    if action is None:
+        action = _new_animation_action(_animation_action_name(obj.name, suffix, channel))
     if owner.animation_data.action is None or clip_index == 0:
         owner.animation_data.action = action
+        slot = _ensure_action_channelbag(action, owner)[0]
+        _set_animation_data_slot(owner, slot)
     actions[key] = (owner, action)
     return action
+
+
+def _shared_animation_action(suffix: str, channel: dict | None) -> bpy.types.Action | None:
+    global _ACTION_SLOTS_SUPPORTED
+    if _ACTION_SLOTS_SUPPORTED is False:
+        return None
+
+    clip_index, clip_name = _channel_action_clip(channel)
+    key = (clip_index, clip_name, suffix)
+    action = _IMPORT_SHARED_ACTIONS.get(key)
+    if action is not None:
+        return action
+
+    action = _new_animation_action(_shared_animation_action_name(suffix, channel))
+    if getattr(action, "slots", None) is None or getattr(action, "layers", None) is None:
+        _ACTION_SLOTS_SUPPORTED = False
+        bpy.data.actions.remove(action)
+        return None
+
+    _ACTION_SLOTS_SUPPORTED = True
+    _IMPORT_SHARED_ACTIONS[key] = action
+    return action
+
+
+def _new_animation_action(name: str) -> bpy.types.Action:
+    action = bpy.data.actions.new(name)
+    action.use_fake_user = True
+    _ensure_action_layer_strip(action)
+    return action
+
+
+def _ensure_action_layer_strip(action: bpy.types.Action):
+    layers = getattr(action, "layers", None)
+    if layers is None:
+        return None
+
+    if len(layers) == 0:
+        try:
+            layer = layers.new("layer0")
+        except TypeError:
+            layer = layers.new(name="layer0")
+    else:
+        layer = layers[0]
+
+    strips = getattr(layer, "strips", None)
+    if strips is None:
+        return None
+    if len(strips) == 0:
+        try:
+            return strips.new(type="KEYFRAME")
+        except TypeError:
+            return strips.new("KEYFRAME")
+    return strips[0]
+
+
+def _ensure_action_channelbag(action: bpy.types.Action, owner: bpy.types.ID):
+    key = (action.as_pointer(), owner.as_pointer())
+    cached = _ACTION_CHANNELBAGS.get(key)
+    if cached:
+        return cached
+
+    strip = _ensure_action_layer_strip(action)
+    slots = getattr(action, "slots", None)
+    if strip is None or slots is None:
+        return None, None
+
+    slot = None
+    for candidate in slots:
+        if (
+            getattr(candidate, "target_id_type", "") == owner.id_type
+            and getattr(candidate, "name_display", getattr(candidate, "name", "")) == owner.name
+        ):
+            slot = candidate
+            break
+    if slot is None:
+        try:
+            slot = slots.new(owner.id_type, owner.name)
+        except TypeError:
+            slot = slots.new(id_type=owner.id_type, name=owner.name)
+
+    try:
+        channelbag = strip.channelbag(slot)
+    except Exception:
+        channelbag = None
+    if channelbag is None:
+        try:
+            channelbag = strip.channelbags.new(slot)
+        except Exception:
+            channelbag = None
+    if channelbag is None:
+        return slot, None
+
+    _ACTION_CHANNELBAGS[key] = (slot, channelbag)
+    return slot, channelbag
+
+
+def _set_animation_data_slot(owner: bpy.types.ID, slot) -> None:
+    animation_data = getattr(owner, "animation_data", None)
+    if animation_data is None or not hasattr(animation_data, "action_slot"):
+        return
+    try:
+        animation_data.action_slot = slot
+    except Exception:
+        pass
 
 
 def _animation_action_name(base_name: str, suffix: str, channel: dict | None) -> str:
@@ -2354,9 +3575,18 @@ def _animation_action_name(base_name: str, suffix: str, channel: dict | None) ->
     return f"{base_name}_AssetKit{suffix}"
 
 
+def _shared_animation_action_name(suffix: str, channel: dict | None) -> str:
+    clip_index, clip_name = _channel_action_clip(channel)
+    if clip_name:
+        return f"AssetKit_{clip_name}{suffix}"
+    if clip_index:
+        return f"AssetKit_Animation_{clip_index}{suffix}"
+    return f"AssetKit{suffix}"
+
+
 def _channel_action_clip(channel: dict | None) -> tuple[int, str]:
-    clip_index = int((channel or {}).get("clip_index") or 0)
-    clip_name = _safe_action_name(str((channel or {}).get("clip_name") or ""))
+    clip_index = _channel_clip_index(channel)
+    clip_name = _safe_action_name(_channel_clip_name(channel))
     if not clip_name:
         clip_index = 0
     return clip_index, clip_name
@@ -2420,6 +3650,14 @@ def _set_nla_strip_action_slot(strip, action: bpy.types.Action, owner: bpy.types
     if not hasattr(strip, "action_slot"):
         return
 
+    slot = _ACTION_CHANNELBAGS.get((action.as_pointer(), owner.as_pointer()), (None, None))[0]
+    if slot is not None:
+        try:
+            strip.action_slot = slot
+            return
+        except Exception:
+            pass
+
     slot = None
     for candidate in getattr(action, "slots", []):
         if getattr(candidate, "target_id_type", "") == owner.id_type:
@@ -2454,11 +3692,11 @@ def _apply_light_spot_cone_animations(
     cone_channels = {
         _ANIM_LIGHT_SPOT_INNER: [
             channel for channel in channels
-            if int(channel.get("target") or 0) == _ANIM_LIGHT_SPOT_INNER
+            if _channel_target(channel) == _ANIM_LIGHT_SPOT_INNER
         ],
         _ANIM_LIGHT_SPOT_OUTER: [
             channel for channel in channels
-            if int(channel.get("target") or 0) == _ANIM_LIGHT_SPOT_OUTER
+            if _channel_target(channel) == _ANIM_LIGHT_SPOT_OUTER
         ],
     }
     if not cone_channels[_ANIM_LIGHT_SPOT_INNER] and not cone_channels[_ANIM_LIGHT_SPOT_OUTER]:
@@ -2513,8 +3751,8 @@ def _spot_blend_from_angles(inner: float, outer: float) -> float:
 def _animation_key_times(channels: list[dict]) -> list[float]:
     values: set[float] = set()
     for channel in channels:
-        count = int(channel.get("count") or 0)
-        times = _buffer_view(channel.get("times_f32") or b"", "f")
+        count = _channel_count(channel)
+        times = _buffer_view(_channel_times(channel), "f")
         if count <= 0 or times is None:
             continue
         for index in range(min(count, len(times))):
@@ -2524,7 +3762,7 @@ def _animation_key_times(channels: list[dict]) -> list[float]:
 
 def _merged_animation_interpolation(channels: list[dict]) -> str:
     for channel in channels:
-        if _blender_interpolation(int(channel.get("interpolation") or 0)) != "CONSTANT":
+        if _blender_interpolation(_channel_interpolation(channel)) != "CONSTANT":
             return "LINEAR"
     return "CONSTANT"
 
@@ -2603,14 +3841,13 @@ def _apply_visibility_animation_channel(
     fps: float,
     start_frame: float,
 ) -> int:
-    count = int(channel.get("count") or 0)
-    value_width = int(channel.get("value_width") or 0)
-    times = _buffer_view(channel.get("times_f32") or b"", "f")
-    values = _buffer_view(channel.get("values_f32") or b"", "f")
+    count = _channel_count(channel)
+    value_width = _channel_value_width(channel)
+    times = _buffer_view(_channel_times(channel), "f")
+    values = _buffer_view(_channel_values(channel), "f")
     if count <= 0 or value_width <= 0 or times is None or values is None:
         return bpy.context.scene.frame_end
 
-    interpolation = "CONSTANT"
     coords = array("f", [0.0]) * (count * 2)
     for key_index in range(count):
         coords[key_index * 2] = start_frame + times[key_index] * fps
@@ -2618,11 +3855,7 @@ def _apply_visibility_animation_channel(
 
     for path in ("hide_viewport", "hide_render"):
         fcurve = _ensure_fcurve(action, obj, path, None, group_name="Visibility")
-        fcurve.keyframe_points.add(count)
-        fcurve.keyframe_points.foreach_set("co", coords)
-        for point in fcurve.keyframe_points:
-            point.interpolation = interpolation
-        fcurve.update()
+        _write_fcurve_points(fcurve, coords, "CONSTANT")
 
     return int(start_frame + times[count - 1] * fps + 0.5)
 
@@ -2665,19 +3898,19 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
     written_fcurves: set[tuple[int, int, str, int]] = set()
 
     for channel in channels:
-        if int(channel.get("target") or 0) != _ANIM_MORPH_WEIGHTS:
+        if _channel_target(channel) != _ANIM_MORPH_WEIGHTS:
             continue
 
-        count = int(channel.get("count") or 0)
-        value_width = int(channel.get("value_width") or 0)
-        target_offset = int(channel.get("target_offset") or 0)
-        is_partial = bool(channel.get("is_partial"))
-        times = _buffer_view(channel.get("times_f32") or b"", "f")
-        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        count = _channel_count(channel)
+        value_width = _channel_value_width(channel)
+        target_offset = _channel_target_offset(channel)
+        is_partial = _channel_is_partial(channel)
+        times = _buffer_view(_channel_times(channel), "f")
+        values = _buffer_view(_channel_values(channel), "f")
         if count <= 0 or value_width <= 0 or times is None or values is None:
             continue
 
-        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        interpolation = _blender_interpolation(_channel_interpolation(channel))
         in_tangents, out_tangents = _channel_tangents(channel)
         component_count = 1 if is_partial else value_width
         action = _animation_action_for(obj, shape_keys, actions, "_Morph", channel)
@@ -2753,34 +3986,80 @@ def _apply_skin(
     node_data: dict[int, SceneNodeData],
     collection: bpy.types.Collection,
     skin_cache: dict[object, bpy.types.Object] | None = None,
+    apply_animation: bool = True,
+    deferred_skin_animations: list | None = None,
 ) -> None:
     if not data.has_skin or data.skin_vertex_count <= 0 or data.skin_joint_count <= 0:
         return
 
+    profile_detail = _profile_enabled()
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
+    detail_parts: list[str] = []
     joints = _buffer_view(data.skin_joints_u16, "H")
     weights = _buffer_view(data.skin_weights_f32, "f")
     joint_nodes = _buffer_view(data.skin_joint_nodes_i32, "i")
     if joints is None or weights is None or joint_nodes is None:
         return
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"views={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
 
     width = max(1, int(data.skin_joint_width or 4))
     vertex_count = min(data.skin_vertex_count, len(obj.data.vertices))
     joint_names = _create_skin_vertex_groups(obj, data, joints, weights, vertex_count, width, joint_nodes, node_objects)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"vertex_groups={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
     cache_key = _skin_cache_key(data, joint_nodes, obj)
     armature = skin_cache.get(cache_key) if skin_cache is not None else None
     if armature is None:
-        armature = _create_skin_armature(obj, data, joint_names, joint_nodes, node_objects, node_data, collection)
+        armature = _create_skin_armature(
+            obj,
+            data,
+            joint_names,
+            joint_nodes,
+            node_objects,
+            node_data,
+            collection,
+            apply_animation=apply_animation,
+            pose_channels_by_joint=data.skin_pose_anim_channels,
+            deferred_skin_animations=deferred_skin_animations,
+        )
         if armature and skin_cache is not None:
             skin_cache[cache_key] = armature
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"armature={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
     if not armature:
         return
 
     modifier = obj.modifiers.new("AssetKit Skin", "ARMATURE")
     modifier.object = armature
     modifier.use_vertex_groups = True
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"modifier={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
     _hide_skin_node_helpers(joint_nodes, node_objects, node_data)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"hide_helpers={(now - phase_started_at) * 1000.0:.3f}ms")
+        phase_started_at = now
     if _skin_uses_bind_pose_armature(data):
         _parent_skinned_mesh_to_armature(obj, armature)
+    if profile_detail:
+        now = time.perf_counter()
+        detail_parts.append(f"parent={(now - phase_started_at) * 1000.0:.3f}ms")
+        _profile_log(
+            "apply_skin_detail "
+            f"name={obj.name!r} joints={data.skin_joint_count} verts={vertex_count} "
+            f"total={(now - total_started_at) * 1000.0:.3f}ms "
+            + " ".join(detail_parts)
+        )
 
 
 def _hide_skin_node_helpers(
@@ -2867,15 +4146,46 @@ def _create_skin_vertex_groups(
     joint_nodes: memoryview,
     node_objects: dict[int, bpy.types.Object],
 ) -> list[str]:
+    profile_detail = _profile_enabled()
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
     groups = []
     for joint_index in range(data.skin_joint_count):
         node_index = int(joint_nodes[joint_index]) if joint_index < len(joint_nodes) else -1
         node = node_objects.get(node_index)
         group = obj.vertex_groups.new(name=node.name if node else f"AssetKitJoint_{joint_index}")
         groups.append(group)
+    if profile_detail:
+        now = time.perf_counter()
+        create_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
+    else:
+        create_ms = 0.0
 
     group_count = len(groups)
+    fast_assignments = native_skin_group_assignments(joints, weights, vertex_count, width, group_count)
+    if fast_assignments:
+        add_call_count = 0
+        assignment_count = 0
+        for joint_index, weight, indices in fast_assignments:
+            if 0 <= joint_index < group_count:
+                groups[joint_index].add(indices, weight, "REPLACE")
+                add_call_count += 1
+                assignment_count += len(indices)
+        if profile_detail:
+            now = time.perf_counter()
+            _profile_log(
+                "skin_vertex_groups_detail "
+                f"name={obj.name!r} joints={group_count} verts={vertex_count} "
+                f"assignments={assignment_count} add_calls={add_call_count} "
+                f"create={create_ms:.3f}ms collect=0.000ms "
+                f"add={(now - phase_started_at) * 1000.0:.3f}ms "
+                f"mode=native_rigid total={(now - total_started_at) * 1000.0:.3f}ms"
+            )
+        return [group.name for group in groups]
+
     assignments: list[dict[float, list[int]] | None] = [None] * group_count
+    assignment_count = 0
     for vertex_index in range(vertex_count):
         base = vertex_index * width
         for slot in range(width):
@@ -2889,13 +4199,32 @@ def _create_skin_vertex_groups(
                     group_assignments = {}
                     assignments[joint_index] = group_assignments
                 group_assignments.setdefault(float(weight), []).append(vertex_index)
+                assignment_count += 1
+    if profile_detail:
+        now = time.perf_counter()
+        collect_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
+    else:
+        collect_ms = 0.0
 
+    add_call_count = 0
     for joint_index, group_assignments in enumerate(assignments):
         if not group_assignments:
             continue
         group = groups[joint_index]
         for weight, indices in group_assignments.items():
             group.add(indices, weight, "REPLACE")
+            add_call_count += 1
+    if profile_detail:
+        now = time.perf_counter()
+        add_ms = (now - phase_started_at) * 1000.0
+        _profile_log(
+            "skin_vertex_groups_detail "
+            f"name={obj.name!r} joints={group_count} verts={vertex_count} "
+            f"assignments={assignment_count} add_calls={add_call_count} "
+            f"create={create_ms:.3f}ms collect={collect_ms:.3f}ms "
+            f"add={add_ms:.3f}ms total={(now - total_started_at) * 1000.0:.3f}ms"
+        )
 
     return [group.name for group in groups]
 
@@ -2908,15 +4237,32 @@ def _create_skin_armature(
     node_objects: dict[int, bpy.types.Object],
     node_data: dict[int, SceneNodeData],
     collection: bpy.types.Collection,
+    apply_animation: bool = True,
+    pose_channels_by_joint: list[list[dict]] | None = None,
+    deferred_skin_animations: list | None = None,
 ) -> bpy.types.Object | None:
     if not joint_names:
         return None
+
+    profile_detail = _profile_enabled()
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
+
+    def lap_ms() -> float:
+        nonlocal phase_started_at
+        if not profile_detail:
+            return 0.0
+        now = time.perf_counter()
+        elapsed = (now - phase_started_at) * 1000.0
+        phase_started_at = now
+        return elapsed
 
     armature_data = bpy.data.armatures.new(f"{obj.name}_Armature")
     armature = bpy.data.objects.new(f"{obj.name}_Armature", armature_data)
     collection.objects.link(armature)
     armature_source = _skin_armature_source(data, joint_nodes, node_objects, node_data) or obj
     _match_object_space(armature, armature_source)
+    create_ms = lap_ms()
 
     previous_active = bpy.context.view_layer.objects.active
     previous_selection = list(bpy.context.selected_objects)
@@ -2927,6 +4273,7 @@ def _create_skin_armature(
     armature.select_set(True)
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode="EDIT")
+    mode_enter_ms = lap_ms()
 
     edit_bones = armature_data.edit_bones
     bone_node_indices = _skin_bone_node_indices(data, joint_nodes, node_data)
@@ -2958,6 +4305,7 @@ def _create_skin_armature(
             matrix,
             _skin_bone_length(node_index, bone_node_indices, node_data, rest_matrices_by_node),
         )
+    create_bones_ms = lap_ms()
 
     for node_index, name in bone_names_by_node.items():
         parent_joint = None
@@ -2971,15 +4319,26 @@ def _create_skin_armature(
             parent_index = parent_node.parent_index if parent_node else -1
         if parent_joint is not None and parent_joint in edit_bones:
             edit_bones[name].parent = edit_bones[parent_joint]
+    parent_bones_ms = lap_ms()
 
     bpy.ops.object.mode_set(mode="OBJECT")
+    mode_exit_ms = lap_ms()
     if _skin_uses_bind_pose_armature(data):
         root_node = node_data.get(int(data.skin_root_node_index))
-        if root_node:
-            _apply_animation(armature, root_node)
-        _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
-    elif not _bind_bones_to_nodes(armature, bone_names_by_node, node_objects):
-        _apply_bone_animations(armature, joint_names, joint_nodes, node_data)
+        if apply_animation:
+            if root_node:
+                _apply_animation(armature, root_node)
+            _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels_by_joint)
+        elif deferred_skin_animations is not None:
+            deferred_skin_animations.append((armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, True))
+    else:
+        bound_to_nodes = _bind_bones_to_nodes(armature, bone_names_by_node, node_objects)
+        if not bound_to_nodes:
+            if apply_animation:
+                _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels_by_joint)
+            elif deferred_skin_animations is not None:
+                deferred_skin_animations.append((armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, False))
+    animation_ms = lap_ms()
     if _skin_uses_bind_pose_armature(data):
         _match_object_space(armature, armature_source)
     else:
@@ -2990,6 +4349,20 @@ def _create_skin_armature(
     for selected in previous_selection:
         selected.select_set(True)
     bpy.context.view_layer.objects.active = previous_active
+    cleanup_ms = lap_ms()
+    if profile_detail:
+        _profile_log(
+            "create_skin_armature_detail "
+            f"name={armature.name!r} joints={len(joint_names)} bones={len(bone_node_indices)} "
+            f"create={create_ms:.3f}ms "
+            f"mode_enter={mode_enter_ms:.3f}ms "
+            f"create_bones={create_bones_ms:.3f}ms "
+            f"parent_bones={parent_bones_ms:.3f}ms "
+            f"mode_exit={mode_exit_ms:.3f}ms "
+            f"animation={animation_ms:.3f}ms "
+            f"cleanup={cleanup_ms:.3f}ms "
+            f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
     return armature
 
 
@@ -3034,10 +4407,6 @@ def _parent_skinned_mesh_to_armature(
     obj.parent = armature
     obj.matrix_parent_inverse.identity()
     obj.matrix_local = Matrix.Identity(4)
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
 
 
 def _skin_bone_names_by_node(
@@ -3201,10 +4570,6 @@ def _match_object_space(target: bpy.types.Object, source: bpy.types.Object) -> N
     target.parent = source.parent
     target.matrix_parent_inverse.identity()
     target.matrix_world = source.matrix_world.copy()
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
 
 
 def _pose_bone_edit_local_matrix(pose_bone: bpy.types.PoseBone) -> Matrix:
@@ -3216,17 +4581,14 @@ def _pose_bone_edit_local_matrix(pose_bone: bpy.types.PoseBone) -> Matrix:
 
 
 def _bone_anim_sample(
-    pose_bone: bpy.types.PoseBone,
     target: int,
     values: memoryview,
     value_width: int,
     key_index: int,
+    edit_translation: Vector,
+    edit_rotation_inv: Quaternion,
 ) -> tuple[float, ...] | None:
     base = key_index * value_width
-    edit_matrix = _pose_bone_edit_local_matrix(pose_bone)
-    edit_translation = edit_matrix.to_translation()
-    edit_rotation_inv = edit_matrix.to_quaternion().conjugated()
-
     if target == _ANIM_TRANSLATION and value_width >= 3:
         translation = Vector((values[base], values[base + 1], values[base + 2]))
         corrected = edit_rotation_inv @ (translation - edit_translation)
@@ -3244,78 +4606,216 @@ def _bone_anim_sample(
     return None
 
 
+def _bone_default_component_value(target: int, target_index: int) -> float | None:
+    if target == _ANIM_TRANSLATION:
+        return 0.0
+    if target == _ANIM_ROTATION_QUAT:
+        return 1.0 if target_index == 0 else 0.0
+    if target == _ANIM_SCALE:
+        return 1.0
+    return None
+
+
+def _bone_component_is_default(
+    channel: object,
+    target: int,
+    target_index: int,
+    value_index: int,
+) -> bool:
+    if not _channel_pose_ready(channel):
+        return False
+    default_value = _bone_default_component_value(target, target_index)
+    if default_value is None:
+        return False
+    return native_animation_component_constant(channel, value_index, default_value)
+
+
+def _anim_channel_can_use_native_coords(target: int) -> bool:
+    return target in {_ANIM_TRANSLATION, _ANIM_ROTATION_QUAT, _ANIM_SCALE}
+
+
 def _apply_bone_animations(
     armature: bpy.types.Object,
     joint_names: list[str],
     joint_nodes: memoryview,
     node_data: dict[int, SceneNodeData],
+    pose_channels_by_joint: list[list[dict]] | None = None,
 ) -> None:
+    profile_detail = _profile_enabled()
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
     animated = False
+    channel_count = 0
     for index, name in enumerate(joint_names):
         pose_bone = armature.pose.bones.get(name)
         if pose_bone:
             pose_bone.rotation_mode = "QUATERNION"
-        node = node_data.get(int(joint_nodes[index]) if index < len(joint_nodes) else -1)
-        if node and node.anim_channels:
+        channels = _bone_animation_channels(index, joint_nodes, node_data, pose_channels_by_joint)
+        if channels:
             animated = True
+            channel_count += len(channels)
 
     if not animated:
         return
+    if profile_detail:
+        now = time.perf_counter()
+        prep_ms = (now - phase_started_at) * 1000.0
+        phase_started_at = now
+    else:
+        prep_ms = 0.0
 
     scene = bpy.context.scene
     fps = scene.render.fps / scene.render.fps_base
     actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
+    coords_ms = 0.0
+    fcurve_ms = 0.0
+    write_ms = 0.0
+    fallback_ms = 0.0
+    skipped_default_fcurves = 0
 
     for index, name in enumerate(joint_names):
         pose_bone = armature.pose.bones.get(name)
-        node = node_data.get(int(joint_nodes[index]) if index < len(joint_nodes) else -1)
-        if not pose_bone or not node or not node.anim_channels:
+        channels = _bone_animation_channels(index, joint_nodes, node_data, pose_channels_by_joint)
+        if not pose_bone or not channels:
             continue
 
-        for channel in node.anim_channels:
-            target = int(channel.get("target") or 0)
+        needs_python_pose = any(not _channel_pose_ready(channel) for channel in channels)
+        if needs_python_pose:
+            edit_matrix = _pose_bone_edit_local_matrix(pose_bone)
+            edit_translation = edit_matrix.to_translation()
+            edit_rotation_inv = edit_matrix.to_quaternion().conjugated()
+        else:
+            edit_translation = Vector((0.0, 0.0, 0.0))
+            edit_rotation_inv = Quaternion((1.0, 0.0, 0.0, 0.0))
+
+        for channel in channels:
+            target = _channel_target(channel)
             path, width = _anim_target_path(target)
             if not path:
                 continue
 
-            count = int(channel.get("count") or 0)
-            value_width = int(channel.get("value_width") or 0)
-            target_offset = int(channel.get("target_offset") or 0)
-            is_partial = bool(channel.get("is_partial"))
-            times = _buffer_view(channel.get("times_f32") or b"", "f")
-            values = _buffer_view(channel.get("values_f32") or b"", "f")
+            count = _channel_count(channel)
+            value_width = _channel_value_width(channel)
+            target_offset = _channel_target_offset(channel)
+            is_partial = _channel_is_partial(channel)
+            times = _buffer_view(_channel_times(channel), "f")
+            values = _buffer_view(_channel_values(channel), "f")
             if count <= 0 or value_width <= 0 or times is None or values is None:
                 continue
 
-            interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+            interpolation = _blender_interpolation(_channel_interpolation(channel))
             in_tangents, out_tangents = _channel_tangents(channel)
             component_count = 1 if is_partial else min(width - target_offset, value_width)
             data_path = pose_bone.path_from_id(path)
-            action = _animation_action_for(armature, armature, actions, "", channel)
+            if not is_partial:
+                pose_ready = _channel_pose_ready(channel)
+                skip_components = [False] * component_count
+                if pose_ready:
+                    for component in range(component_count):
+                        target_index = target_offset + component
+                        if _bone_component_is_default(channel, target, target_index, component):
+                            skip_components[component] = True
+                            skipped_default_fcurves += 1
+
+                coords_by_component: list[object | None]
+                if pose_ready:
+                    if profile_detail:
+                        coords_started_at = time.perf_counter()
+                    coords_by_component = [
+                        None
+                        if skip_components[component]
+                        else native_animation_coords(channel, component, fps)
+                        for component in range(component_count)
+                    ]
+                    if profile_detail:
+                        coords_ms += (time.perf_counter() - coords_started_at) * 1000.0
+                else:
+                    coords_by_component = [None] * component_count
+
+                if any(
+                    coords is None and not skip_components[component]
+                    for component, coords in enumerate(coords_by_component)
+                ):
+                    if profile_detail:
+                        fallback_started_at = time.perf_counter()
+                    coords_by_component = [
+                        None if skip_components[component] else array("f", [0.0]) * (count * 2)
+                        for component in range(component_count)
+                    ]
+                    for key_index in range(count):
+                        sample = _bone_anim_sample(
+                            target,
+                            values,
+                            value_width,
+                            key_index,
+                            edit_translation,
+                            edit_rotation_inv,
+                        )
+                        frame = times[key_index] * fps
+                        base = key_index * value_width
+                        for component, coords in enumerate(coords_by_component):
+                            if coords is None:
+                                continue
+                            target_index = target_offset + component
+                            coords[key_index * 2] = frame
+                            coords[key_index * 2 + 1] = (
+                                sample[target_index]
+                                if sample is not None and target_index < len(sample)
+                                else values[base + component]
+                            )
+                    if profile_detail:
+                        fallback_ms += (time.perf_counter() - fallback_started_at) * 1000.0
+
+                for component, coords in enumerate(coords_by_component):
+                    if coords is None:
+                        continue
+                    target_index = target_offset + component
+                    write_key = _fcurve_write_key(armature, channel, data_path, target_index)
+                    if write_key in written_fcurves:
+                        continue
+                    written_fcurves.add(write_key)
+                    action = _animation_action_for(armature, armature, actions, "", channel)
+                    if profile_detail:
+                        fcurve_started_at = time.perf_counter()
+                    fcurve = _ensure_fcurve(action, armature, data_path, target_index, group_name=name)
+                    if profile_detail:
+                        fcurve_ms += (time.perf_counter() - fcurve_started_at) * 1000.0
+                        write_started_at = time.perf_counter()
+                    _write_fcurve_points(fcurve, coords, interpolation)
+                    if profile_detail:
+                        write_ms += (time.perf_counter() - write_started_at) * 1000.0
+
+                end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
+                continue
+
             for component in range(component_count):
                 target_index = target_offset + component
                 value_index = 0 if is_partial else component
+                if _bone_component_is_default(channel, target, target_index, value_index):
+                    skipped_default_fcurves += 1
+                    continue
                 write_key = _fcurve_write_key(armature, channel, data_path, target_index)
                 if write_key in written_fcurves:
                     continue
                 written_fcurves.add(write_key)
+                action = _animation_action_for(armature, armature, actions, "", channel)
+                if profile_detail:
+                    fcurve_started_at = time.perf_counter()
                 fcurve = _ensure_fcurve(action, armature, data_path, target_index, group_name=name)
+                if profile_detail:
+                    fcurve_ms += (time.perf_counter() - fcurve_started_at) * 1000.0
+                    fallback_started_at = time.perf_counter()
                 coords = array("f", [0.0]) * (count * 2)
                 for key_index in range(count):
-                    sample = (
-                        None
-                        if is_partial
-                        else _bone_anim_sample(pose_bone, target, values, value_width, key_index)
-                    )
                     coords[key_index * 2] = times[key_index] * fps
-                    coords[key_index * 2 + 1] = (
-                        sample[target_index]
-                        if sample is not None and target_index < len(sample)
-                        else values[key_index * value_width + value_index]
-                    )
+                    coords[key_index * 2 + 1] = values[key_index * value_width + value_index]
+                if profile_detail:
+                    fallback_ms += (time.perf_counter() - fallback_started_at) * 1000.0
 
+                if profile_detail:
+                    write_started_at = time.perf_counter()
                 _write_fcurve_points(
                     fcurve,
                     coords,
@@ -3327,12 +4827,43 @@ def _apply_bone_animations(
                     value_width=value_width,
                     value_index=value_index,
                 )
+                if profile_detail:
+                    write_ms += (time.perf_counter() - write_started_at) * 1000.0
 
             end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
+    if profile_detail:
+        before_stash_at = time.perf_counter()
     _stash_animation_actions(actions)
+    if profile_detail:
+        stash_ms = (time.perf_counter() - before_stash_at) * 1000.0
+    else:
+        stash_ms = 0.0
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
+    if profile_detail:
+        _profile_log(
+            "apply_bone_animations_detail "
+            f"name={armature.name!r} joints={len(joint_names)} channels={channel_count} "
+            f"fcurves={len(written_fcurves)} skipped_default={skipped_default_fcurves} "
+            f"prep={prep_ms:.3f}ms "
+            f"coords={coords_ms:.3f}ms fallback={fallback_ms:.3f}ms "
+            f"ensure_fcurve={fcurve_ms:.3f}ms write={write_ms:.3f}ms "
+            f"stash={stash_ms:.3f}ms total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
+
+
+def _bone_animation_channels(
+    joint_index: int,
+    joint_nodes: memoryview,
+    node_data: dict[int, SceneNodeData],
+    pose_channels_by_joint: list[list[dict]] | None = None,
+) -> list[dict]:
+    if pose_channels_by_joint is not None and joint_index < len(pose_channels_by_joint):
+        return pose_channels_by_joint[joint_index] or []
+
+    node = node_data.get(int(joint_nodes[joint_index]) if joint_index < len(joint_nodes) else -1)
+    return list(node.anim_channels or []) if node else []
 
 
 def _ensure_fcurve(
@@ -3342,6 +4873,15 @@ def _ensure_fcurve(
     index: int | None,
     group_name: str = "Transform",
 ):
+    slot, channelbag = _ensure_action_channelbag(action, obj)
+    if channelbag is not None:
+        if index is None:
+            fcurve = channelbag.fcurves.new(data_path=data_path)
+        else:
+            fcurve = channelbag.fcurves.new(data_path=data_path, index=index)
+        _set_fcurve_group(fcurve, channelbag, group_name)
+        return fcurve
+
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None:
         if index is None:
@@ -3378,11 +4918,11 @@ def _ensure_fcurve(
 
 
 def _channel_tangents(channel: dict) -> tuple[object | None, object | None]:
-    if int(channel.get("interpolation") or 0) != _INTERPOLATION_HERMITE:
+    if _channel_interpolation(channel) != _INTERPOLATION_HERMITE:
         return None, None
 
-    in_tangents = _buffer_view(channel.get("in_tangents_f32") or b"", "f")
-    out_tangents = _buffer_view(channel.get("out_tangents_f32") or b"", "f")
+    in_tangents = _buffer_view(_channel_in_tangents(channel), "f")
+    out_tangents = _buffer_view(_channel_out_tangents(channel), "f")
     if in_tangents is None or out_tangents is None:
         return None, None
     return in_tangents, out_tangents
@@ -3414,8 +4954,12 @@ def _write_fcurve_points(
         and count > 0
     )
 
-    for point in fcurve.keyframe_points:
-        point.interpolation = "BEZIER" if use_cubic else interpolation
+    _foreach_set_keyframe_enum(
+        fcurve.keyframe_points,
+        "interpolation",
+        "BEZIER" if use_cubic else interpolation,
+        count,
+    )
 
     if use_cubic:
         _apply_cubic_handles(
@@ -3430,7 +4974,44 @@ def _write_fcurve_points(
             tangent_value,
         )
 
-    fcurve.update()
+    if use_cubic:
+        fcurve.update()
+
+
+def _foreach_set_keyframe_enum(points, prop: str, value: str, count: int) -> None:
+    enum_value = _keyframe_enum_value(prop, value)
+    if enum_value is None:
+        for point in points:
+            setattr(point, prop, value)
+        return
+    try:
+        points.foreach_set(prop, _keyframe_enum_array(enum_value, count))
+    except Exception:
+        for point in points:
+            setattr(point, prop, value)
+
+
+def _keyframe_enum_array(enum_value: int, count: int) -> array:
+    key = (enum_value, count)
+    cached = _KEYFRAME_ENUM_ARRAYS.get(key)
+    if cached is not None:
+        return cached
+    values = array("i", [enum_value]) * count
+    _KEYFRAME_ENUM_ARRAYS[key] = values
+    return values
+
+
+def _keyframe_enum_value(prop: str, value: str) -> int | None:
+    key = (prop, value)
+    cached = _KEYFRAME_ENUM_VALUES.get(key)
+    if cached is not None:
+        return cached
+    try:
+        enum_value = bpy.types.Keyframe.bl_rna.properties[prop].enum_items[value].value
+    except Exception:
+        return None
+    _KEYFRAME_ENUM_VALUES[key] = enum_value
+    return enum_value
 
 
 def _apply_cubic_handles(
@@ -3589,6 +5170,7 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
         "has_sheen": bool(raw.get("has_sheen", data.has_sheen)),
         "material_type": _raw_int(raw, "material_type", data.material_type),
         "file_type": _raw_int(raw, "file_type", data.file_type),
+        "material_key": _raw_int(raw, "material_key", data.material_key),
         "texture_infos": _variant_texture_infos(data.texture_infos, raw.get("texture_infos") or {}),
         "material_extra": raw.get("material_extra"),
         "effect_extra": raw.get("effect_extra"),
@@ -3741,6 +5323,12 @@ def _create_material(
     base_color = _material_base_color(data)
     mat = bpy.data.materials.new(material_name)
     mat.diffuse_color = base_color
+    if _can_use_simple_material(data, color_attr):
+        _configure_simple_material(mat, data, base_color)
+        if material_cache is not None:
+            material_cache[cache_key] = mat
+        return mat
+
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
     _set_material_alpha_mode(mat, data)
@@ -3770,25 +5358,33 @@ def _create_material(
             _set_input(bsdf, "Metallic", data.metallic)
             _set_input(bsdf, "Roughness", data.roughness)
             _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _pbr_specular_level(data))
-        _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
-        _set_first_input(bsdf, ("Emission Strength",), _emission_strength(data))
-        _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
+        if _has_emission(data):
+            _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
+            _set_first_input(bsdf, ("Emission Strength",), _emission_strength(data))
+        if _has_specular(data):
+            _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
         _set_first_input(bsdf, ("IOR",), _material_ior(data))
-        _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
-        _set_first_input(bsdf, ("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
-        _set_first_input(bsdf, ("Transmission Weight", "Transmission"), data.transmission)
-        _set_first_input(bsdf, ("Sheen Weight", "Sheen"), 1.0 if data.has_sheen else 0.0)
-        _set_first_input(bsdf, ("Sheen Tint",), (*data.sheen_color, 1.0))
-        _set_first_input(bsdf, ("Sheen Roughness",), data.sheen_roughness)
-        _set_first_input(bsdf, ("Anisotropic",), data.anisotropy)
-        _set_first_input(bsdf, ("Anisotropic Rotation",), _blender_anisotropy_rotation(data.anisotropy_rotation))
-        _set_first_input(bsdf, ("Thin Film IOR",), data.iridescence_ior)
-        _set_first_input(bsdf, ("Thin Film Weight", "Iridescence Weight", "Iridescence"), data.iridescence)
-        _set_first_input(bsdf, ("Dispersion",), data.dispersion)
-        if data.iridescence or data.iridescence_thickness_texture:
+        if _has_clearcoat(data):
+            _set_first_input(bsdf, ("Coat Weight", "Clearcoat"), data.clearcoat)
+            _set_first_input(bsdf, ("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
+        if _has_transmission(data):
+            _set_first_input(bsdf, ("Transmission Weight", "Transmission"), data.transmission)
+        if _has_sheen(data):
+            _set_first_input(bsdf, ("Sheen Weight", "Sheen"), 1.0 if data.has_sheen else 0.0)
+            _set_first_input(bsdf, ("Sheen Tint",), (*data.sheen_color, 1.0))
+            _set_first_input(bsdf, ("Sheen Roughness",), data.sheen_roughness)
+        if _has_anisotropy(data):
+            _set_first_input(bsdf, ("Anisotropic",), data.anisotropy)
+            _set_first_input(bsdf, ("Anisotropic Rotation",), _blender_anisotropy_rotation(data.anisotropy_rotation))
+        if _has_iridescence(data):
+            _set_first_input(bsdf, ("Thin Film IOR",), data.iridescence_ior)
+            _set_first_input(bsdf, ("Thin Film Weight", "Iridescence Weight", "Iridescence"), data.iridescence)
             _set_first_input(bsdf, ("Thin Film Thickness",), data.iridescence_thickness_maximum)
-        _set_first_input(bsdf, ("Diffuse Transmission Weight", "Diffuse Transmission"), data.diffuse_transmission)
-        _set_first_input(bsdf, ("Diffuse Transmission Color",), (*data.diffuse_transmission_color, 1.0))
+        if data.dispersion:
+            _set_first_input(bsdf, ("Dispersion",), data.dispersion)
+        if _has_diffuse_transmission(data):
+            _set_first_input(bsdf, ("Diffuse Transmission Weight", "Diffuse Transmission"), data.diffuse_transmission)
+            _set_first_input(bsdf, ("Diffuse Transmission Color",), (*data.diffuse_transmission_color, 1.0))
 
     _set_input(color_target, color_input, base_color)
     if alpha_socket:
@@ -4010,6 +5606,92 @@ def _create_material(
     return mat
 
 
+def _can_use_simple_material(data: MeshPrimitiveData, color_attr: str) -> bool:
+    if color_attr:
+        return False
+    if data.material_anim_channels:
+        return False
+    if _is_unlit_material(data) or _is_legacy_lit_material(data) or _is_specular_glossiness_material(data):
+        return False
+    if any(getattr(data, name) for name in _MATERIAL_TEXTURE_FIELDS):
+        return False
+    if data.texture_infos:
+        return False
+    if _has_emission(data) or _has_specular(data) or _has_clearcoat(data):
+        return False
+    if _has_transmission(data) or _has_sheen(data) or _has_anisotropy(data) or _has_iridescence(data):
+        return False
+    if _has_diffuse_transmission(data) or _has_volume_scatter(data):
+        return False
+    if float(data.volume_thickness) > 0.0 or float(data.dispersion) != 0.0:
+        return False
+    return True
+
+
+def _configure_simple_material(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> None:
+    mat.use_backface_culling = not _is_double_sided_material(data)
+    _set_material_alpha_mode(mat, data)
+    if _has_nondefault_assetkit_material_props(data):
+        _set_assetkit_material_props(mat, data)
+    _set_assetkit_json_prop(mat, "assetkit_material_extra_json", data.material_extra)
+    _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
+    if not getattr(mat, "use_nodes", False):
+        _set_material_scalar(mat, "metallic", data.metallic)
+        _set_material_scalar(mat, "roughness", data.roughness)
+        _set_material_scalar(mat, "specular_intensity", _pbr_specular_level(data))
+        return
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if not bsdf:
+        return
+    _set_input(bsdf, "Base Color", base_color)
+    if abs(float(data.metallic)) > 1e-6:
+        _set_input(bsdf, "Metallic", data.metallic)
+    if abs(float(data.roughness) - 0.5) > 1e-6:
+        _set_input(bsdf, "Roughness", data.roughness)
+    specular_level = _pbr_specular_level(data)
+    if abs(float(specular_level) - 0.5) > 1e-6:
+        _set_first_input(bsdf, ("Specular IOR Level", "Specular"), specular_level)
+    alpha_socket = bsdf.inputs.get("Alpha") if abs(float(data.opacity) - 1.0) > 1e-6 else None
+    if alpha_socket is not None:
+        try:
+            alpha_socket.default_value = data.opacity
+        except TypeError:
+            pass
+
+
+def _set_material_scalar(mat: bpy.types.Material, attr: str, value: float) -> None:
+    if not hasattr(mat, attr):
+        return
+    try:
+        setattr(mat, attr, float(value))
+    except TypeError:
+        pass
+
+
+def _has_nondefault_assetkit_material_props(data: MeshPrimitiveData) -> bool:
+    if any(getattr(data, name) for name in _MATERIAL_TEXTURE_FIELDS):
+        return True
+    if data.texture_infos:
+        return True
+    if _has_emission(data) or _has_specular(data) or _has_clearcoat(data):
+        return True
+    if _has_transmission(data) or _has_sheen(data) or _has_anisotropy(data) or _has_iridescence(data):
+        return True
+    if _has_diffuse_transmission(data) or _has_volume_scatter(data):
+        return True
+    return (
+        float(data.volume_thickness) > 0.0
+        or float(data.dispersion) != 0.0
+        or int(data.transparent_opaque) != 0
+        or abs(float(data.opacity) - 1.0) > 1.0e-6
+        or not _tuple_close(data.transparent_color, (1.0, 1.0, 1.0, 1.0))
+    )
+
+
 def _apply_material_animation(
     mat: bpy.types.Material,
     data: MeshPrimitiveData,
@@ -4041,7 +5723,7 @@ def _apply_material_animation(
     end_frame = max(end_frame, tex_end_frame)
 
     for channel in channels:
-        target = int(channel.get("target") or 0)
+        target = _channel_target(channel)
         tex_role = _texture_anim_role(target)
         if (
             tex_role in converted_texture_location_roles
@@ -4052,18 +5734,18 @@ def _apply_material_animation(
         if width <= 0:
             continue
 
-        count = int(channel.get("count") or 0)
-        value_width = int(channel.get("value_width") or 0)
-        target_offset = int(channel.get("target_offset") or 0)
-        is_partial = bool(channel.get("is_partial"))
-        times = _buffer_view(channel.get("times_f32") or b"", "f")
-        values = _buffer_view(channel.get("values_f32") or b"", "f")
+        count = _channel_count(channel)
+        value_width = _channel_value_width(channel)
+        target_offset = _channel_target_offset(channel)
+        is_partial = _channel_is_partial(channel)
+        times = _buffer_view(_channel_times(channel), "f")
+        values = _buffer_view(_channel_values(channel), "f")
         if count <= 0 or value_width <= 0 or times is None or values is None:
             continue
         if target_offset >= width:
             continue
 
-        interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+        interpolation = _blender_interpolation(_channel_interpolation(channel))
         in_tangents, out_tangents = _channel_tangents(channel)
         component_count = 1 if is_partial else min(width - target_offset, value_width)
         for component in range(component_count):
@@ -4180,7 +5862,7 @@ def _apply_texture_transform_location_animations(
 ) -> tuple[set[str], int]:
     by_role: dict[str, dict[int, list[dict]]] = {}
     for channel in channels:
-        target = int(channel.get("target") or 0)
+        target = _channel_target(channel)
         role = _texture_anim_role(target)
         prop = _texture_anim_prop(target)
         if role and prop in {
@@ -4264,8 +5946,8 @@ def _texture_transform_key_times(prop_channels: dict[int, list[dict]]) -> list[f
     values: set[float] = set()
     for channels in prop_channels.values():
         for channel in channels:
-            count = int(channel.get("count") or 0)
-            times = _buffer_view(channel.get("times_f32") or b"", "f")
+            count = _channel_count(channel)
+            times = _buffer_view(_channel_times(channel), "f")
             if count <= 0 or times is None:
                 continue
             for index in range(min(count, len(times))):
@@ -4277,7 +5959,7 @@ def _texture_transform_location_interpolation(prop_channels: dict[int, list[dict
     interpolation = "CONSTANT"
     for channels in prop_channels.values():
         for channel in channels:
-            if _blender_interpolation(int(channel.get("interpolation") or 0)) != "CONSTANT":
+            if _blender_interpolation(_channel_interpolation(channel)) != "CONSTANT":
                 return "LINEAR"
     return interpolation
 
@@ -4305,12 +5987,12 @@ def _texture_transform_sample_scalar(
 
 
 def _texture_transform_sample_into(values: list[float], channel: dict, time_value: float) -> None:
-    count = int(channel.get("count") or 0)
-    value_width = int(channel.get("value_width") or 0)
-    target_offset = int(channel.get("target_offset") or 0)
-    is_partial = bool(channel.get("is_partial"))
-    times = _buffer_view(channel.get("times_f32") or b"", "f")
-    raw_values = _buffer_view(channel.get("values_f32") or b"", "f")
+    count = _channel_count(channel)
+    value_width = _channel_value_width(channel)
+    target_offset = _channel_target_offset(channel)
+    is_partial = _channel_is_partial(channel)
+    times = _buffer_view(_channel_times(channel), "f")
+    raw_values = _buffer_view(_channel_values(channel), "f")
     if count <= 0 or value_width <= 0 or times is None or raw_values is None:
         return
 
@@ -4318,7 +6000,7 @@ def _texture_transform_sample_into(values: list[float], channel: dict, time_valu
     if target_offset >= width:
         return
     component_count = 1 if is_partial else min(width - target_offset, value_width)
-    interpolation = _blender_interpolation(int(channel.get("interpolation") or 0))
+    interpolation = _blender_interpolation(_channel_interpolation(channel))
     for component in range(component_count):
         target_index = target_offset + component
         value_index = 0 if is_partial else component
@@ -4667,7 +6349,8 @@ def _set_transparency_overlap(mat: bpy.types.Material, enabled: bool) -> None:
 def _set_material_alpha_mode(mat: bpy.types.Material, data: MeshPrimitiveData) -> None:
     alpha_mode = int(data.alpha_mode)
     if alpha_mode == 0:
-        mat.blend_method = "OPAQUE"
+        if getattr(mat, "blend_method", "OPAQUE") != "OPAQUE":
+            mat.blend_method = "OPAQUE"
     elif alpha_mode == 1:
         if _prefers_hashed_transparency(data):
             _set_material_enum(mat, "blend_method", "HASHED", "BLEND")
@@ -4713,12 +6396,67 @@ def _has_emission(data: MeshPrimitiveData) -> bool:
     return any(abs(float(value)) > 1e-6 for value in data.emissive_color)
 
 
+def _has_specular(data: MeshPrimitiveData) -> bool:
+    return (
+        bool(data.specular_texture)
+        or bool(data.specular_color_texture)
+        or abs(float(data.specular_strength) - 1.0) > 1e-6
+        or not _is_default_rgb(data.specular_color)
+    )
+
+
+def _has_clearcoat(data: MeshPrimitiveData) -> bool:
+    return (
+        bool(data.clearcoat_texture)
+        or bool(data.clearcoat_roughness_texture)
+        or bool(data.clearcoat_normal_texture)
+        or abs(float(data.clearcoat)) > 1e-6
+        or abs(float(data.clearcoat_roughness)) > 1e-6
+    )
+
+
+def _has_transmission(data: MeshPrimitiveData) -> bool:
+    return bool(data.transmission_texture) or abs(float(data.transmission)) > 1e-6
+
+
+def _has_sheen(data: MeshPrimitiveData) -> bool:
+    return (
+        bool(data.has_sheen)
+        or bool(data.sheen_color_texture)
+        or bool(data.sheen_roughness_texture)
+        or any(abs(float(value)) > 1e-6 for value in data.sheen_color)
+        or abs(float(data.sheen_roughness)) > 1e-6
+    )
+
+
+def _has_anisotropy(data: MeshPrimitiveData) -> bool:
+    return (
+        bool(data.anisotropy_texture)
+        or abs(float(data.anisotropy)) > 1e-6
+        or abs(float(data.anisotropy_rotation)) > 1e-6
+    )
+
+
+def _has_iridescence(data: MeshPrimitiveData) -> bool:
+    return (
+        bool(data.iridescence_texture)
+        or bool(data.iridescence_thickness_texture)
+        or abs(float(data.iridescence)) > 1e-6
+        or abs(float(data.iridescence_ior) - 1.3) > 1e-6
+        or abs(float(data.iridescence_thickness_minimum) - 100.0) > 1e-6
+        or abs(float(data.iridescence_thickness_maximum) - 400.0) > 1e-6
+    )
+
+
 def _emission_strength(data: MeshPrimitiveData) -> float:
     return float(data.emissive_strength) if _has_emission(data) else 0.0
 
 
 def _material_cache_key(data: MeshPrimitiveData) -> object:
     color_attr = _color_attribute_name(data)
+    native_key = int(getattr(data, "material_key", 0) or 0)
+    if native_key:
+        return ("native", int(data.file_type), native_key, color_attr)
     return (
         "props",
         data.material_name,
@@ -4966,7 +6704,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
     if scatter_color:
         props["assetkit_volume_scatter_multiscatter_color"] = scatter_color
     for key, value in props.items():
-        if value == "" or value == 0.0:
+        if _is_default_material_prop(key, value):
             continue
         mat[key] = value
 
@@ -5001,6 +6739,56 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
             mat[f"{prefix}_transform_offset"] = info.transform_offset
             mat[f"{prefix}_transform_scale"] = info.transform_scale
             mat[f"{prefix}_transform_rotation"] = info.transform_rotation
+
+
+_MATERIAL_PROP_DEFAULTS = {
+    "assetkit_iridescence": 0.0,
+    "assetkit_iridescence_ior": 1.3,
+    "assetkit_iridescence_thickness_minimum": 100.0,
+    "assetkit_iridescence_thickness_maximum": 400.0,
+    "assetkit_volume_thickness": 0.0,
+    "assetkit_volume_attenuation_color": (1.0, 1.0, 1.0),
+    "assetkit_volume_attenuation_distance": 1000000.0,
+    "assetkit_anisotropy": 0.0,
+    "assetkit_anisotropy_rotation": 0.0,
+    "assetkit_diffuse_transmission": 0.0,
+    "assetkit_diffuse_transmission_color": (1.0, 1.0, 1.0),
+    "assetkit_dispersion": 0.0,
+    "assetkit_transparent_color": (1.0, 1.0, 1.0, 1.0),
+    "assetkit_transparent_amount": 1.0,
+    "assetkit_opacity": 1.0,
+    "assetkit_transparent_opaque": 0,
+    "assetkit_normal_scale": 1.0,
+    "assetkit_occlusion_strength": 1.0,
+    "assetkit_emissive_strength": 1.0,
+    "assetkit_clearcoat_normal_scale": 1.0,
+}
+
+
+def _is_default_material_prop(key: str, value) -> bool:
+    if value == "":
+        return True
+    if key in {"assetkit_material_type", "assetkit_file_type"}:
+        return False
+    default = _MATERIAL_PROP_DEFAULTS.get(key)
+    if default is None:
+        return value == 0.0
+    if isinstance(default, tuple):
+        return _tuple_close(value, default)
+    try:
+        return abs(float(value) - float(default)) <= 1.0e-6
+    except (TypeError, ValueError):
+        return value == default
+
+
+def _tuple_close(value, default: tuple[float, ...]) -> bool:
+    try:
+        values = tuple(value)
+    except TypeError:
+        return False
+    if len(values) != len(default):
+        return False
+    return all(abs(float(item) - float(expected)) <= 1.0e-6 for item, expected in zip(values, default))
 
 
 def _ensure_gltf_settings_node(mat: bpy.types.Material, data: MeshPrimitiveData):
@@ -5045,7 +6833,7 @@ def _has_material_settings_animation(data: MeshPrimitiveData) -> bool:
         _ANIM_MATERIAL_VOLUME_THICKNESS,
         _ANIM_MATERIAL_DISPERSION,
     }
-    return any(int(channel.get("target") or 0) in settings_targets for channel in data.material_anim_channels or [])
+    return any(_channel_target(channel) in settings_targets for channel in data.material_anim_channels or [])
 
 
 def _ensure_gltf_settings_group():
@@ -6192,7 +7980,8 @@ def _decode_ktx2_image(path: str, colorspace: str):
     try:
         decoded = _assetkit_blender.decode_ktx2(source_path)
     except Exception as exc:
-        print(f"AssetKit KTX2 decode skipped for {path}: {exc}")
+        if _profile_enabled():
+            _profile_log(f"KTX2 decode skipped path={path!r} error={exc}")
         return None
 
     width = int(decoded.get("width") or 0)
