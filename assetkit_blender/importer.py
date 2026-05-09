@@ -110,6 +110,8 @@ _ANIM_TEXTURE_TRANSFORM_ROLES = (
 )
 _MATERIAL_TEXTURE_FIELDS = tuple(f"{role}_texture" for role in _ANIM_TEXTURE_TRANSFORM_ROLES)
 _TEXTURE_IMAGE_CACHE: dict[tuple[str, str], object] = {}
+_ACTIVE_TEXTURE_NODE_CACHE: dict[object, object] | None = None
+_ACTIVE_SEPARATE_COLOR_CACHE: dict[int, object] | None = None
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_HERMITE = 4
 _INTERPOLATION_STEP = 6
@@ -5411,206 +5413,215 @@ def _create_material(
     _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
     settings_node = _ensure_gltf_settings_node(mat, data)
 
-    if data.base_color_texture or color_attr:
-        _link_base_color(mat, color_target, data, color_attr, color_input, alpha_socket)
-    if data.metallic_roughness_texture:
-        _link_metallic_roughness_texture(
-            mat,
-            bsdf,
-            data.metallic_roughness_texture,
-            _texture_info(data, "metallic_roughness"),
-            metallic_factor=data.metallic,
-            roughness_factor=data.roughness,
-        )
-    if data.occlusion_texture and bsdf == color_target:
-        _link_occlusion_texture(mat, bsdf, data, settings_node)
-    if data.normal_texture:
-        _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale, _texture_info(data, "normal"))
-    if data.emissive_texture:
-        _link_emissive_texture(
-            mat,
-            bsdf,
-            data,
-        )
-    if data.transparent_texture and alpha_socket:
-        _link_transparent_texture(mat, alpha_socket, data)
-    if data.specular_texture:
-        if int(data.material_type) == _AK_MATERIAL_SPECULAR_GLOSSINESS:
-            _link_specular_glossiness_texture(mat, bsdf, data)
-        else:
+    global _ACTIVE_SEPARATE_COLOR_CACHE, _ACTIVE_TEXTURE_NODE_CACHE
+    previous_texture_node_cache = _ACTIVE_TEXTURE_NODE_CACHE
+    previous_separate_color_cache = _ACTIVE_SEPARATE_COLOR_CACHE
+    _ACTIVE_TEXTURE_NODE_CACHE = {}
+    _ACTIVE_SEPARATE_COLOR_CACHE = {}
+    try:
+        if data.base_color_texture or color_attr:
+            _link_base_color(mat, color_target, data, color_attr, color_input, alpha_socket)
+        if data.metallic_roughness_texture:
+            _link_metallic_roughness_texture(
+                mat,
+                bsdf,
+                data.metallic_roughness_texture,
+                _texture_info(data, "metallic_roughness"),
+                metallic_factor=data.metallic,
+                roughness_factor=data.roughness,
+            )
+        if data.occlusion_texture and bsdf == color_target:
+            _link_occlusion_texture(mat, bsdf, data, settings_node)
+        if data.normal_texture:
+            _link_normal_texture(mat, bsdf, data.normal_texture, data.normal_scale, _texture_info(data, "normal"))
+        if data.emissive_texture:
+            _link_emissive_texture(
+                mat,
+                bsdf,
+                data,
+            )
+        if data.transparent_texture and alpha_socket:
+            _link_transparent_texture(mat, alpha_socket, data)
+        if data.specular_texture:
+            if int(data.material_type) == _AK_MATERIAL_SPECULAR_GLOSSINESS:
+                _link_specular_glossiness_texture(mat, bsdf, data)
+            else:
+                _link_factor_texture(
+                    mat,
+                    bsdf,
+                    data.specular_texture,
+                    ("Specular IOR Level", "Specular"),
+                    colorspace="Non-Color",
+                    channel="Alpha",
+                    factor=_pbr_specular_level(data),
+                    tex_info=_texture_info(data, "specular"),
+                )
+        if data.specular_color_texture:
+            _link_color_texture(
+                mat,
+                bsdf,
+                data.specular_color_texture,
+                ("Specular Tint",),
+                colorspace="sRGB",
+                factor=(*data.specular_color, 1.0),
+                tex_info=_texture_info(data, "specular_color"),
+            )
+        if data.clearcoat_texture:
             _link_factor_texture(
                 mat,
                 bsdf,
-                data.specular_texture,
-                ("Specular IOR Level", "Specular"),
+                data.clearcoat_texture,
+                ("Coat Weight", "Clearcoat"),
+                colorspace="Non-Color",
+                channel="Red",
+                factor=data.clearcoat,
+                tex_info=_texture_info(data, "clearcoat"),
+            )
+        if data.clearcoat_roughness_texture:
+            _link_factor_texture(
+                mat,
+                bsdf,
+                data.clearcoat_roughness_texture,
+                ("Coat Roughness", "Clearcoat Roughness"),
+                colorspace="Non-Color",
+                channel="Green",
+                factor=data.clearcoat_roughness,
+                tex_info=_texture_info(data, "clearcoat_roughness"),
+            )
+        if data.clearcoat_normal_texture:
+            _link_normal_texture(
+                mat,
+                bsdf,
+                data.clearcoat_normal_texture,
+                data.clearcoat_normal_scale,
+                _texture_info(data, "clearcoat_normal"),
+                input_name="Coat Normal",
+            )
+        if data.transmission_texture:
+            _link_factor_texture(
+                mat,
+                bsdf,
+                data.transmission_texture,
+                ("Transmission Weight", "Transmission"),
+                colorspace="Non-Color",
+                channel="Red",
+                factor=data.transmission,
+                tex_info=_texture_info(data, "transmission"),
+            )
+        if data.sheen_color_texture:
+            _link_color_texture(
+                mat,
+                bsdf,
+                data.sheen_color_texture,
+                ("Sheen Tint",),
+                colorspace="sRGB",
+                factor=(*data.sheen_color, 1.0),
+                tex_info=_texture_info(data, "sheen_color"),
+            )
+        if data.sheen_roughness_texture:
+            _link_factor_texture(
+                mat,
+                bsdf,
+                data.sheen_roughness_texture,
+                ("Sheen Roughness",),
                 colorspace="Non-Color",
                 channel="Alpha",
-                factor=_pbr_specular_level(data),
-                tex_info=_texture_info(data, "specular"),
+                factor=data.sheen_roughness,
+                tex_info=_texture_info(data, "sheen_roughness"),
             )
-    if data.specular_color_texture:
-        _link_color_texture(
-            mat,
-            bsdf,
-            data.specular_color_texture,
-            ("Specular Tint",),
-            colorspace="sRGB",
-            factor=(*data.specular_color, 1.0),
-            tex_info=_texture_info(data, "specular_color"),
-        )
-    if data.clearcoat_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.clearcoat_texture,
-            ("Coat Weight", "Clearcoat"),
-            colorspace="Non-Color",
-            channel="Red",
-            factor=data.clearcoat,
-            tex_info=_texture_info(data, "clearcoat"),
-        )
-    if data.clearcoat_roughness_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.clearcoat_roughness_texture,
-            ("Coat Roughness", "Clearcoat Roughness"),
-            colorspace="Non-Color",
-            channel="Green",
-            factor=data.clearcoat_roughness,
-            tex_info=_texture_info(data, "clearcoat_roughness"),
-        )
-    if data.clearcoat_normal_texture:
-        _link_normal_texture(
-            mat,
-            bsdf,
-            data.clearcoat_normal_texture,
-            data.clearcoat_normal_scale,
-            _texture_info(data, "clearcoat_normal"),
-            input_name="Coat Normal",
-        )
-    if data.transmission_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.transmission_texture,
-            ("Transmission Weight", "Transmission"),
-            colorspace="Non-Color",
-            channel="Red",
-            factor=data.transmission,
-            tex_info=_texture_info(data, "transmission"),
-        )
-    if data.sheen_color_texture:
-        _link_color_texture(
-            mat,
-            bsdf,
-            data.sheen_color_texture,
-            ("Sheen Tint",),
-            colorspace="sRGB",
-            factor=(*data.sheen_color, 1.0),
-            tex_info=_texture_info(data, "sheen_color"),
-        )
-    if data.sheen_roughness_texture:
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.sheen_roughness_texture,
-            ("Sheen Roughness",),
-            colorspace="Non-Color",
-            channel="Alpha",
-            factor=data.sheen_roughness,
-            tex_info=_texture_info(data, "sheen_roughness"),
-        )
-    if data.iridescence_thickness_texture:
-        _link_range_texture(
-            mat,
-            bsdf,
-            data.iridescence_thickness_texture,
-            ("Thin Film Thickness",),
-            colorspace="Non-Color",
-            channel="Green",
-            minimum=data.iridescence_thickness_minimum,
-            maximum=data.iridescence_thickness_maximum,
-            tex_info=_texture_info(data, "iridescence_thickness"),
-        )
-    if data.iridescence_texture:
-        iridescence_inputs = ("Thin Film Weight", "Iridescence Weight", "Iridescence")
-        if _has_input(bsdf, iridescence_inputs):
+        if data.iridescence_thickness_texture:
+            _link_range_texture(
+                mat,
+                bsdf,
+                data.iridescence_thickness_texture,
+                ("Thin Film Thickness",),
+                colorspace="Non-Color",
+                channel="Green",
+                minimum=data.iridescence_thickness_minimum,
+                maximum=data.iridescence_thickness_maximum,
+                tex_info=_texture_info(data, "iridescence_thickness"),
+            )
+        if data.iridescence_texture:
+            iridescence_inputs = ("Thin Film Weight", "Iridescence Weight", "Iridescence")
+            if _has_input(bsdf, iridescence_inputs):
+                _link_factor_texture(
+                    mat,
+                    bsdf,
+                    data.iridescence_texture,
+                    iridescence_inputs,
+                    colorspace="Non-Color",
+                    channel="Red",
+                    factor=data.iridescence,
+                    tex_info=_texture_info(data, "iridescence"),
+                )
+            elif settings_node:
+                _link_factor_texture(
+                    mat,
+                    settings_node,
+                    data.iridescence_texture,
+                    ("Iridescence Factor",),
+                    colorspace="Non-Color",
+                    channel="Red",
+                    factor=data.iridescence,
+                    tex_info=_texture_info(data, "iridescence"),
+                )
+        if data.volume_thickness_texture:
+            volume_inputs = ("Volume Thickness", "Thickness")
+            if _has_input(bsdf, volume_inputs):
+                _link_factor_texture(
+                    mat,
+                    bsdf,
+                    data.volume_thickness_texture,
+                    volume_inputs,
+                    colorspace="Non-Color",
+                    channel="Green",
+                    factor=data.volume_thickness,
+                    tex_info=_texture_info(data, "volume_thickness"),
+                )
+            elif settings_node:
+                _link_factor_texture(
+                    mat,
+                    settings_node,
+                    data.volume_thickness_texture,
+                    ("Thickness",),
+                    colorspace="Non-Color",
+                    channel="Green",
+                    factor=data.volume_thickness,
+                    tex_info=_texture_info(data, "volume_thickness"),
+                )
+        diffuse_transmission_inputs = ("Diffuse Transmission Weight", "Diffuse Transmission")
+        if data.anisotropy_texture:
+            _link_anisotropy_texture(mat, bsdf, data)
+        if data.diffuse_transmission_texture and _has_input(bsdf, diffuse_transmission_inputs):
             _link_factor_texture(
                 mat,
                 bsdf,
-                data.iridescence_texture,
-                iridescence_inputs,
+                data.diffuse_transmission_texture,
+                diffuse_transmission_inputs,
                 colorspace="Non-Color",
-                channel="Red",
-                factor=data.iridescence,
-                tex_info=_texture_info(data, "iridescence"),
+                channel="Alpha",
+                factor=data.diffuse_transmission,
+                tex_info=_texture_info(data, "diffuse_transmission"),
             )
-        elif settings_node:
-            _link_factor_texture(
-                mat,
-                settings_node,
-                data.iridescence_texture,
-                ("Iridescence Factor",),
-                colorspace="Non-Color",
-                channel="Red",
-                factor=data.iridescence,
-                tex_info=_texture_info(data, "iridescence"),
-            )
-    if data.volume_thickness_texture:
-        volume_inputs = ("Volume Thickness", "Thickness")
-        if _has_input(bsdf, volume_inputs):
-            _link_factor_texture(
+        if data.diffuse_transmission_color_texture and _has_input(bsdf, ("Diffuse Transmission Color",)):
+            _link_color_texture(
                 mat,
                 bsdf,
-                data.volume_thickness_texture,
-                volume_inputs,
-                colorspace="Non-Color",
-                channel="Green",
-                factor=data.volume_thickness,
-                tex_info=_texture_info(data, "volume_thickness"),
+                data.diffuse_transmission_color_texture,
+                ("Diffuse Transmission Color",),
+                colorspace="sRGB",
+                factor=(*data.diffuse_transmission_color, 1.0),
+                tex_info=_texture_info(data, "diffuse_transmission_color"),
             )
-        elif settings_node:
-            _link_factor_texture(
-                mat,
-                settings_node,
-                data.volume_thickness_texture,
-                ("Thickness",),
-                colorspace="Non-Color",
-                channel="Green",
-                factor=data.volume_thickness,
-                tex_info=_texture_info(data, "volume_thickness"),
-            )
-    diffuse_transmission_inputs = ("Diffuse Transmission Weight", "Diffuse Transmission")
-    if data.anisotropy_texture:
-        _link_anisotropy_texture(mat, bsdf, data)
-    if data.diffuse_transmission_texture and _has_input(bsdf, diffuse_transmission_inputs):
-        _link_factor_texture(
-            mat,
-            bsdf,
-            data.diffuse_transmission_texture,
-            diffuse_transmission_inputs,
-            colorspace="Non-Color",
-            channel="Alpha",
-            factor=data.diffuse_transmission,
-            tex_info=_texture_info(data, "diffuse_transmission"),
-        )
-    if data.diffuse_transmission_color_texture and _has_input(bsdf, ("Diffuse Transmission Color",)):
-        _link_color_texture(
-            mat,
-            bsdf,
-            data.diffuse_transmission_color_texture,
-            ("Diffuse Transmission Color",),
-            colorspace="sRGB",
-            factor=(*data.diffuse_transmission_color, 1.0),
-            tex_info=_texture_info(data, "diffuse_transmission_color"),
-        )
-    if _has_diffuse_transmission(data) and not _has_input(bsdf, diffuse_transmission_inputs):
-        _link_diffuse_transmission_shader(mat, data)
-    if data.volume_thickness > 0.0:
-        _link_volume_absorption(mat, data)
-    if _has_volume_scatter(data):
-        _link_volume_scatter(mat, data)
+        if _has_diffuse_transmission(data) and not _has_input(bsdf, diffuse_transmission_inputs):
+            _link_diffuse_transmission_shader(mat, data)
+        if data.volume_thickness > 0.0:
+            _link_volume_absorption(mat, data)
+        if _has_volume_scatter(data):
+            _link_volume_scatter(mat, data)
+    finally:
+        _ACTIVE_TEXTURE_NODE_CACHE = previous_texture_node_cache
+        _ACTIVE_SEPARATE_COLOR_CACHE = previous_separate_color_cache
 
     _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket, settings_node)
 
@@ -7746,8 +7757,9 @@ def _link_anisotropy_texture(
     if not tex:
         return
 
-    separate = mat.node_tree.nodes.new("ShaderNodeSeparateColor")
-    mat.node_tree.links.new(tex.outputs["Color"], separate.inputs["Color"])
+    separate = _separate_color_node(mat, tex.outputs["Color"])
+    if not separate:
+        return
 
     strength = separate.outputs.get("Blue")
     if strength:
@@ -7885,6 +7897,13 @@ def _image_texture_node(
     tex_info: TextureRefData | None = None,
 ):
     colorspace = _texture_color_space(tex_info, colorspace)
+    cache_key = _texture_node_cache_key(path, colorspace, tex_info)
+    if _ACTIVE_TEXTURE_NODE_CACHE is not None and cache_key is not None:
+        tex = _ACTIVE_TEXTURE_NODE_CACHE.get(cache_key)
+        if _node_is_alive(mat, tex):
+            _append_texture_node_role(tex, tex_info)
+            return tex
+
     image = _load_texture_image(path, colorspace)
     if not image:
         return None
@@ -7909,7 +7928,73 @@ def _image_texture_node(
         _set_assetkit_json_prop(tex, "assetkit_texture_image_extra_json", tex_info.image_extra)
         _set_assetkit_json_prop(tex, "assetkit_texture_sampler_extra_json", tex_info.sampler_extra)
     _configure_texture_node(mat, tex, tex_info)
+    if _ACTIVE_TEXTURE_NODE_CACHE is not None and cache_key is not None:
+        _ACTIVE_TEXTURE_NODE_CACHE[cache_key] = tex
     return tex
+
+
+def _texture_node_cache_key(path: str, colorspace: str, tex_info: TextureRefData | None) -> object | None:
+    if tex_info and (tex_info.texture_extra or tex_info.texref_extra or tex_info.image_extra or tex_info.sampler_extra):
+        return None
+
+    try:
+        source_path = os.path.abspath(os.fspath(path))
+    except Exception:
+        return None
+
+    if tex_info is None:
+        return (source_path, colorspace, 0, 1, 1, 0, 0, 0, False)
+
+    transform = None
+    if tex_info.has_transform:
+        transform = (
+            float(tex_info.transform_offset[0]),
+            float(tex_info.transform_offset[1]),
+            float(tex_info.transform_scale[0]),
+            float(tex_info.transform_scale[1]),
+            float(tex_info.transform_rotation),
+        )
+
+    return (
+        source_path,
+        colorspace,
+        _texture_uv_slot(tex_info),
+        int(tex_info.wrap_s),
+        int(tex_info.wrap_t),
+        int(tex_info.min_filter),
+        int(tex_info.mag_filter),
+        int(tex_info.mip_filter),
+        transform,
+    )
+
+
+def _append_texture_node_role(tex, tex_info: TextureRefData | None) -> None:
+    if not tex_info or not tex_info.role:
+        return
+    try:
+        roles = str(tex.get("assetkit_texture_roles") or tex.get("assetkit_texture_role") or "")
+        if tex_info.role not in {role for role in roles.split(",") if role}:
+            tex["assetkit_texture_roles"] = f"{roles},{tex_info.role}" if roles else tex_info.role
+    except Exception:
+        pass
+
+
+def _node_is_alive(mat: bpy.types.Material, node) -> bool:
+    if node is None:
+        return False
+    try:
+        return mat.node_tree.nodes.get(node.name) == node
+    except ReferenceError:
+        return False
+    except Exception:
+        return False
+
+
+def _socket_cache_key(socket) -> int:
+    try:
+        return int(socket.as_pointer())
+    except Exception:
+        return 0
 
 
 def _texture_color_space(tex_info: TextureRefData | None, fallback: str) -> str:
@@ -8108,12 +8193,29 @@ def _separate_color_channel(
     if color_output is None:
         return None
 
+    separate = _separate_color_node(mat, color_output)
+    if separate:
+        return separate.outputs.get(channel)
+    return color_output
+
+
+def _separate_color_node(mat: bpy.types.Material, color_output):
+    global _ACTIVE_SEPARATE_COLOR_CACHE
+    cache_key = _socket_cache_key(color_output)
+    if _ACTIVE_SEPARATE_COLOR_CACHE is not None and cache_key:
+        separate = _ACTIVE_SEPARATE_COLOR_CACHE.get(cache_key)
+        if _node_is_alive(mat, separate):
+            return separate
+
     try:
         separate = mat.node_tree.nodes.new("ShaderNodeSeparateColor")
         mat.node_tree.links.new(color_output, separate.inputs["Color"])
-        return separate.outputs.get(channel)
     except Exception:
-        return color_output
+        return None
+
+    if _ACTIVE_SEPARATE_COLOR_CACHE is not None and cache_key:
+        _ACTIVE_SEPARATE_COLOR_CACHE[cache_key] = separate
+    return separate
 
 
 def _configure_texture_node(mat: bpy.types.Material, tex, tex_info: TextureRefData | None) -> None:
