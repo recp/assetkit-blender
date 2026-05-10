@@ -316,6 +316,7 @@ typedef struct AkbPrimitive {
   int32_t  *loop_starts;
   int32_t  *loop_totals;
   float   *normals;
+  float   *vertex_normals;
   float   *uvs;
   float   *colors;
   float   *tangents;
@@ -383,6 +384,7 @@ typedef struct AkbPrimitive {
   uint32_t skin_joint_count;
   uint32_t skin_joint_width;
   uint8_t  has_normals;
+  uint8_t  has_vertex_normals;
   uint8_t  has_uvs;
   uint8_t  has_colors;
   uint8_t  has_tangents;
@@ -398,6 +400,7 @@ typedef struct AkbPrimitive {
   uint8_t  borrowed_vertices;
   uint8_t  borrowed_indices;
   uint8_t  borrowed_normals;
+  uint8_t  borrowed_vertex_normals;
   uint8_t  borrowed_tangents;
   uint8_t  arena_vertices;
   uint8_t  arena_indices;
@@ -564,6 +567,7 @@ typedef enum AkbPySimplePrimitiveField {
   AKB_PY_SIMPLE_LOOP_STARTS_I32,
   AKB_PY_SIMPLE_LOOP_TOTALS_I32,
   AKB_PY_SIMPLE_NORMALS_F32,
+  AKB_PY_SIMPLE_VERTEX_NORMALS_F32,
   AKB_PY_SIMPLE_TANGENTS_F32,
   AKB_PY_SIMPLE_FIELD_COUNT
 } AkbPySimplePrimitiveField;
@@ -688,6 +692,7 @@ typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_LOOP_STARTS_I32,
   AKB_PY_PRIM_LOOP_TOTALS_I32,
   AKB_PY_PRIM_NORMALS_F32,
+  AKB_PY_PRIM_VERTEX_NORMALS_F32,
   AKB_PY_PRIM_UVS_F32,
   AKB_PY_PRIM_COLORS_F32,
   AKB_PY_PRIM_TANGENTS_F32,
@@ -1060,6 +1065,8 @@ akb_primitive_free(AkbPrimitive *prim) {
     free(prim->loop_meta);
   if (!prim->borrowed_normals)
     free(prim->normals);
+  if (!prim->borrowed_vertex_normals)
+    free(prim->vertex_normals);
   for (i = 0; i < prim->uv_set_count; i++)
     if (!prim->uv_sets[i].borrowed)
       free(prim->uv_sets[i].values);
@@ -2429,6 +2436,53 @@ akb_loop_attribute_copy(AkMeshPrimitive *prim,
   free(values);
   *has_attr = 1;
   return out;
+}
+
+static void
+akb_try_extract_vertex_normals(AkbPrimitive *out,
+                               AkInput *normal_input,
+                               AkInput *pos_input,
+                               AkbSharedDoc *doc_owner,
+                               const AkNode *node) {
+  uint32_t normal_count = 0;
+
+  if (!out
+      || !normal_input
+      || !normal_input->accessor
+      || !pos_input
+      || !pos_input->accessor
+      || (node && node->geometry && node->geometry->skinner))
+    return;
+
+  if (normal_input->offset != pos_input->offset)
+    return;
+
+  out->vertex_normals = akb_accessor_float_borrow(normal_input->accessor,
+                                                  3,
+                                                  &normal_count);
+  if (out->vertex_normals) {
+    out->borrowed_vertex_normals = 1;
+    out->zero_copy_flags |= 4;
+    akb_primitive_retain_doc(out, doc_owner);
+  } else {
+    out->vertex_normals = akb_accessor_float_copy(normal_input->accessor,
+                                                  3,
+                                                  &normal_count);
+  }
+
+  if (!out->vertex_normals)
+    return;
+
+  if (normal_count == out->vertex_count) {
+    out->has_vertex_normals = 1;
+    return;
+  }
+
+  if (!out->borrowed_vertex_normals)
+    free(out->vertex_normals);
+  out->vertex_normals = NULL;
+  out->borrowed_vertex_normals = 0;
+  out->zero_copy_flags &= (uint8_t)~4u;
 }
 
 static int
@@ -6067,6 +6121,12 @@ akb_extract_primitive(AkbArena *arena,
                                           3,
                                           0,
                                           &out.has_normals);
+    if (out.has_normals)
+      akb_try_extract_vertex_normals(&out,
+                                     normal_input,
+                                     pos_input,
+                                     doc_owner,
+                                     node);
 
     if (!akb_extract_loop_float_attrs(&out,
                                       prim,
@@ -6320,6 +6380,7 @@ akb_primitive_clone_shared(AkbPrimitive *dst,
   dst->borrowed_vertices = src->vertices != NULL;
   dst->borrowed_indices = src->indices != NULL;
   dst->borrowed_normals = src->normals != NULL;
+  dst->borrowed_vertex_normals = src->vertex_normals != NULL;
   dst->borrowed_tangents = src->tangents != NULL;
   dst->arena_vertices = 0;
   dst->arena_indices = 0;
@@ -7560,6 +7621,13 @@ akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
                                            * 3
                                            * sizeof(float)
                                          : 0));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_VERTEX_NORMALS_F32,
+                 akb_memoryview_or_empty(prim->vertex_normals,
+                                         prim->has_vertex_normals
+                                         ? (size_t)prim->vertex_count
+                                           * 3
+                                           * sizeof(float)
+                                         : 0));
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_TANGENTS_F32,
                  akb_memoryview_or_empty(prim->tangents,
                                          prim->has_tangents
@@ -7986,6 +8054,11 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
               akb_memoryview_or_empty(prim->normals,
                                       prim->has_normals
                                       ? (size_t)prim->loop_count * 3 * sizeof(float)
+                                      : 0));
+  AKB_SET_OBJ(AKB_PY_PRIM_VERTEX_NORMALS_F32,
+              akb_memoryview_or_empty(prim->vertex_normals,
+                                      prim->has_vertex_normals
+                                      ? (size_t)prim->vertex_count * 3 * sizeof(float)
                                       : 0));
   AKB_SET_OBJ(AKB_PY_PRIM_UVS_F32,
               akb_memoryview_or_empty(prim->uvs,

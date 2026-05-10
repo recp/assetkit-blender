@@ -276,6 +276,7 @@ class MeshPrimitiveData:
     loop_starts_i32: object = b""
     loop_totals_i32: object = b""
     normals_f32: object = b""
+    vertex_normals_f32: object = b""
     uvs_f32: object = b""
     colors_f32: object = b""
     tangents_f32: object = b""
@@ -1062,8 +1063,9 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     _S_LOOP_STARTS_I32,
     _S_LOOP_TOTALS_I32,
     _S_NORMALS_F32,
+    _S_VERTEX_NORMALS_F32,
     _S_TANGENTS_F32,
-) = range(24)
+) = range(25)
 
 (
     _M_OWNER,
@@ -1185,6 +1187,7 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     _M_LOOP_STARTS_I32,
     _M_LOOP_TOTALS_I32,
     _M_NORMALS_F32,
+    _M_VERTEX_NORMALS_F32,
     _M_UVS_F32,
     _M_COLORS_F32,
     _M_TANGENTS_F32,
@@ -1193,7 +1196,7 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     _M_SKIN_JOINT_NODES_I32,
     _M_SKIN_INVERSE_BIND_MATRICES_F32,
     _M_SKIN_BIND_SHAPE_MATRIX_F32,
-) = range(127)
+) = range(128)
 
 _M_FIELD_NAMES = (
     "_owner",
@@ -1315,6 +1318,7 @@ _M_FIELD_NAMES = (
     "loop_starts_i32",
     "loop_totals_i32",
     "normals_f32",
+    "vertex_normals_f32",
     "uvs_f32",
     "colors_f32",
     "tangents_f32",
@@ -1359,6 +1363,7 @@ def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
         data.loop_starts_i32 = item[_S_LOOP_STARTS_I32] or b""
         data.loop_totals_i32 = item[_S_LOOP_TOTALS_I32] or b""
         data.normals_f32 = item[_S_NORMALS_F32] or b""
+        data.vertex_normals_f32 = item[_S_VERTEX_NORMALS_F32] or b""
         data.tangents_f32 = item[_S_TANGENTS_F32] or b""
         data.object_name = item[_S_OBJECT_NAME] or ""
         data.matrix_f32 = item[_S_MATRIX_F32] or b""
@@ -1386,6 +1391,7 @@ def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
     data.loop_starts_i32 = get("loop_starts_i32") or b""
     data.loop_totals_i32 = get("loop_totals_i32") or b""
     data.normals_f32 = get("normals_f32") or b""
+    data.vertex_normals_f32 = get("vertex_normals_f32") or b""
     data.uvs_f32 = get("uvs_f32") or b""
     data.colors_f32 = get("colors_f32") or b""
     data.tangents_f32 = get("tangents_f32") or b""
@@ -1508,6 +1514,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 loop_starts_i32=get(_M_LOOP_STARTS_I32) or b"",
                 loop_totals_i32=get(_M_LOOP_TOTALS_I32) or b"",
                 normals_f32=get(_M_NORMALS_F32) or b"",
+                vertex_normals_f32=get(_M_VERTEX_NORMALS_F32) or b"",
                 uvs_f32=get(_M_UVS_F32) or b"",
                 colors_f32=get(_M_COLORS_F32) or b"",
                 tangents_f32=get(_M_TANGENTS_F32) or b"",

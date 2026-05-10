@@ -137,13 +137,18 @@ _GLTF_SETTINGS_SOCKETS = (
     ("Iridescence Factor", 0.0),
     ("Iridescence Thickness Minimum", 100.0),
 )
+_GLTF_SETTINGS_GROUP_CACHE = None
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_FIRST_BATCH_SIZE = 8
 _PROGRESSIVE_TIME_BUDGET = 0.025
+_DEFERRED_NORMAL_TIME_BUDGET = 0.006
 _ACTIVE_IMPORT_JOBS: list["_ProgressiveImportJob"] = []
+_DEFERRED_NORMAL_TASKS: deque[tuple[bpy.types.Mesh, object, object | None, object | None]] = deque()
+_DEFERRED_NORMAL_TIMER_ACTIVE = False
 _ACTION_CHANNELBAGS: dict[tuple[int, int], tuple[object, object]] = {}
 _ACTION_CHANNEL_GROUPS: dict[tuple[int, str], object] = {}
 _IMPORT_SHARED_ACTIONS: dict[tuple[int, str, str], bpy.types.Action] = {}
+_ACTION_FRAME_RANGES: dict[int, tuple[float, float]] = {}
 _KEYFRAME_ENUM_VALUES: dict[tuple[str, str], int] = {}
 _KEYFRAME_ENUM_ARRAYS: dict[tuple[int, int], array] = {}
 _BOOL_ARRAYS: dict[tuple[int, int], array] = {}
@@ -193,7 +198,8 @@ _CH_KEYS = (
     _S_SKIN_ANIMATION_DEFERRED,
     _S_DEFERRED_SKIN_ANIMATIONS,
     _S_MESH_CACHE_HITS,
-) = range(13)
+    _S_DEFER_CUSTOM_NORMALS,
+) = range(14)
 
 
 def import_assetkit_file(
@@ -214,6 +220,7 @@ def import_assetkit_file(
     existing_actions = _snapshot_actions(fit_timeline)
     texture_load_mode = _texture_load_mode(load_options)
     profile_detail = _profile_enabled()
+    defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
     total_started_at = time.perf_counter() if profile_detail else 0.0
     load_started_at = total_started_at
     primitives, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
@@ -236,6 +243,7 @@ def import_assetkit_file(
         scene_extra,
         scene_info,
         doc_images,
+        defer_custom_normals=defer_custom_normals,
     )
     if profile_detail:
         _profile_log(
@@ -388,6 +396,17 @@ def _texture_load_mode(load_options: dict | None) -> str:
     return "IMMEDIATE"
 
 
+def _defer_custom_normals(load_options: dict | None, shading_mode: str) -> bool:
+    if bpy.app.background or str(shading_mode or "AUTO").upper() != "AUTO":
+        return False
+
+    value = (load_options or {}).get("defer_custom_normals", "AUTO")
+    if isinstance(value, bool):
+        return value
+    mode = str(value or "AUTO").upper()
+    return mode not in {"0", "FALSE", "IMMEDIATE", "NO", "OFF"}
+
+
 def _scene_info_from_loaded(loaded: object | None) -> dict:
     if not loaded:
         return {}
@@ -408,6 +427,7 @@ def _begin_scene_build(
     scene_info: dict | None = None,
     doc_images: list[dict] | None = None,
     apply_node_animation: bool = True,
+    defer_custom_normals: bool = False,
 ) -> dict:
     profile_detail = _profile_enabled()
     started_at = time.perf_counter() if profile_detail else 0.0
@@ -422,6 +442,7 @@ def _begin_scene_build(
     visibility_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
     node_animation_skip_indices = _skinned_node_animation_skip_indices(primitives)
+    required_node_indices = _required_scene_node_indices(primitives, scene_nodes)
     node_objects = _create_scene_nodes(
         scene_nodes,
         coord_root,
@@ -429,6 +450,7 @@ def _begin_scene_build(
         node_object_visibility,
         apply_animation=apply_node_animation,
         skip_animation_nodes=node_animation_skip_indices,
+        required_indices=required_node_indices,
     )
     nodes_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     if profile_detail:
@@ -438,7 +460,8 @@ def _begin_scene_build(
             f"coord_root={coord_ms:.3f}ms "
             f"visibility={visibility_ms:.3f}ms "
             f"create_nodes={nodes_ms:.3f}ms "
-            f"nodes={len(scene_nodes)}"
+            f"nodes={len(scene_nodes)} "
+            f"created_nodes={len(node_objects)}"
         )
     return {
         _S_COORD_ROOT: coord_root,
@@ -454,6 +477,7 @@ def _begin_scene_build(
         _S_SKIN_ANIMATION_DEFERRED: not apply_node_animation,
         _S_DEFERRED_SKIN_ANIMATIONS: [],
         _S_MESH_CACHE_HITS: 0,
+        _S_DEFER_CUSTOM_NORMALS: defer_custom_normals,
     }
 
 
@@ -703,6 +727,7 @@ def _create_import_object(
         apply_skin_animation=not bool(state[_S_SKIN_ANIMATION_DEFERRED]),
         deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
         shading_mode=shading_mode,
+        defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
         collection=collection,
     )
     if mesh_cache is not None and len(objects) == 1 and isinstance(objects[0].data, bpy.types.Mesh):
@@ -748,6 +773,7 @@ def _create_grouped_mesh_object(
     indices = bytearray(total_loop_count * 4)
     loop_starts = bytearray(total_face_count * 4)
     normals = bytearray(total_loop_count * 3 * 4) if first.normals_f32 else None
+    vertex_normals = bytearray(total_vertex_count * 3 * 4) if first.vertex_normals_f32 else None
     tangents = bytearray(total_loop_count * 4 * 4) if first.tangents_f32 else None
     skin_joints = bytearray(total_vertex_count * skin_joint_width * 2) if first.has_skin else None
     skin_weights = bytearray(total_vertex_count * skin_joint_width * 4) if first.has_skin else None
@@ -802,6 +828,10 @@ def _create_grouped_mesh_object(
             view = _buffer_view(primitive.normals_f32, "f")
             if view is not None:
                 _copy_buffer_bytes(normals, loop_offset * 3 * 4, view, "f")
+        if vertex_normals is not None:
+            view = _buffer_view(primitive.vertex_normals_f32, "f")
+            if view is not None:
+                _copy_buffer_bytes(vertex_normals, vertex_offset * 3 * 4, view, "f")
         if tangents is not None:
             view = _buffer_view(primitive.tangents_f32, "f")
             if view is not None:
@@ -831,6 +861,7 @@ def _create_grouped_mesh_object(
         loop_starts_i32=loop_starts,
         loop_totals_i32=b"",
         normals_f32=normals or b"",
+        vertex_normals_f32=vertex_normals or b"",
         tangents_f32=tangents or b"",
         uv_sets=uv_sets,
         color_sets=color_sets,
@@ -857,6 +888,7 @@ def _create_grouped_mesh_object(
         deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
         has_materials=has_materials,
         shading_mode=shading_mode,
+        defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
         collection=collection,
     )
     if profile_detail:
@@ -929,6 +961,7 @@ def _create_grouped_mesh_object_bulk(
     deferred_skin_animations: list | None = None,
     has_materials: bool = True,
     shading_mode: str = "AUTO",
+    defer_custom_normals: bool = False,
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
     total_started_at = time.perf_counter()
@@ -1004,14 +1037,17 @@ def _create_grouped_mesh_object_bulk(
         phase_started_at = now
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
-    shading_done = _apply_shading(mesh, shading_mode, normals)
+    vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
+    shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     mesh.update(calc_edges=True)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"update={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
+    if not shading_done and defer_custom_normals:
+        shading_done = _queue_deferred_custom_normals(mesh, normals, vertex_normals, data)
     if not shading_done:
-        _apply_shading(mesh, shading_mode, normals)
+        _apply_shading(mesh, shading_mode, normals, vertex_normals, smooth_already=True)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"shading={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -1141,6 +1177,7 @@ def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
         int(primitive.skin_joint_width),
         bool(primitive.skin_mesh_in_bind_pose),
         bool(primitive.normals_f32),
+        bool(primitive.vertex_normals_f32),
         bool(primitive.tangents_f32),
         uv_sig,
         color_sig,
@@ -1174,6 +1211,7 @@ def _mesh_data_reuse_key(primitive: MeshPrimitiveData, shading_mode: str) -> tup
         int(primitive.loop_count),
         int(primitive.face_count),
         bool(primitive.normals_f32),
+        bool(primitive.vertex_normals_f32),
         bool(primitive.tangents_f32),
         _loop_attr_signature(primitive.uv_sets),
         _loop_attr_signature(primitive.color_sets),
@@ -1283,6 +1321,12 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
     if existing_actions is None:
         return
 
+    if _ACTION_FRAME_RANGES:
+        min_frame = min(frame_range[0] for frame_range in _ACTION_FRAME_RANGES.values())
+        max_frame = max(frame_range[1] for frame_range in _ACTION_FRAME_RANGES.values())
+        _set_scene_frame_range(min_frame, max_frame)
+        return
+
     min_frame: float | None = None
     max_frame: float | None = None
     for action in bpy.data.actions:
@@ -1298,13 +1342,24 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
     if min_frame is None or max_frame is None:
         return
 
+    _set_scene_frame_range(min_frame, max_frame)
+
+
+def _set_scene_frame_range(min_frame: float, max_frame: float) -> None:
     scene = bpy.context.scene
     scene.frame_start = int(math.floor(max(0.0, min_frame)))
     scene.frame_end = max(scene.frame_start + 1, int(math.ceil(max_frame)))
-    scene.frame_set(scene.frame_start)
+    try:
+        scene.frame_current = scene.frame_start
+    except Exception:
+        pass
 
 
 def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
+    cached = _ACTION_FRAME_RANGES.get(action.as_pointer())
+    if cached is not None:
+        return cached
+
     for attr in ("curve_frame_range", "frame_range"):
         value = getattr(action, attr, None)
         if value is None:
@@ -1794,6 +1849,7 @@ class _ProgressiveImportJob:
         self.stream = stream
         self.prefer_grouped = prefer_grouped
         self.texture_load_mode = _texture_load_mode(load_options)
+        self.defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
         self.scene_nodes: list[SceneNodeData] = []
         self.doc_extra: object | None = getattr(stream, "doc_extra", None)
         self.scene_extra: object | None = getattr(stream, "scene_extra", None)
@@ -1929,6 +1985,7 @@ class _ProgressiveImportJob:
                 self.scene_info,
                 self.doc_images,
                 apply_node_animation=False,
+                defer_custom_normals=self.defer_custom_normals,
             )
             if self.profile_detail:
                 _profile_log(
@@ -2167,6 +2224,7 @@ def _create_mesh_object(
     apply_skin_animation: bool = True,
     deferred_skin_animations: list | None = None,
     shading_mode: str = "AUTO",
+    defer_custom_normals: bool = False,
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
     if data.vertices_f32 and data.indices_u32:
@@ -2183,6 +2241,7 @@ def _create_mesh_object(
             apply_skin_animation=apply_skin_animation,
             deferred_skin_animations=deferred_skin_animations,
             shading_mode=shading_mode,
+            defer_custom_normals=defer_custom_normals,
             collection=collection,
         )
 
@@ -2195,7 +2254,9 @@ def _create_mesh_object(
         for loop_index, uv in enumerate(data.uvs[: len(mesh.loops)]):
             uv_layer.data[loop_index].uv = (uv[0], 1.0 - uv[1])
 
-    _apply_shading(mesh, shading_mode, data.normals[: len(mesh.loops)] if data.normals else None)
+    normals = data.normals[: len(mesh.loops)] if data.normals else None
+    if not (defer_custom_normals and _queue_deferred_custom_normals(mesh, normals, None, data)):
+        _apply_shading(mesh, shading_mode, normals)
     return _finish_mesh_object(
         mesh,
         data,
@@ -2227,6 +2288,7 @@ def _create_mesh_object_bulk(
     apply_skin_animation: bool = True,
     deferred_skin_animations: list | None = None,
     shading_mode: str = "AUTO",
+    defer_custom_normals: bool = False,
     collection: bpy.types.Collection | None = None,
 ) -> list[bpy.types.Object]:
     if data.primitive_type == AK_PRIMITIVE_LINES:
@@ -2320,10 +2382,13 @@ def _create_mesh_object_bulk(
                 _apply_split_attribute(mesh, "assetkit_tangent", tangents, ("x", "y", "z", "w"), "CORNER")
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
-    shading_done = _apply_shading(mesh, shading_mode, normals)
+    vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
+    shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     mesh.update(calc_edges=True)
+    if not shading_done and defer_custom_normals:
+        shading_done = _queue_deferred_custom_normals(mesh, normals, vertex_normals, data)
     if not shading_done:
-        _apply_shading(mesh, shading_mode, normals)
+        _apply_shading(mesh, shading_mode, normals, vertex_normals, smooth_already=True)
     return _finish_mesh_object(
         mesh,
         data,
@@ -2688,10 +2753,62 @@ def _set_mesh_material_indices(mesh: bpy.types.Mesh, material_indices: object) -
     mesh.polygons.foreach_set("material_index", values)
 
 
+def _queue_deferred_custom_normals(
+    mesh: bpy.types.Mesh,
+    normals: object | None,
+    vertex_normals: object | None,
+    owner: object | None,
+) -> bool:
+    if normals is None or bpy.app.background:
+        return False
+
+    _set_mesh_smooth(mesh, True)
+    _DEFERRED_NORMAL_TASKS.append((mesh, normals, vertex_normals, owner))
+    global _DEFERRED_NORMAL_TIMER_ACTIVE
+    if not _DEFERRED_NORMAL_TIMER_ACTIVE:
+        _DEFERRED_NORMAL_TIMER_ACTIVE = True
+        bpy.app.timers.register(_deferred_custom_normals_timer, first_interval=0.001)
+    return True
+
+
+def _deferred_custom_normals_timer() -> float | None:
+    started_at = time.perf_counter()
+    processed = 0
+    profile_detail = _profile_enabled()
+
+    while _DEFERRED_NORMAL_TASKS:
+        mesh, normals, vertex_normals, _owner = _DEFERRED_NORMAL_TASKS.popleft()
+        try:
+            if bpy.data.meshes.get(mesh.name) is mesh:
+                _apply_shading(mesh, "AUTO", normals, vertex_normals, smooth_already=True)
+                processed += 1
+        except Exception:
+            pass
+        if time.perf_counter() - started_at >= _DEFERRED_NORMAL_TIME_BUDGET:
+            break
+
+    if profile_detail and processed:
+        _profile_log(
+            "deferred_custom_normals "
+            f"meshes={processed} remaining={len(_DEFERRED_NORMAL_TASKS)} "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+
+    if _DEFERRED_NORMAL_TASKS:
+        return 0.001
+
+    global _DEFERRED_NORMAL_TIMER_ACTIVE
+    _DEFERRED_NORMAL_TIMER_ACTIVE = False
+    return None
+
+
 def _apply_shading(
     mesh: bpy.types.Mesh,
     mode: str,
     normals: object | None,
+    vertex_normals: object | None = None,
+    apply_custom_normals: bool = True,
+    smooth_already: bool = False,
 ) -> bool:
     if mode == "FLAT":
         _set_mesh_smooth(mesh, False)
@@ -2704,15 +2821,23 @@ def _apply_shading(
         _set_mesh_smooth(mesh, False)
         return True
 
+    if not apply_custom_normals:
+        _set_mesh_smooth(mesh, True)
+        return False
+
     try:
-        if isinstance(normals, memoryview):
+        if vertex_normals is not None:
+            mesh.normals_split_custom_set_from_vertices(vertex_normals)
+        elif isinstance(normals, memoryview):
             mesh.corner_normals.foreach_set("vector", normals)
         else:
             mesh.normals_split_custom_set(normals)
-        _set_mesh_smooth(mesh, True)
+        if not smooth_already:
+            _set_mesh_smooth(mesh, True)
         return True
     except Exception:
-        _set_mesh_smooth(mesh, True)
+        if not smooth_already:
+            _set_mesh_smooth(mesh, True)
         return False
 
 
@@ -2763,6 +2888,7 @@ def _create_scene_nodes(
     node_visibility: dict[int, bool] | None = None,
     apply_animation: bool = True,
     skip_animation_nodes: set[int] | None = None,
+    required_indices: set[int] | None = None,
 ) -> dict[int, bpy.types.Object]:
     objects: dict[int, bpy.types.Object] = {}
     node_lookup = {index: node for index, node in enumerate(nodes)}
@@ -2771,6 +2897,8 @@ def _create_scene_nodes(
     create_started_at = time.perf_counter() if profile_detail else 0.0
 
     for index, node in enumerate(nodes):
+        if required_indices is not None and index not in required_indices:
+            continue
         obj = _new_scene_node_object(node, index, (node_visibility or {}).get(index, node.visible))
         collection.objects.link(obj)
         objects[index] = obj
@@ -2779,8 +2907,8 @@ def _create_scene_nodes(
     bind_started_at = time.perf_counter() if profile_detail else 0.0
     animation_ms = 0.0
     visibility_anim_ms = 0.0
-    for index, node in enumerate(nodes):
-        obj = objects[index]
+    for index, obj in objects.items():
+        node = nodes[index]
         parent = objects.get(node.parent_index) if node.parent_index >= 0 else coord_root
         _set_parent(obj, parent)
         _apply_matrix_buffer(obj, node.matrix_f32)
@@ -2806,15 +2934,68 @@ def _create_scene_nodes(
             f"animation={animation_ms:.3f}ms "
             f"visibility_animation={visibility_anim_ms:.3f}ms "
             f"nodes={len(nodes)} "
+            f"created={len(objects)} "
             f"skip_animation={len(skip_animation_nodes)} "
             f"apply_animation={apply_animation}"
         )
     return objects
 
 
+def _required_scene_node_indices(
+    primitives: list[MeshPrimitiveData],
+    nodes: list[SceneNodeData],
+) -> set[int] | None:
+    if not nodes:
+        return None
+
+    required: set[int] = set()
+    for primitive in primitives:
+        _add_node_ancestors(required, nodes, int(primitive.node_index))
+
+        if primitive.has_skin:
+            _add_node_ancestors(required, nodes, int(primitive.skin_root_node_index))
+            joint_nodes = _buffer_view(primitive.skin_joint_nodes_i32, "i")
+            if joint_nodes is not None:
+                count = min(len(joint_nodes), int(primitive.skin_joint_count))
+                for index in range(count):
+                    _add_node_ancestors(required, nodes, int(joint_nodes[index]))
+
+    for index, node in enumerate(nodes):
+        if _scene_node_has_required_payload(node):
+            _add_node_ancestors(required, nodes, index)
+
+    if len(required) >= len(nodes):
+        return None
+    return required
+
+
+def _add_node_ancestors(required: set[int], nodes: list[SceneNodeData], node_index: int) -> None:
+    count = len(nodes)
+    seen: set[int] = set()
+    current = node_index
+    while 0 <= current < count and current not in seen:
+        seen.add(current)
+        required.add(current)
+        current = nodes[current].parent_index
+
+
+def _scene_node_has_required_payload(node: SceneNodeData) -> bool:
+    return bool(
+        node.anim_count
+        or node.anim_channels
+        or node.camera_type
+        or node.light_type
+        or node.layers
+        or node.extra
+        or node.camera_extra
+        or node.camera_imager_extra
+        or node.light_extra
+    )
+
+
 def _skinned_node_animation_skip_indices(primitives: list[MeshPrimitiveData]) -> set[int]:
     skip: set[int] = set()
-    _mark_skinned_node_animation_skip({"node_animation_skip_indices": skip}, primitives)
+    _mark_skinned_node_animation_skip({_S_NODE_ANIMATION_SKIP_INDICES: skip}, primitives)
     return skip
 
 
@@ -2822,7 +3003,10 @@ def _mark_skinned_node_animation_skip(state: dict | None, primitives: list[MeshP
     if not state:
         return
 
-    skip = state.setdefault("node_animation_skip_indices", set())
+    skip = state.get(_S_NODE_ANIMATION_SKIP_INDICES)
+    if skip is None:
+        skip = set()
+        state[_S_NODE_ANIMATION_SKIP_INDICES] = skip
     for primitive in primitives:
         if not primitive.has_skin or not primitive.skin_mesh_in_bind_pose:
             continue
@@ -2994,6 +3178,7 @@ def _apply_effective_node_visibility_animation(
 
         action = _visibility_action_for(obj, channels[0])
         actions.append(action)
+        _register_action_frame_range(action, key_times[0] * fps, key_times[-1] * fps)
         coords = array("f", [0.0]) * (len(key_times) * 2)
         for key_index, time_value in enumerate(key_times):
             coords[key_index * 2] = time_value * fps
@@ -3429,6 +3614,52 @@ def _reset_action_cache() -> None:
     _ACTION_CHANNELBAGS.clear()
     _ACTION_CHANNEL_GROUPS.clear()
     _IMPORT_SHARED_ACTIONS.clear()
+    _ACTION_FRAME_RANGES.clear()
+
+
+def _merge_frame_bounds(
+    bounds: tuple[float, float] | None,
+    start: float,
+    end: float,
+) -> tuple[float, float]:
+    if bounds is None:
+        return float(start), float(end)
+    return min(bounds[0], float(start)), max(bounds[1], float(end))
+
+
+def _channel_frame_bounds(
+    channel: object,
+    fps: float,
+    start_frame: float = 0.0,
+) -> tuple[float, float] | None:
+    count = _channel_count(channel)
+    times = _buffer_view(_channel_times(channel), "f")
+    if count <= 0 or times is None:
+        return None
+    last = min(count, len(times)) - 1
+    if last < 0:
+        return None
+    start = float(start_frame) + float(times[0]) * fps
+    end = float(start_frame) + float(times[last]) * fps
+    return start, end
+
+
+def _register_action_frame_range(action: bpy.types.Action, start: float, end: float) -> None:
+    if end < start:
+        return
+    key = action.as_pointer()
+    existing = _ACTION_FRAME_RANGES.get(key)
+    _ACTION_FRAME_RANGES[key] = _merge_frame_bounds(existing, start, end)
+
+
+def _register_actions_frame_range(
+    actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]],
+    bounds: tuple[float, float] | None,
+) -> None:
+    if not actions or bounds is None:
+        return
+    for _owner, action in actions.values():
+        _register_action_frame_range(action, bounds[0], bounds[1])
 
 
 def _apply_animation(
@@ -3451,6 +3682,7 @@ def _apply_animation(
     actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
+    frame_bounds: tuple[float, float] | None = None
     converted_targets, cone_end_frame = _apply_light_spot_cone_animations(
         obj,
         channels,
@@ -3470,6 +3702,9 @@ def _apply_animation(
                 continue
             action = _animation_action_for(obj, obj, actions, "", channel)
             end_frame = max(end_frame, _apply_visibility_animation_channel(obj, action, channel, fps, start_frame))
+            bounds = _channel_frame_bounds(channel, fps, start_frame)
+            if bounds is not None:
+                frame_bounds = _merge_frame_bounds(frame_bounds, bounds[0], bounds[1])
             continue
 
         owner, path, width, group_name = _anim_channel_target(obj, target)
@@ -3484,6 +3719,9 @@ def _apply_animation(
         values = _buffer_view(_channel_values(channel), "f")
         if count <= 0 or value_width <= 0 or times is None or values is None:
             continue
+        bounds = _channel_frame_bounds(channel, fps, start_frame)
+        if bounds is not None:
+            frame_bounds = _merge_frame_bounds(frame_bounds, bounds[0], bounds[1])
 
         interpolation = _blender_interpolation(_channel_interpolation(channel))
         in_tangents, out_tangents = _channel_tangents(channel)
@@ -3582,6 +3820,7 @@ def _apply_animation(
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
     _stash_animation_actions(actions)
+    _register_actions_frame_range(actions, frame_bounds)
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
 
@@ -3861,6 +4100,7 @@ def _apply_light_spot_cone_animations(
     action = _animation_action_for(obj, data, actions, "_Data", first_channel)
     interpolation = _merged_animation_interpolation(cone_channels[_ANIM_LIGHT_SPOT_INNER] + cone_channels[_ANIM_LIGHT_SPOT_OUTER])
     converted: set[int] = set()
+    _register_action_frame_range(action, start_frame + key_times[0] * fps, start_frame + key_times[-1] * fps)
 
     if cone_channels[_ANIM_LIGHT_SPOT_OUTER]:
         coords = array("f", [0.0]) * (len(key_times) * 2)
@@ -4045,6 +4285,7 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
     shape_keys.animation_data_create()
     actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
+    frame_bounds: tuple[float, float] | None = None
 
     for channel in channels:
         if _channel_target(channel) != _ANIM_MORPH_WEIGHTS:
@@ -4058,6 +4299,9 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
         values = _buffer_view(_channel_values(channel), "f")
         if count <= 0 or value_width <= 0 or times is None or values is None:
             continue
+        bounds = _channel_frame_bounds(channel, fps, start_frame)
+        if bounds is not None:
+            frame_bounds = _merge_frame_bounds(frame_bounds, bounds[0], bounds[1])
 
         interpolation = _blender_interpolation(_channel_interpolation(channel))
         in_tangents, out_tangents = _channel_tangents(channel)
@@ -4096,6 +4340,7 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
     _stash_animation_actions(actions)
+    _register_actions_frame_range(actions, frame_bounds)
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
 
@@ -4821,6 +5066,7 @@ def _apply_bone_animations(
     write_ms = 0.0
     fallback_ms = 0.0
     skipped_default_fcurves = 0
+    frame_bounds: tuple[float, float] | None = None
 
     for index, name in enumerate(joint_names):
         pose_bone = armature.pose.bones.get(name)
@@ -4851,6 +5097,9 @@ def _apply_bone_animations(
             values = _buffer_view(_channel_values(channel), "f")
             if count <= 0 or value_width <= 0 or times is None or values is None:
                 continue
+            bounds = _channel_frame_bounds(channel, fps)
+            if bounds is not None:
+                frame_bounds = _merge_frame_bounds(frame_bounds, bounds[0], bounds[1])
 
             interpolation = _blender_interpolation(_channel_interpolation(channel))
             in_tangents, out_tangents = _channel_tangents(channel)
@@ -4982,6 +5231,7 @@ def _apply_bone_animations(
     if profile_detail:
         before_stash_at = time.perf_counter()
     _stash_animation_actions(actions)
+    _register_actions_frame_range(actions, frame_bounds)
     if profile_detail:
         stash_ms = (time.perf_counter() - before_stash_at) * 1000.0
     else:
@@ -5916,6 +6166,7 @@ def _apply_material_animation(
     actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]] = {}
     written_fcurves: set[tuple[int, int, str, int]] = set()
     end_frame = scene.frame_end
+    frame_bounds: tuple[float, float] | None = None
     converted_texture_location_roles, tex_end_frame = _apply_texture_transform_location_animations(
         mat,
         data,
@@ -5929,6 +6180,9 @@ def _apply_material_animation(
     for channel in channels:
         target = _channel_target(channel)
         tex_role = _texture_anim_role(target)
+        bounds = _channel_frame_bounds(channel, fps)
+        if bounds is not None:
+            frame_bounds = _merge_frame_bounds(frame_bounds, bounds[0], bounds[1])
         if (
             tex_role in converted_texture_location_roles
             and _texture_anim_prop(target) == _ANIM_TEXTURE_TRANSFORM_OFFSET
@@ -6002,6 +6256,7 @@ def _apply_material_animation(
         end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
     _stash_animation_actions(actions)
+    _register_actions_frame_range(actions, frame_bounds)
     if actions:
         mat["assetkit_material_animation_applied"] = True
     if end_frame > scene.frame_end:
@@ -7038,11 +7293,20 @@ def _ensure_gltf_settings_node(mat: bpy.types.Material, data: MeshPrimitiveData)
     node.label = _GLTF_SETTINGS_GROUP_NAME
     node.location = (-220, -520)
 
-    _set_input(node, "Occlusion", data.occlusion_strength)
-    _set_input(node, "Thickness", data.volume_thickness)
-    _set_input(node, "Dispersion", data.dispersion)
-    _set_input(node, "Iridescence Factor", data.iridescence)
-    _set_input(node, "Iridescence Thickness Minimum", data.iridescence_thickness_minimum)
+    if not data.occlusion_texture:
+        _set_input_if_nondefault(node, "Occlusion", data.occlusion_strength, 1.0)
+    if not data.volume_thickness_texture:
+        _set_input_if_nondefault(node, "Thickness", data.volume_thickness, 0.0)
+    _set_input_if_nondefault(node, "Dispersion", data.dispersion, 0.0)
+    if not data.iridescence_texture:
+        _set_input_if_nondefault(node, "Iridescence Factor", data.iridescence, 0.0)
+    if not data.iridescence_thickness_texture:
+        _set_input_if_nondefault(
+            node,
+            "Iridescence Thickness Minimum",
+            data.iridescence_thickness_minimum,
+            100.0,
+        )
     return node
 
 
@@ -7071,14 +7335,27 @@ def _has_material_settings_animation(data: MeshPrimitiveData) -> bool:
 
 
 def _ensure_gltf_settings_group():
+    global _GLTF_SETTINGS_GROUP_CACHE
+
+    group = _GLTF_SETTINGS_GROUP_CACHE
+    if group is not None:
+        try:
+            if bpy.data.node_groups.get(group.name) == group:
+                return group
+        except ReferenceError:
+            pass
+
     group = bpy.data.node_groups.get(_GLTF_SETTINGS_GROUP_NAME)
     if group is None:
         group = bpy.data.node_groups.new(_GLTF_SETTINGS_GROUP_NAME, "ShaderNodeTree")
         group.nodes.new("NodeGroupInput").location = (-200, 0)
         group.nodes.new("NodeGroupOutput")
 
-    for name, default in _GLTF_SETTINGS_SOCKETS:
-        _ensure_gltf_settings_socket(group, name, default)
+    if not group.get("assetkit_sockets_ready"):
+        for name, default in _GLTF_SETTINGS_SOCKETS:
+            _ensure_gltf_settings_socket(group, name, default)
+        group["assetkit_sockets_ready"] = True
+    _GLTF_SETTINGS_GROUP_CACHE = group
     return group
 
 
@@ -7237,6 +7514,12 @@ def _set_input(node, name: str, value) -> None:
             socket.default_value = value
         except TypeError:
             pass
+
+
+def _set_input_if_nondefault(node, name: str, value: float, default: float) -> None:
+    if abs(float(value) - float(default)) <= 1.0e-6:
+        return
+    _set_input(node, name, value)
 
 
 def _set_first_input(node, names: tuple[str, ...], value) -> None:
@@ -7467,25 +7750,6 @@ def _link_occlusion_texture(
         socket = settings_node.inputs.get("Occlusion")
         if socket:
             mat.node_tree.links.new(ao_output, socket)
-
-    base_color = bsdf.inputs.get("Base Color")
-    if not base_color:
-        return
-
-    color_output = None
-    for link in list(base_color.links):
-        color_output = link.from_socket
-        mat.node_tree.links.remove(link)
-        break
-
-    if color_output is None:
-        color_node = mat.node_tree.nodes.new("ShaderNodeRGB")
-        color_node.outputs["Color"].default_value = data.base_color
-        color_output = color_node.outputs["Color"]
-
-    mixed = _multiply_color_outputs(mat, color_output, ao_output, "Occlusion")
-    if mixed:
-        mat.node_tree.links.new(mixed, base_color)
 
 
 def _link_emissive_texture(
@@ -8085,7 +8349,7 @@ def _image_texture_node(
             return tex
 
     defer_image = _should_defer_texture_image(path)
-    image = _find_texture_image(path, colorspace) if defer_image else _load_texture_image(path, colorspace)
+    image = _cached_texture_image(path, colorspace) if defer_image else _load_texture_image(path, colorspace)
     if not image and not defer_image:
         return None
 
@@ -8188,7 +8452,7 @@ def _should_defer_texture_image(path: str) -> bool:
 def _queue_deferred_texture_image(tex, path: str, colorspace: str) -> None:
     global _DEFERRED_TEXTURE_TIMER_ACTIVE
     key = _texture_image_cache_key(path, colorspace)
-    image = _find_texture_image(key[0], key[1])
+    image = _cached_texture_image_by_key(key)
     if image:
         _assign_texture_image(tex, image)
         return
@@ -8302,15 +8566,9 @@ def _load_texture_image_immediate(path: str, colorspace: str):
 
 def _find_texture_image(path: str, colorspace: str):
     key = _texture_image_cache_key(path, colorspace)
-    cached = _TEXTURE_IMAGE_CACHE.get(key)
+    cached = _cached_texture_image_by_key(key)
     if cached is not None:
-        try:
-            if bpy.data.images.get(cached.name) == cached:
-                if _image_colorspace(cached) == colorspace:
-                    return cached
-        except ReferenceError:
-            pass
-        _TEXTURE_IMAGE_CACHE.pop(key, None)
+        return cached
 
     source_path = key[0]
     for image in bpy.data.images:
@@ -8329,6 +8587,23 @@ def _find_texture_image(path: str, colorspace: str):
         image["assetkit_colorspace"] = colorspace
         _TEXTURE_IMAGE_CACHE[key] = image
         return image
+    return None
+
+
+def _cached_texture_image(path: str, colorspace: str):
+    return _cached_texture_image_by_key(_texture_image_cache_key(path, colorspace))
+
+
+def _cached_texture_image_by_key(key: tuple[str, str]):
+    cached = _TEXTURE_IMAGE_CACHE.get(key)
+    if cached is not None:
+        try:
+            if bpy.data.images.get(cached.name) == cached:
+                if _image_colorspace(cached) == key[1]:
+                    return cached
+        except ReferenceError:
+            pass
+        _TEXTURE_IMAGE_CACHE.pop(key, None)
     return None
 
 
