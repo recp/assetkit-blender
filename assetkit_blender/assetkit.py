@@ -1066,6 +1066,7 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     _S_VERTEX_NORMALS_F32,
     _S_TANGENTS_F32,
 ) = range(25)
+_S_FIELD_COUNT = _S_TANGENTS_F32 + 1
 
 (
     _M_OWNER,
@@ -1332,14 +1333,15 @@ _M_FIELD_NAMES = (
 
 def _native_mesh_field_getter(item):
     if isinstance(item, tuple):
-        return item.__getitem__
+        count = len(item)
+        return lambda index: item[index] if index < count else None
     names = _M_FIELD_NAMES
     return lambda index: item.get(names[index])
 
 
 def _native_mesh_is_simple(item: object) -> bool:
     if isinstance(item, tuple):
-        return len(item) == 24
+        return len(item) == _S_FIELD_COUNT
     if not isinstance(item, dict):
         return False
     if "material_name" not in item and "uv_sets" not in item:
