@@ -105,6 +105,9 @@ typedef struct FListItem FListItem;
 #define AKB_SKIN_DEFAULT_JOINTS_PER_VERTEX 4
 #define AKB_SKIN_MAX_JOINTS_PER_VERTEX 64
 #define AKB_TEXTURE_INFO_MAX 24
+#define AKB_EDGE_BUILD_FACE_LIMIT 256
+#define AKB_LARGE_SCENE_PRIMITIVE_THRESHOLD 1024
+#define AKB_GEOMETRY_CONTENT_KEY_BYTE_LIMIT (64u * 1024u)
 #define AKB_MAT4(value) (*(mat4 *)(void *)(value))
 #define AKB_VEC3(value) (*(vec3 *)(void *)(value))
 #define AKB_VEC4(value) (*(vec4 *)(void *)(value))
@@ -312,6 +315,7 @@ typedef struct AkbPrimitive {
   float   *vertices;
   float   *instance_matrices;
   uint32_t *indices;
+  uint32_t *edges;
   int32_t  *loop_meta;
   int32_t  *loop_starts;
   int32_t  *loop_totals;
@@ -361,12 +365,14 @@ typedef struct AkbPrimitive {
   float    coord_matrix[16];
   uintptr_t mesh_key;
   uintptr_t material_key;
+  uint64_t geometry_key;
   int32_t  node_index;
   int32_t  skin_root_node_index;
   uint32_t instance_count;
   uint32_t vertex_count;
   uint32_t loop_count;
   uint32_t face_count;
+  uint32_t edge_count;
   uint32_t primitive_type;
   uint32_t primitive_mode;
   uint32_t uv_set_count;
@@ -399,12 +405,17 @@ typedef struct AkbPrimitive {
   uint8_t  skin_mesh_in_bind_pose;
   uint8_t  borrowed_vertices;
   uint8_t  borrowed_indices;
+  uint8_t  borrowed_edges;
   uint8_t  borrowed_normals;
   uint8_t  borrowed_vertex_normals;
   uint8_t  borrowed_tangents;
   uint8_t  arena_vertices;
   uint8_t  arena_indices;
+  uint8_t  arena_edges;
   uint8_t  arena_loop_meta;
+  uint8_t  arena_uv_sets;
+  uint8_t  arena_color_sets;
+  uint8_t  arena_point_attrs;
   uint8_t  arena_instance_matrices;
   uint8_t  arena_skin_joint_nodes;
   uint8_t  arena_skin_inverse_bind_matrices;
@@ -412,10 +423,21 @@ typedef struct AkbPrimitive {
   uint8_t  zero_copy_flags;
 } AkbPrimitive;
 
+typedef struct AkbInputScan {
+  AkInput *normal;
+  AkInput *tangent;
+  AkInput *uv;
+  AkInput *color;
+  uint32_t uv_count;
+  uint32_t color_count;
+  uint32_t point_attr_count;
+} AkbInputScan;
+
 typedef struct AkbPrimitiveList {
   AkbPrimitive *items;
   size_t        count;
   size_t        capacity;
+  size_t        skin_count;
 } AkbPrimitiveList;
 
 typedef struct AkbPrimitiveReuseEntry {
@@ -425,6 +447,7 @@ typedef struct AkbPrimitiveReuseEntry {
   AkBindMaterial  *bind_material;
   uint32_t        prim_index;
   size_t          source_index;
+  uint8_t         occupied;
 } AkbPrimitiveReuseEntry;
 
 typedef struct AkbPrimitiveReuseCache {
@@ -487,6 +510,9 @@ typedef struct AkbLoadOptions {
   uint8_t     cvt_line_loop;
   uint8_t     cvt_line_strip;
   uint8_t     use_mmap;
+  uint8_t     build_triangle_edges;
+  uint8_t     geometry_keys;
+  uint8_t     geometry_content_keys;
 } AkbLoadOptions;
 
 typedef struct AkbSavedOptions {
@@ -499,7 +525,21 @@ typedef struct AkbSavedOptions {
   uintptr_t cvt_line_loop;
   uintptr_t cvt_line_strip;
   uintptr_t use_mmap;
+  uintptr_t meshopt_decoder_path;
+  uintptr_t draco_decoder_path;
+  uintptr_t gsplat_decoder_path;
+  uintptr_t ktx2_decoder_path;
 } AkbSavedOptions;
+
+typedef struct AkbDecoderPaths {
+  char meshopt[PATH_MAX];
+  char draco[PATH_MAX];
+  char gsplat[PATH_MAX];
+  char ktx2[PATH_MAX];
+  int  initialized;
+} AkbDecoderPaths;
+
+static AkbDecoderPaths AKB_DECODER_PATHS;
 
 typedef struct AkbSharedDoc {
   AkDoc *doc;
@@ -569,8 +609,41 @@ typedef enum AkbPySimplePrimitiveField {
   AKB_PY_SIMPLE_NORMALS_F32,
   AKB_PY_SIMPLE_VERTEX_NORMALS_F32,
   AKB_PY_SIMPLE_TANGENTS_F32,
+  AKB_PY_SIMPLE_GEOMETRY_KEY,
+  AKB_PY_SIMPLE_EDGE_COUNT,
+  AKB_PY_SIMPLE_EDGES_U32,
+  AKB_PY_SIMPLE_UVS_F32,
+  AKB_PY_SIMPLE_BASE_COLOR_TEXTURE,
+  AKB_PY_SIMPLE_MATERIAL_TYPE,
+  AKB_PY_SIMPLE_MATERIAL_KEY,
+  AKB_PY_SIMPLE_METALLIC,
+  AKB_PY_SIMPLE_ROUGHNESS,
+  AKB_PY_SIMPLE_DOUBLE_SIDED,
   AKB_PY_SIMPLE_FIELD_COUNT
 } AkbPySimplePrimitiveField;
+
+typedef enum AkbPySceneNodeField {
+  AKB_PY_NODE_OWNER = 0,
+  AKB_PY_NODE_NAME,
+  AKB_PY_NODE_PARENT_INDEX,
+  AKB_PY_NODE_VISIBLE,
+  AKB_PY_NODE_LAYERS,
+  AKB_PY_NODE_CAMERA_TYPE,
+  AKB_PY_NODE_CAMERA_NAME,
+  AKB_PY_NODE_CAMERA_EXTRA,
+  AKB_PY_NODE_CAMERA_IMAGER_EXTRA,
+  AKB_PY_NODE_CAMERA_VALUES,
+  AKB_PY_NODE_LIGHT_TYPE,
+  AKB_PY_NODE_LIGHT_NAME,
+  AKB_PY_NODE_LIGHT_EXTRA,
+  AKB_PY_NODE_LIGHT_COLOR,
+  AKB_PY_NODE_LIGHT_VALUES,
+  AKB_PY_NODE_MATRIX_F32,
+  AKB_PY_NODE_EXTRA,
+  AKB_PY_NODE_ANIM_COUNT,
+  AKB_PY_NODE_ANIM_CHANNELS,
+  AKB_PY_NODE_FIELD_COUNT
+} AkbPySceneNodeField;
 
 typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_OWNER = 0,
@@ -701,6 +774,9 @@ typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_SKIN_JOINT_NODES_I32,
   AKB_PY_PRIM_SKIN_INVERSE_BIND_MATRICES_F32,
   AKB_PY_PRIM_SKIN_BIND_SHAPE_MATRIX_F32,
+  AKB_PY_PRIM_GEOMETRY_KEY,
+  AKB_PY_PRIM_EDGE_COUNT,
+  AKB_PY_PRIM_EDGES_U32,
   AKB_PY_PRIM_FIELD_COUNT
 } AkbPyPrimitiveField;
 
@@ -845,6 +921,8 @@ akb_load_options_default(AkbLoadOptions *options) {
   options->cvt_line_loop = 1;
   options->cvt_line_strip = 1;
   options->use_mmap = 1;
+  options->build_triangle_edges = 1;
+  options->geometry_keys = 1;
 }
 
 static int
@@ -919,6 +997,124 @@ akb_assetkit_coord_cvt_type(uint8_t conversion) {
   return AK_COORD_CVT_DISABLED;
 }
 
+static const char *
+akb_sibling_decoder_path(char *dst, size_t dst_size, const char *filename) {
+  char modpath[PATH_MAX];
+  char *sep;
+  char *sep2;
+  size_t dir_len;
+  size_t file_len;
+
+  if (!dst || dst_size == 0 || !filename)
+    return NULL;
+
+#if defined(_WIN32)
+  {
+    HMODULE module = NULL;
+    DWORD len;
+
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)&akb_sibling_decoder_path,
+                            &module))
+      return NULL;
+
+    len = GetModuleFileNameA(module, modpath, sizeof(modpath));
+    if (len == 0 || len >= sizeof(modpath))
+      return NULL;
+  }
+#else
+  {
+    Dl_info info;
+    int len;
+
+    if (!dladdr((const void *)&akb_sibling_decoder_path, &info)
+        || !info.dli_fname)
+      return NULL;
+
+    len = snprintf(modpath, sizeof(modpath), "%s", info.dli_fname);
+    if (len <= 0 || (size_t)len >= sizeof(modpath))
+      return NULL;
+  }
+#endif
+
+  sep = strrchr(modpath, '/');
+  sep2 = strrchr(modpath, '\\');
+  if (!sep || (sep2 && sep2 > sep))
+    sep = sep2;
+  if (!sep)
+    return NULL;
+
+  dir_len = (size_t)(sep - modpath) + 1;
+  file_len = strlen(filename);
+  if (dir_len + file_len >= dst_size)
+    return NULL;
+
+  memcpy(dst, modpath, dir_len);
+  memcpy(dst + dir_len, filename, file_len + 1);
+
+#if defined(_WIN32)
+  return GetFileAttributesA(dst) != INVALID_FILE_ATTRIBUTES ? dst : NULL;
+#else
+  return access(dst, R_OK) == 0 ? dst : NULL;
+#endif
+}
+
+static void
+akb_decoder_paths_init(void) {
+  if (AKB_DECODER_PATHS.initialized)
+    return;
+
+#if defined(_WIN32)
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.meshopt,
+                           sizeof(AKB_DECODER_PATHS.meshopt),
+                           "assetkit_meshoptimizer.dll");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.draco,
+                           sizeof(AKB_DECODER_PATHS.draco),
+                           "assetkit_draco.dll");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.gsplat,
+                           sizeof(AKB_DECODER_PATHS.gsplat),
+                           "assetkit_spz.dll");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.ktx2,
+                           sizeof(AKB_DECODER_PATHS.ktx2),
+                           "assetkit_ktx2.dll");
+#elif defined(__APPLE__)
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.meshopt,
+                           sizeof(AKB_DECODER_PATHS.meshopt),
+                           "libassetkit_meshoptimizer.dylib");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.draco,
+                           sizeof(AKB_DECODER_PATHS.draco),
+                           "libassetkit_draco.dylib");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.gsplat,
+                           sizeof(AKB_DECODER_PATHS.gsplat),
+                           "libassetkit_spz.dylib");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.ktx2,
+                           sizeof(AKB_DECODER_PATHS.ktx2),
+                           "libassetkit_ktx2.dylib");
+#else
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.meshopt,
+                           sizeof(AKB_DECODER_PATHS.meshopt),
+                           "libassetkit_meshoptimizer.so");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.draco,
+                           sizeof(AKB_DECODER_PATHS.draco),
+                           "libassetkit_draco.so");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.gsplat,
+                           sizeof(AKB_DECODER_PATHS.gsplat),
+                           "libassetkit_spz.so");
+  akb_sibling_decoder_path(AKB_DECODER_PATHS.ktx2,
+                           sizeof(AKB_DECODER_PATHS.ktx2),
+                           "libassetkit_ktx2.so");
+#endif
+
+  AKB_DECODER_PATHS.initialized = 1;
+}
+
+static void
+akb_set_decoder_path_if_empty(AkOption option, const char *path) {
+  if (path && path[0] && !ak_opt_get(option))
+    ak_opt_set(option, (uintptr_t)path);
+}
+
 static void
 akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   saved->coord = ak_opt_get(AK_OPT_COORD);
@@ -930,6 +1126,10 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   saved->cvt_line_loop = ak_opt_get(AK_OPT_CVT_LINELOOP);
   saved->cvt_line_strip = ak_opt_get(AK_OPT_CVT_LINESTRIP);
   saved->use_mmap = ak_opt_get(AK_OPT_USE_MMAP);
+  saved->meshopt_decoder_path = ak_opt_get(AK_OPT_GLTF_MESHOPT_DECODER_PATH);
+  saved->draco_decoder_path = ak_opt_get(AK_OPT_GLTF_DRACO_DECODER_PATH);
+  saved->gsplat_decoder_path = ak_opt_get(AK_OPT_GLTF_GSPLAT_DECODER_PATH);
+  saved->ktx2_decoder_path = ak_opt_get(AK_OPT_GLTF_KTX2_DECODER_PATH);
 
   ak_opt_set(AK_OPT_COORD, (uintptr_t)options->target_coord);
   ak_opt_set(AK_OPT_COORD_CONVERT_TYPE,
@@ -941,6 +1141,16 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_CVT_LINELOOP, options->cvt_line_loop);
   ak_opt_set(AK_OPT_CVT_LINESTRIP, options->cvt_line_strip);
   ak_opt_set(AK_OPT_USE_MMAP, options->use_mmap);
+
+  akb_decoder_paths_init();
+  akb_set_decoder_path_if_empty(AK_OPT_GLTF_MESHOPT_DECODER_PATH,
+                                AKB_DECODER_PATHS.meshopt);
+  akb_set_decoder_path_if_empty(AK_OPT_GLTF_DRACO_DECODER_PATH,
+                                AKB_DECODER_PATHS.draco);
+  akb_set_decoder_path_if_empty(AK_OPT_GLTF_GSPLAT_DECODER_PATH,
+                                AKB_DECODER_PATHS.gsplat);
+  akb_set_decoder_path_if_empty(AK_OPT_GLTF_KTX2_DECODER_PATH,
+                                AKB_DECODER_PATHS.ktx2);
 }
 
 static void
@@ -954,6 +1164,10 @@ akb_options_restore(const AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_CVT_LINELOOP, saved->cvt_line_loop);
   ak_opt_set(AK_OPT_CVT_LINESTRIP, saved->cvt_line_strip);
   ak_opt_set(AK_OPT_USE_MMAP, saved->use_mmap);
+  ak_opt_set(AK_OPT_GLTF_MESHOPT_DECODER_PATH, saved->meshopt_decoder_path);
+  ak_opt_set(AK_OPT_GLTF_DRACO_DECODER_PATH, saved->draco_decoder_path);
+  ak_opt_set(AK_OPT_GLTF_GSPLAT_DECODER_PATH, saved->gsplat_decoder_path);
+  ak_opt_set(AK_OPT_GLTF_KTX2_DECODER_PATH, saved->ktx2_decoder_path);
 }
 
 static void
@@ -1061,6 +1275,8 @@ akb_primitive_free(AkbPrimitive *prim) {
     free(prim->instance_matrices);
   if (!prim->borrowed_indices && !prim->arena_indices)
     free(prim->indices);
+  if (!prim->borrowed_edges && !prim->arena_edges)
+    free(prim->edges);
   if (!prim->arena_loop_meta)
     free(prim->loop_meta);
   if (!prim->borrowed_normals)
@@ -1070,15 +1286,18 @@ akb_primitive_free(AkbPrimitive *prim) {
   for (i = 0; i < prim->uv_set_count; i++)
     if (!prim->uv_sets[i].borrowed)
       free(prim->uv_sets[i].values);
-  free(prim->uv_sets);
+  if (!prim->arena_uv_sets)
+    free(prim->uv_sets);
   for (i = 0; i < prim->color_set_count; i++)
     if (!prim->color_sets[i].borrowed)
       free(prim->color_sets[i].values);
-  free(prim->color_sets);
+  if (!prim->arena_color_sets)
+    free(prim->color_sets);
   for (i = 0; i < prim->point_attr_count; i++)
     if (!prim->point_attrs[i].borrowed)
       free(prim->point_attrs[i].values);
-  free(prim->point_attrs);
+  if (!prim->arena_point_attrs)
+    free(prim->point_attrs);
   if (!prim->uv_set_count)
     free(prim->uvs);
   if (!prim->color_set_count)
@@ -1191,6 +1410,8 @@ akb_list_push(AkbPrimitiveList *list, AkbPrimitive *prim) {
     list->capacity = new_capacity;
   }
 
+  if (prim->has_skin)
+    list->skin_count++;
   list->items[list->count++] = *prim;
   memset(prim, 0, sizeof(*prim));
   return 1;
@@ -1216,17 +1437,30 @@ akb_node_list_push(AkbSceneNodeList *list, AkbSceneNode *node) {
 }
 
 static void
-akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord) {
+akb_set_primitive_coord_matrix(AkbPrimitive *prim, const AkbCoordContext *coord) {
+  if (!prim || !coord)
+    return;
+  memcpy(prim->coord_matrix, coord->matrix, sizeof(prim->coord_matrix));
+  prim->has_coord_matrix = 1;
+}
+
+static void
+akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord, int include_skin_primitives) {
   size_t i;
 
   if (!list || !coord || !coord->convert || coord->conversion != AKB_COORD_TRANSFORM)
     return;
+  if (!list->count)
+    return;
 
-  for (i = 0; i < list->count; i++) {
-    memcpy(list->items[i].coord_matrix,
-           coord->matrix,
-           sizeof(list->items[i].coord_matrix));
-    list->items[i].has_coord_matrix = 1;
+  akb_set_primitive_coord_matrix(&list->items[0], coord);
+  if (!include_skin_primitives)
+    return;
+
+  for (i = 1; i < list->count; i++) {
+    if (!list->items[i].has_skin)
+      continue;
+    akb_set_primitive_coord_matrix(&list->items[i], coord);
   }
 }
 
@@ -1280,6 +1514,23 @@ akb_fnv1a64(const unsigned char *data, size_t length) {
 }
 
 static uint64_t
+akb_fnv1a64_update(uint64_t hash, const void *data, size_t length) {
+  const unsigned char *bytes;
+  size_t i;
+
+  if (!data || !length)
+    return hash;
+
+  bytes = (const unsigned char *)data;
+  for (i = 0; i < length; i++) {
+    hash ^= bytes[i];
+    hash *= UINT64_C(1099511628211);
+  }
+
+  return hash;
+}
+
+static uint64_t
 akb_fnv1a64_mix_u64(uint64_t hash, uint64_t value) {
   unsigned int i;
 
@@ -1289,6 +1540,293 @@ akb_fnv1a64_mix_u64(uint64_t hash, uint64_t value) {
   }
 
   return hash;
+}
+
+static uint64_t
+akb_fnv1a64_mix_cstr(uint64_t hash, const char *str, size_t capacity) {
+  size_t length = 0;
+
+  if (!str || !capacity)
+    return akb_fnv1a64_mix_u64(hash, 0);
+
+  while (length < capacity && str[length])
+    length++;
+
+  hash = akb_fnv1a64_mix_u64(hash, (uint64_t)length);
+  return akb_fnv1a64_update(hash, str, length);
+}
+
+static uint64_t
+akb_geometry_key_mix_buffer(uint64_t hash,
+                            const void *data,
+                            size_t length,
+                            int content_key) {
+  hash = akb_fnv1a64_mix_u64(hash, (uint64_t)length);
+  if (!data || !length)
+    return hash;
+  if (content_key)
+    return akb_fnv1a64_update(hash, data, length);
+  return akb_fnv1a64_mix_u64(hash, (uintptr_t)data);
+}
+
+static int
+akb_geometry_key_add_bytes(size_t *total, size_t bytes) {
+  if (!bytes)
+    return 1;
+  if (*total > SIZE_MAX - bytes)
+    return 0;
+  *total += bytes;
+  return *total <= AKB_GEOMETRY_CONTENT_KEY_BYTE_LIMIT;
+}
+
+static int
+akb_geometry_key_content_allowed(const AkbPrimitive *prim) {
+  size_t total = 0;
+  uint32_t i;
+
+  if (!prim)
+    return 0;
+
+  if (!akb_geometry_key_add_bytes(&total,
+                                  (size_t)prim->vertex_count
+                                  * 3
+                                  * sizeof(float))
+      || !akb_geometry_key_add_bytes(&total,
+                                     (size_t)prim->loop_count
+                                     * sizeof(uint32_t))
+      || !akb_geometry_key_add_bytes(&total,
+                                     (size_t)prim->face_count
+                                     * sizeof(int32_t) * 2))
+    return 0;
+
+  if (prim->has_normals
+      && !akb_geometry_key_add_bytes(&total,
+                                     (size_t)prim->loop_count
+                                     * 3
+                                     * sizeof(float)))
+    return 0;
+  if (prim->has_vertex_normals
+      && !akb_geometry_key_add_bytes(&total,
+                                     (size_t)prim->vertex_count
+                                     * 3
+                                     * sizeof(float)))
+    return 0;
+  if (prim->has_tangents
+      && !akb_geometry_key_add_bytes(&total,
+                                     (size_t)prim->loop_count
+                                     * 4
+                                     * sizeof(float)))
+    return 0;
+
+  for (i = 0; i < prim->uv_set_count; i++) {
+    if (!akb_geometry_key_add_bytes(&total,
+                                    (size_t)prim->loop_count
+                                    * prim->uv_sets[i].width
+                                    * sizeof(float)))
+      return 0;
+  }
+
+  for (i = 0; i < prim->color_set_count; i++) {
+    if (!akb_geometry_key_add_bytes(&total,
+                                    (size_t)prim->loop_count
+                                    * prim->color_sets[i].width
+                                    * sizeof(float)))
+      return 0;
+  }
+
+  return 1;
+}
+
+static uint64_t
+akb_geometry_key_loop_attrs(uint64_t hash,
+                            const AkbLoopFloatAttribute *attrs,
+                            uint32_t count,
+                            uint32_t value_count,
+                            int content_key) {
+  uint32_t i;
+  size_t length;
+
+  hash = akb_fnv1a64_mix_u64(hash, count);
+  for (i = 0; i < count; i++) {
+    hash = akb_fnv1a64_mix_cstr(hash, attrs[i].name, sizeof(attrs[i].name));
+    hash = akb_fnv1a64_mix_u64(hash, attrs[i].set);
+    hash = akb_fnv1a64_mix_u64(hash, attrs[i].width);
+    length = (size_t)value_count * attrs[i].width * sizeof(float);
+    hash = akb_geometry_key_mix_buffer(hash, attrs[i].values, length, content_key);
+  }
+
+  return hash;
+}
+
+static uint64_t
+akb_primitive_geometry_key(const AkbPrimitive *prim, int content_key) {
+  uint64_t hash;
+  size_t length;
+
+  if (!prim
+      || prim->primitive_type != AKB_PRIMITIVE_TRIANGLES
+      || !prim->vertices
+      || !prim->indices
+      || prim->loop_count != prim->face_count * 3
+      || prim->has_skin
+      || prim->has_gsplat
+      || prim->instance_count
+      || prim->point_attr_count
+      || prim->morph_target_count
+      || prim->morph_preset_count
+      || prim->material_variant_count
+      || (prim->animation && prim->animation->count)
+      || (prim->morph_animation && prim->morph_animation->count)
+      || (prim->material_animation && prim->material_animation->count))
+    return 0;
+
+  content_key = content_key && akb_geometry_key_content_allowed(prim);
+  hash = UINT64_C(1469598103934665603);
+  hash = akb_fnv1a64_mix_u64(hash, prim->primitive_type);
+  hash = akb_fnv1a64_mix_u64(hash, prim->primitive_mode);
+  hash = akb_fnv1a64_mix_u64(hash, prim->vertex_count);
+  hash = akb_fnv1a64_mix_u64(hash, prim->loop_count);
+  hash = akb_fnv1a64_mix_u64(hash, prim->face_count);
+  length = (size_t)prim->vertex_count * 3 * sizeof(float);
+  hash = akb_geometry_key_mix_buffer(hash, prim->vertices, length, content_key);
+  length = (size_t)prim->loop_count * sizeof(uint32_t);
+  hash = akb_geometry_key_mix_buffer(hash, prim->indices, length, content_key);
+  length = (size_t)prim->face_count * sizeof(int32_t);
+  hash = akb_geometry_key_mix_buffer(hash, prim->loop_starts, length, content_key);
+  hash = akb_geometry_key_mix_buffer(hash, prim->loop_totals, length, content_key);
+  hash = akb_fnv1a64_mix_u64(hash, prim->has_normals);
+  length = prim->has_normals ? (size_t)prim->loop_count * 3 * sizeof(float) : 0;
+  hash = akb_geometry_key_mix_buffer(hash, prim->normals, length, content_key);
+  hash = akb_fnv1a64_mix_u64(hash, prim->has_vertex_normals);
+  length = prim->has_vertex_normals ? (size_t)prim->vertex_count * 3 * sizeof(float) : 0;
+  hash = akb_geometry_key_mix_buffer(hash, prim->vertex_normals, length, content_key);
+  hash = akb_fnv1a64_mix_u64(hash, prim->has_tangents);
+  length = prim->has_tangents ? (size_t)prim->loop_count * 4 * sizeof(float) : 0;
+  hash = akb_geometry_key_mix_buffer(hash, prim->tangents, length, content_key);
+  hash = akb_geometry_key_loop_attrs(hash,
+                                     prim->uv_sets,
+                                     prim->uv_set_count,
+                                     prim->loop_count,
+                                     content_key);
+  hash = akb_geometry_key_loop_attrs(hash,
+                                     prim->color_sets,
+                                     prim->color_set_count,
+                                     prim->loop_count,
+                                     content_key);
+
+  return hash ? hash : UINT64_C(1);
+}
+
+static uint64_t
+akb_edge_key(uint32_t a, uint32_t b) {
+  uint32_t lo;
+  uint32_t hi;
+
+  if (a < b) {
+    lo = a;
+    hi = b;
+  } else {
+    lo = b;
+    hi = a;
+  }
+
+  return ((uint64_t)lo << 32) | (uint64_t)hi;
+}
+
+static int
+akb_edge_key_cmp(const void *a, const void *b) {
+  uint64_t av = *(const uint64_t *)a;
+  uint64_t bv = *(const uint64_t *)b;
+
+  return (av > bv) - (av < bv);
+}
+
+static void
+akb_build_triangle_edges(AkbArena *arena, AkbPrimitive *prim) {
+  uint64_t keys[AKB_EDGE_BUILD_FACE_LIMIT * 3];
+  uint64_t previous;
+  uint64_t key;
+  size_t count = 0;
+  size_t unique_count = 0;
+  size_t i;
+  size_t out_index;
+  uint32_t a, b, c;
+
+  if (!prim
+      || prim->primitive_type != AKB_PRIMITIVE_TRIANGLES
+      || !prim->indices
+      || !prim->face_count
+      || prim->face_count > AKB_EDGE_BUILD_FACE_LIMIT
+      || prim->loop_count < prim->face_count * 3)
+    return;
+
+  for (i = 0; i < (size_t)prim->face_count; i++) {
+    a = prim->indices[i * 3 + 0];
+    b = prim->indices[i * 3 + 1];
+    c = prim->indices[i * 3 + 2];
+
+    if (a != b)
+      keys[count++] = akb_edge_key(a, b);
+    if (b != c)
+      keys[count++] = akb_edge_key(b, c);
+    if (c != a)
+      keys[count++] = akb_edge_key(c, a);
+  }
+
+  if (!count) {
+    return;
+  }
+
+  qsort(keys, count, sizeof(*keys), akb_edge_key_cmp);
+  previous = UINT64_MAX;
+  for (i = 0; i < count; i++) {
+    if (keys[i] != previous) {
+      unique_count++;
+      previous = keys[i];
+    }
+  }
+
+  if (!unique_count || unique_count > UINT32_MAX) {
+    return;
+  }
+
+  prim->edges = (uint32_t *)akb_owned_alloc(arena,
+                                            unique_count * 2 * sizeof(uint32_t),
+                                            sizeof(uint32_t),
+                                            &prim->arena_edges);
+  if (!prim->edges) {
+    return;
+  }
+
+  out_index = 0;
+  previous = UINT64_MAX;
+  for (i = 0; i < count; i++) {
+    key = keys[i];
+    if (key == previous)
+      continue;
+    prim->edges[out_index * 2 + 0] = (uint32_t)(key >> 32);
+    prim->edges[out_index * 2 + 1] = (uint32_t)(key & UINT32_C(0xFFFFFFFF));
+    out_index++;
+    previous = key;
+  }
+
+  prim->edge_count = (uint32_t)out_index;
+}
+
+static void
+akb_finalize_primitive_buffers(AkbArena *arena,
+                               AkbPrimitive *prim,
+                               const AkbLoadOptions *options) {
+  if (!prim)
+    return;
+
+  if (!options || options->build_triangle_edges)
+    akb_build_triangle_edges(arena, prim);
+  if (!options || options->geometry_keys)
+    prim->geometry_key = akb_primitive_geometry_key(prim,
+                                                   options
+                                                   ? options->geometry_content_keys
+                                                   : 0);
 }
 
 static size_t
@@ -1658,6 +2196,111 @@ akb_texture_ref_channels(AkTextureRef *texref,
   dest[i] = '\0';
 }
 
+static int
+akb_sampler_is_default(AkSampler *sampler) {
+  if (!sampler)
+    return 1;
+  if (sampler->extra)
+    return 0;
+  return sampler->wrapS == AK_WRAP_MODE_WRAP
+         && sampler->wrapT == AK_WRAP_MODE_WRAP
+         && sampler->wrapP == AK_WRAP_MODE_WRAP
+         && sampler->minfilter == AK_MINFILTER_LINEAR
+         && sampler->magfilter == AK_MAGFILTER_LINEAR
+         && sampler->mipfilter == AK_MIPFILTER_LINEAR
+         && sampler->maxAnisotropy == 0
+         && sampler->mipMaxLevel == 0
+         && sampler->mipMinLevel == 0
+         && sampler->mipBias == 0.0f;
+}
+
+static int
+akb_texture_ref_is_fast_base_color(AkTextureRef *texref) {
+  AkTexture *texture;
+  AkImage *image;
+
+  if (!texref)
+    return 1;
+  if (!texref->texture || texref->transform || texref->slot > 0)
+    return 0;
+  if (texref->colorSpace == AK_TEXTURE_COLORSPACE_LINEAR)
+    return 0;
+  if (texref->channels != AK_TEXTURE_CHANNEL_NONE
+      && texref->channels != AK_TEXTURE_CHANNEL_RGB
+      && texref->channels != AK_TEXTURE_CHANNEL_RGBA)
+    return 0;
+
+  texture = texref->texture;
+  image = texture->image;
+  if (!image)
+    return 0;
+  if (ak_extra(texref)
+      || ak_extra(texture)
+      || ak_extra(image)
+      || !akb_sampler_is_default(texture->sampler))
+    return 0;
+
+  return 1;
+}
+
+static int
+akb_extract_material_fast_pbr(AkDoc *doc,
+                              AkTechniqueFxCommon *cmn,
+                              AkbPrimitive *out) {
+  if (!cmn || !out)
+    return 0;
+  if (out->material_extra || out->effect_extra)
+    return 0;
+  if (cmn->type != AK_MATERIAL_PBR
+      && cmn->type != AK_MATERIAL_METALLIC_ROUGHNESS)
+    return 0;
+  if (cmn->ambient
+      || cmn->emission
+      || cmn->occlusion
+      || cmn->normal
+      || cmn->clearcoat
+      || cmn->specular
+      || cmn->reflective
+      || cmn->transparent
+      || cmn->transmission
+      || cmn->sheen
+      || cmn->iridescence
+      || cmn->volume
+      || cmn->anisotropy
+      || cmn->dispersion
+      || cmn->diffuseTransmission)
+    return 0;
+  if (cmn->albedo
+      && cmn->albedo->texture
+      && !akb_texture_ref_is_fast_base_color(cmn->albedo->texture))
+    return 0;
+  if ((cmn->metalness && cmn->metalness->tex)
+      || (cmn->roughness && cmn->roughness->tex))
+    return 0;
+
+  out->material_type = (uint32_t)cmn->type;
+  out->double_sided = cmn->doubleSided ? 1 : 0;
+  if (cmn->albedo) {
+    if (cmn->albedo->color) {
+      out->base_color[0] = cmn->albedo->color->vec[0];
+      out->base_color[1] = cmn->albedo->color->vec[1];
+      out->base_color[2] = cmn->albedo->color->vec[2];
+      out->base_color[3] = cmn->albedo->color->vec[3];
+    }
+    akb_copy_texture_path(doc,
+                          cmn->albedo->texture,
+                          out->base_color_texture,
+                          sizeof(out->base_color_texture));
+  }
+  if (cmn->metalness)
+    out->metallic = cmn->metalness->intensity;
+  if (cmn->roughness)
+    out->roughness = cmn->roughness->intensity;
+  out->alpha_mode = out->base_color[3] < 1.0f ? 1 : 0;
+  out->opacity = out->base_color[3];
+  return 1;
+}
+
 static void
 akb_copy_texture_info(AkDoc *doc,
                       AkTextureRef *texref,
@@ -1840,7 +2483,7 @@ akb_extract_material(AkDoc *doc,
   out->iridescence_ior = 1.3f;
   out->iridescence_thickness_minimum = 100.0f;
   out->iridescence_thickness_maximum = 400.0f;
-  out->volume_attenuation_distance = 1000000.0f;
+  out->volume_attenuation_distance = INFINITY;
 
   mat = prim ? prim->material : NULL;
   inst_mat = NULL;
@@ -1882,6 +2525,8 @@ akb_extract_material(AkDoc *doc,
   if (effect)
     out->effect_extra = ak_extra(effect);
   if (!cmn)
+    return;
+  if (akb_extract_material_fast_pbr(doc, cmn, out))
     return;
 
   is_specular_glossiness = akb_tree_has_name(out->material_extra,
@@ -2373,7 +3018,8 @@ fail:
 }
 
 static float *
-akb_loop_attribute_copy(AkMeshPrimitive *prim,
+akb_loop_attribute_copy(AkbArena *arena,
+                        AkMeshPrimitive *prim,
                         AkInput *input,
                         const uint32_t *raw_indices,
                         size_t raw_count,
@@ -2381,18 +3027,39 @@ akb_loop_attribute_copy(AkMeshPrimitive *prim,
                         uint32_t loop_count,
                         uint32_t width,
                         int flip_v,
-                        uint8_t *has_attr) {
+                        uint8_t *has_attr,
+                        uint8_t *arena_values) {
   float *values, *out;
   uint32_t value_count = 0;
   uint32_t stride, offset, i, j, idx;
+  size_t src_index;
+  uint8_t borrowed_values = 0;
 
   *has_attr = 0;
+  if (arena_values)
+    *arena_values = 0;
   if (!input || !input->accessor || loop_count == 0)
     return NULL;
 
-  values = akb_accessor_float_copy(input->accessor, width, &value_count);
+  values = akb_accessor_float_borrow(input->accessor, width, &value_count);
+  if (values) {
+    if (value_count == loop_count && (!flip_v || width < 2)) {
+      if (arena_values)
+        *arena_values = 1;
+      *has_attr = 1;
+      return values;
+    }
+    if (value_count != loop_count) {
+      borrowed_values = 1;
+    } else {
+      values = akb_accessor_float_copy(input->accessor, width, &value_count);
+    }
+  } else {
+    values = akb_accessor_float_copy(input->accessor, width, &value_count);
+  }
   if (!values || value_count == 0) {
-    free(values);
+    if (!borrowed_values)
+      free(values);
     return NULL;
   }
 
@@ -2405,35 +3072,102 @@ akb_loop_attribute_copy(AkMeshPrimitive *prim,
     return values;
   }
 
-  out = (float *)calloc((size_t)loop_count * width, sizeof(float));
+  out = (float *)akb_owned_alloc(arena,
+                                 (size_t)loop_count * width * sizeof(float),
+                                 sizeof(float),
+                                 arena_values);
   if (!out) {
-    free(values);
+    if (!borrowed_values)
+      free(values);
     return NULL;
   }
 
   stride = prim->indexStride ? prim->indexStride : 1;
   offset = input->offset;
 
-  for (i = 0; i < loop_count; i++) {
-    if (value_count == loop_count) {
-      idx = i;
-    } else if (raw_indices && ((size_t)i * stride + offset) < raw_count) {
-      idx = raw_indices[(size_t)i * stride + offset];
-    } else {
-      idx = vertex_indices[i];
+#define AKB_LOOP_ATTR_INDEX(LOOP_INDEX)                                  \
+  do {                                                                   \
+    src_index = (size_t)(LOOP_INDEX) * stride + offset;                  \
+    idx = raw_indices && src_index < raw_count                           \
+          ? raw_indices[src_index]                                       \
+          : vertex_indices[LOOP_INDEX];                                  \
+  } while (0)
+
+  if (width == 2) {
+    float *dst;
+    const float *src;
+
+    for (i = 0; i < loop_count; i++) {
+      AKB_LOOP_ATTR_INDEX(i);
+      dst = out + (size_t)i * 2;
+      if (idx >= value_count) {
+        dst[0] = 0.0f;
+        dst[1] = 0.0f;
+        continue;
+      }
+      src = values + (size_t)idx * 2;
+      dst[0] = src[0];
+      dst[1] = flip_v ? 1.0f - src[1] : src[1];
     }
+  } else if (width == 3) {
+    float *dst;
+    const float *src;
 
-    if (idx >= value_count)
-      continue;
+    for (i = 0; i < loop_count; i++) {
+      AKB_LOOP_ATTR_INDEX(i);
+      dst = out + (size_t)i * 3;
+      if (idx >= value_count) {
+        dst[0] = 0.0f;
+        dst[1] = 0.0f;
+        dst[2] = 0.0f;
+        continue;
+      }
+      src = values + (size_t)idx * 3;
+      dst[0] = src[0];
+      dst[1] = src[1];
+      dst[2] = src[2];
+    }
+  } else if (width == 4) {
+    float *dst;
+    const float *src;
 
-    for (j = 0; j < width; j++)
-      out[(size_t)i * width + j] = values[(size_t)idx * width + j];
+    for (i = 0; i < loop_count; i++) {
+      AKB_LOOP_ATTR_INDEX(i);
+      dst = out + (size_t)i * 4;
+      if (idx >= value_count) {
+        dst[0] = 0.0f;
+        dst[1] = 0.0f;
+        dst[2] = 0.0f;
+        dst[3] = 0.0f;
+        continue;
+      }
+      src = values + (size_t)idx * 4;
+      dst[0] = src[0];
+      dst[1] = src[1];
+      dst[2] = src[2];
+      dst[3] = src[3];
+    }
+  } else {
+    for (i = 0; i < loop_count; i++) {
+      AKB_LOOP_ATTR_INDEX(i);
+      if (idx >= value_count) {
+        for (j = 0; j < width; j++)
+          out[(size_t)i * width + j] = 0.0f;
+        continue;
+      }
 
-    if (flip_v && width >= 2)
-      out[(size_t)i * width + 1] = 1.0f - out[(size_t)i * width + 1];
+      for (j = 0; j < width; j++)
+        out[(size_t)i * width + j] = values[(size_t)idx * width + j];
+
+      if (flip_v && width >= 2)
+        out[(size_t)i * width + 1] = 1.0f - out[(size_t)i * width + 1];
+    }
   }
 
-  free(values);
+#undef AKB_LOOP_ATTR_INDEX
+
+  if (!borrowed_values)
+    free(values);
   *has_attr = 1;
   return out;
 }
@@ -2541,7 +3275,8 @@ akb_loop_attr_name(AkbLoopFloatAttribute *attr,
 }
 
 static int
-akb_extract_loop_float_attrs(AkbPrimitive *out,
+akb_extract_loop_float_attrs(AkbArena *arena,
+                             AkbPrimitive *out,
                              AkMeshPrimitive *prim,
                              const uint32_t *raw_indices,
                              size_t raw_count,
@@ -2556,11 +3291,13 @@ akb_extract_loop_float_attrs(AkbPrimitive *out,
                              float missing_default,
                              const char *name_prefix,
                              AkbLoopFloatAttribute **attrs_out,
-                             uint32_t *count_out) {
+                             uint32_t *count_out,
+                             uint8_t *arena_attrs_out) {
   AkbLoopFloatAttribute *attrs;
   AkInput *input;
   uint32_t max_count, count;
   uint8_t has_attr;
+  uint8_t arena_values;
 
   (void)out;
 
@@ -2569,6 +3306,8 @@ akb_extract_loop_float_attrs(AkbPrimitive *out,
 
   *attrs_out = NULL;
   *count_out = 0;
+  if (arena_attrs_out)
+    *arena_attrs_out = 0;
   if (!prim || !loop_count)
     return 1;
 
@@ -2582,9 +3321,13 @@ akb_extract_loop_float_attrs(AkbPrimitive *out,
   if (!max_count)
     return 1;
 
-  attrs = (AkbLoopFloatAttribute *)calloc(max_count, sizeof(*attrs));
+  attrs = (AkbLoopFloatAttribute *)akb_owned_alloc(arena,
+                                                   max_count * sizeof(*attrs),
+                                                   sizeof(*attrs),
+                                                   arena_attrs_out);
   if (!attrs)
     return 0;
+  memset(attrs, 0, max_count * sizeof(*attrs));
 
   count = 0;
   for (input = prim->input; input; input = input->next) {
@@ -2593,7 +3336,9 @@ akb_extract_loop_float_attrs(AkbPrimitive *out,
       continue;
 
     has_attr = 0;
-    attrs[count].values = akb_loop_attribute_copy(prim,
+    arena_values = 0;
+    attrs[count].values = akb_loop_attribute_copy(arena,
+                                                  prim,
                                                   input,
                                                   raw_indices,
                                                   raw_count,
@@ -2601,12 +3346,14 @@ akb_extract_loop_float_attrs(AkbPrimitive *out,
                                                   loop_count,
                                                   width,
                                                   flip_v,
-                                                  &has_attr);
+                                                  &has_attr,
+                                                  &arena_values);
     if (!attrs[count].values || !has_attr)
       continue;
 
     attrs[count].width = width;
     attrs[count].set = input->set;
+    attrs[count].borrowed = arena_values;
     akb_fill_missing_components(attrs[count].values,
                                 loop_count,
                                 width,
@@ -2617,12 +3364,84 @@ akb_extract_loop_float_attrs(AkbPrimitive *out,
   }
 
   if (!count) {
-    free(attrs);
+    if (!arena_attrs_out || !*arena_attrs_out)
+      free(attrs);
     return 1;
   }
 
   *attrs_out = attrs;
   *count_out = count;
+  return 1;
+}
+
+static int
+akb_extract_one_loop_float_attr(AkbArena *arena,
+                                AkMeshPrimitive *prim,
+                                AkInput *input,
+                                const uint32_t *raw_indices,
+                                size_t raw_count,
+                                const uint32_t *vertex_indices,
+                                uint32_t loop_count,
+                                uint32_t width,
+                                int flip_v,
+                                float missing_default,
+                                const char *name_prefix,
+                                AkbLoopFloatAttribute **attrs_out,
+                                uint32_t *count_out,
+                                uint8_t *arena_attrs_out) {
+  AkbLoopFloatAttribute *attrs;
+  uint8_t has_attr;
+  uint8_t arena_values;
+
+  if (!attrs_out || !count_out)
+    return 0;
+
+  *attrs_out = NULL;
+  *count_out = 0;
+  if (arena_attrs_out)
+    *arena_attrs_out = 0;
+  if (!input || !input->accessor || !loop_count)
+    return 1;
+
+  attrs = (AkbLoopFloatAttribute *)akb_owned_alloc(arena,
+                                                   sizeof(*attrs),
+                                                   sizeof(*attrs),
+                                                   arena_attrs_out);
+  if (!attrs)
+    return 0;
+  memset(attrs, 0, sizeof(*attrs));
+
+  has_attr = 0;
+  arena_values = 0;
+  attrs[0].values = akb_loop_attribute_copy(arena,
+                                            prim,
+                                            input,
+                                            raw_indices,
+                                            raw_count,
+                                            vertex_indices,
+                                            loop_count,
+                                            width,
+                                            flip_v,
+                                            &has_attr,
+                                            &arena_values);
+  if (!attrs[0].values || !has_attr) {
+    if (!arena_attrs_out || !*arena_attrs_out)
+      free(attrs);
+    return 1;
+  }
+
+  attrs[0].width = width;
+  attrs[0].set = input->set;
+  attrs[0].borrowed = arena_values;
+  akb_fill_missing_components(attrs[0].values,
+                              loop_count,
+                              width,
+                              input->accessor->componentCount,
+                              missing_default);
+  akb_loop_attr_name(attrs, name_prefix, 0);
+
+  *attrs_out = attrs;
+  *count_out = 1;
   return 1;
 }
 
@@ -2665,6 +3484,53 @@ akb_point_attr_candidate(AkInput *input, uint32_t primitive_type) {
          || akb_raw_semantic_is(input, "SCALE")
          || akb_raw_semantic_is(input, "ROTATION")
          || akb_raw_semantic_starts_with(input, "COLOR");
+}
+
+static void
+akb_scan_inputs(AkMeshPrimitive *prim, uint32_t primitive_type, AkbInputScan *scan) {
+  AkInput *input;
+
+  memset(scan, 0, sizeof(*scan));
+  if (!prim)
+    return;
+
+  for (input = prim->input; input; input = input->next) {
+    if (!input->accessor || input->accessor->count == 0)
+      continue;
+
+    if (!scan->normal
+        && akb_input_matches(input, AK_INPUT_NORMAL, AK_INPUT_NORMAL, "NORMAL", NULL)) {
+      scan->normal = input;
+      continue;
+    }
+
+    if (!scan->tangent
+        && akb_input_matches(input,
+                             AK_INPUT_TANGENT,
+                             AK_INPUT_TEXTANGENT,
+                             "TANGENT",
+                             "TEXTANGENT")) {
+      scan->tangent = input;
+      continue;
+    }
+
+    if (akb_input_matches(input, AK_INPUT_TEXCOORD, AK_INPUT_UV, "TEXCOORD", "UV")) {
+      if (!scan->uv)
+        scan->uv = input;
+      scan->uv_count++;
+      continue;
+    }
+
+    if (akb_input_matches(input, AK_INPUT_COLOR, AK_INPUT_COLOR, "COLOR", NULL)) {
+      if (!scan->color)
+        scan->color = input;
+      scan->color_count++;
+      continue;
+    }
+
+    if (akb_point_attr_candidate(input, primitive_type))
+      scan->point_attr_count++;
+  }
 }
 
 static uint32_t
@@ -3517,18 +4383,7 @@ akb_resolve_skin_joint_nodes(AkbPrimitiveList *list, AkbSceneNodeList *nodes) {
 
 static size_t
 akb_list_count_skin_primitives(const AkbPrimitiveList *list) {
-  size_t count = 0;
-  size_t i;
-
-  if (!list)
-    return 0;
-
-  for (i = 0; i < list->count; i++) {
-    if (list->items[i].has_skin)
-      count++;
-  }
-
-  return count;
+  return list ? list->skin_count : 0;
 }
 
 static AkInput *
@@ -4621,6 +5476,8 @@ akb_animation_new_for_bindings(AkDoc *doc,
   *ok = 1;
   if (!doc || !bindings || binding_count <= 0)
     return NULL;
+  if ((index && !index->count) || (!index && !doc->lib.animations))
+    return NULL;
 
   animation = (AkbAnimation *)calloc(1, sizeof(*animation));
   if (!animation) {
@@ -5233,6 +6090,9 @@ akb_material_animation_new(AkDoc *doc,
   int binding_count;
 
   *ok = 1;
+  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations)))
+    return NULL;
+
   effect = akb_primitive_effect(prim, bind_material, NULL, NULL);
   cmn = effect ? ak_getProfileTechniqueCommon(effect) : NULL;
   binding_count = akb_material_bindings(cmn, bindings, 64);
@@ -5403,6 +6263,9 @@ akb_animation_new(AkDoc *doc,
   int is_gltf;
 
   *ok = 1;
+  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations)))
+    return NULL;
+
   is_gltf = doc && doc->inf && doc->inf->ftype == AK_FILE_TYPE_GLTF;
   needs_bake = ak_nodeNeedsBaking(node) || (!is_gltf && akb_node_has_rotate(node));
 
@@ -5486,6 +6349,8 @@ akb_morph_animation_new(AkDoc *doc,
 
   *ok = 1;
   if (!morpher || !morpher->morph || !morpher->morph->targetCount)
+    return NULL;
+  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations)))
     return NULL;
 
   binding.target = morpher;
@@ -5640,10 +6505,13 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   out.has_transform = 1;
   akb_extract_node_camera(&out, node);
   akb_extract_node_light(&out, node);
-  out.animation = akb_animation_new(doc, doc_owner, node, anim_index, coord, &ok);
-  if (!ok) {
-    akb_scene_node_free(&out);
-    return 0;
+  if ((anim_index && anim_index->count)
+      || (!anim_index && doc && doc->lib.animations)) {
+    out.animation = akb_animation_new(doc, doc_owner, node, anim_index, coord, &ok);
+    if (!ok) {
+      akb_scene_node_free(&out);
+      return 0;
+    }
   }
 
   if (!akb_node_list_push(nodes, &out)) {
@@ -5789,7 +6657,6 @@ akb_extract_simple_mesh_group(AkbArena *arena,
   size_t total_face_count = 0;
   size_t vertex_offset = 0;
   size_t loop_offset = 0;
-  size_t face_offset = 0;
   uint32_t pos_count;
   uint32_t loop_count;
   uint32_t stride;
@@ -5839,7 +6706,7 @@ akb_extract_simple_mesh_group(AkbArena *arena,
 
     if (total_vertex_count > (SIZE_MAX / (3 * sizeof(float))) - pos_count
         || total_loop_count > (SIZE_MAX / sizeof(uint32_t)) - loop_count
-        || total_face_count > (SIZE_MAX / (2 * sizeof(int32_t))) - (loop_count / 3))
+        || total_face_count > SIZE_MAX - (loop_count / 3))
       return 0;
 
     total_vertex_count += pos_count;
@@ -5883,16 +6750,10 @@ akb_extract_simple_mesh_group(AkbArena *arena,
                                             total_loop_count * sizeof(uint32_t),
                                             sizeof(uint32_t),
                                             &out.arena_indices);
-  out.loop_meta = (int32_t *)akb_owned_alloc(arena,
-                                             total_face_count * 2 * sizeof(int32_t),
-                                             sizeof(int32_t),
-                                             &out.arena_loop_meta);
-  if (!out.vertices || !out.indices || !out.loop_meta) {
+  if (!out.vertices || !out.indices) {
     akb_primitive_free(&out);
     return 0;
   }
-  out.loop_starts = out.loop_meta;
-  out.loop_totals = out.loop_meta + total_face_count;
 
   for (prim = mesh->primitive; prim; prim = prim->next) {
     pos_input = akb_primitive_position_input(prim);
@@ -5918,15 +6779,11 @@ akb_extract_simple_mesh_group(AkbArena *arena,
         out.indices[loop_offset + i] = (uint32_t)(vertex_offset + i);
     }
 
-    for (i = 0; i < loop_count / 3; i++) {
-      out.loop_starts[face_offset + i] = (int32_t)(loop_offset + (size_t)i * 3);
-      out.loop_totals[face_offset + i] = 3;
-    }
-
     vertex_offset += pos_count;
     loop_offset += loop_count;
-    face_offset += loop_count / 3;
   }
+
+  akb_finalize_primitive_buffers(arena, &out, options);
 
   if (!akb_list_push(list, &out)) {
     akb_primitive_free(&out);
@@ -5950,9 +6807,11 @@ akb_extract_primitive(AkbArena *arena,
                       AkGeometry *geom,
                       AkMesh *mesh,
                       AkMeshPrimitive *prim,
-                      uint32_t prim_index) {
+                      uint32_t prim_index,
+                      const AkbLoadOptions *options) {
   AkbPrimitive out = {0};
   AkInput *pos_input, *normal_input, *tangent_input;
+  AkbInputScan input_scan;
   const uint32_t *raw_indices = NULL;
   size_t raw_count = 0;
   uint32_t pos_count = 0;
@@ -5963,6 +6822,8 @@ akb_extract_primitive(AkbArena *arena,
   int fast_extract;
   const char *base_name;
   AkBindMaterial *bind_material;
+  uint8_t arena_normals;
+  uint8_t arena_tangents;
 
   index_width = akb_primitive_index_width(prim);
   if (!index_width)
@@ -6001,24 +6862,28 @@ akb_extract_primitive(AkbArena *arena,
       out.gsplat.decoded_count = prim->gsplat->decodedCount;
     }
     akb_extract_material(doc, prim, bind_material, &out);
-    out.material_animation = akb_material_animation_new(doc,
-                                                        doc_owner,
-                                                        anim_index,
-                                                        prim,
-                                                        bind_material,
-                                                        NULL,
-                                                        &ok);
-    if (!ok) {
-      akb_primitive_free(&out);
-      return 0;
+    if (anim_index && anim_index->count) {
+      out.material_animation = akb_material_animation_new(doc,
+                                                          doc_owner,
+                                                          anim_index,
+                                                          prim,
+                                                          bind_material,
+                                                          NULL,
+                                                          &ok);
+      if (!ok) {
+        akb_primitive_free(&out);
+        return 0;
+      }
     }
-    if (!akb_extract_material_variants(doc, prim, &out)) {
+    if (prim->variantMappings
+        && prim->variantMappingCount
+        && !akb_extract_material_variants(doc, prim, &out)) {
       akb_primitive_free(&out);
       return 0;
     }
     out.animation = akb_animation_retain(animation);
     out.morph_animation = akb_animation_retain(morph_animation);
-    if (!akb_extract_instancing(arena, &out, node)) {
+    if (node && node->instancing && !akb_extract_instancing(arena, &out, node)) {
       akb_primitive_free(&out);
       return 0;
     }
@@ -6087,7 +6952,8 @@ akb_extract_primitive(AkbArena *arena,
   out.face_count = out.primitive_type == AKB_PRIMITIVE_TRIANGLES
                    ? out.loop_count / index_width
                    : 0;
-  if (out.face_count) {
+  if (out.face_count
+      && (out.primitive_type != AKB_PRIMITIVE_TRIANGLES || index_width != 3)) {
     out.loop_meta = (int32_t *)akb_owned_alloc(arena,
                                                 (size_t)out.face_count * 2 * sizeof(int32_t),
                                                 sizeof(int32_t),
@@ -6100,102 +6966,166 @@ akb_extract_primitive(AkbArena *arena,
     out.loop_totals = out.loop_meta + out.face_count;
   }
 
-  for (i = 0; i < out.face_count; i++) {
-    out.loop_starts[i] = (int32_t)(i * 3);
-    out.loop_totals[i] = 3;
+  if (out.loop_meta) {
+    for (i = 0; i < out.face_count; i++) {
+      out.loop_starts[i] = (int32_t)(i * index_width);
+      out.loop_totals[i] = (int32_t)index_width;
+    }
   }
 
-  if (!fast_extract && !akb_extract_point_float_attrs(&out, prim, doc_owner)) {
+  if (!fast_extract
+      && out.primitive_type != AKB_PRIMITIVE_TRIANGLES
+      && !akb_extract_point_float_attrs(&out, prim, doc_owner)) {
     akb_primitive_free(&out);
     return 0;
   }
 
   if (!fast_extract && out.primitive_type == AKB_PRIMITIVE_TRIANGLES) {
-    normal_input = akb_find_input(prim, AK_INPUT_NORMAL, AK_INPUT_NORMAL, "NORMAL", NULL);
-    out.normals = akb_loop_attribute_copy(prim,
-                                          normal_input,
-                                          raw_indices,
-                                          raw_count,
-                                          out.indices,
-                                          out.loop_count,
-                                          3,
-                                          0,
-                                          &out.has_normals);
-    if (out.has_normals)
-      akb_try_extract_vertex_normals(&out,
-                                     normal_input,
-                                     pos_input,
-                                     doc_owner,
-                                     node);
-
-    if (!akb_extract_loop_float_attrs(&out,
-                                      prim,
-                                      raw_indices,
-                                      raw_count,
-                                      out.indices,
-                                      out.loop_count,
-                                      AK_INPUT_TEXCOORD,
-                                      AK_INPUT_UV,
-                                      "TEXCOORD",
-                                      "UV",
-                                      2,
-                                      1,
-                                      0.0f,
-                                      "UVMap",
-                                      &out.uv_sets,
-                                      &out.uv_set_count)) {
+    akb_scan_inputs(prim, out.primitive_type, &input_scan);
+    if (input_scan.point_attr_count
+        && !akb_extract_point_float_attrs(&out, prim, doc_owner)) {
       akb_primitive_free(&out);
       return 0;
+    }
+
+    normal_input = input_scan.normal;
+    akb_try_extract_vertex_normals(&out,
+                                   normal_input,
+                                   pos_input,
+                                   doc_owner,
+                                   node);
+    if (!out.has_vertex_normals) {
+      arena_normals = 0;
+      out.normals = akb_loop_attribute_copy(arena,
+                                            prim,
+                                            normal_input,
+                                            raw_indices,
+                                            raw_count,
+                                            out.indices,
+                                            out.loop_count,
+                                            3,
+                                            0,
+                                            &out.has_normals,
+                                            &arena_normals);
+      if (arena_normals)
+        out.borrowed_normals = 1;
+    }
+
+    if (input_scan.uv_count == 1) {
+      if (!akb_extract_one_loop_float_attr(arena,
+                                           prim,
+                                           input_scan.uv,
+                                           raw_indices,
+                                           raw_count,
+                                           out.indices,
+                                           out.loop_count,
+                                           2,
+                                           1,
+                                           0.0f,
+                                           "UVMap",
+                                           &out.uv_sets,
+                                           &out.uv_set_count,
+                                           &out.arena_uv_sets)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
+    } else if (input_scan.uv_count > 1) {
+      if (!akb_extract_loop_float_attrs(arena,
+                                        &out,
+                                        prim,
+                                        raw_indices,
+                                        raw_count,
+                                        out.indices,
+                                        out.loop_count,
+                                        AK_INPUT_TEXCOORD,
+                                        AK_INPUT_UV,
+                                        "TEXCOORD",
+                                        "UV",
+                                        2,
+                                        1,
+                                        0.0f,
+                                        "UVMap",
+                                        &out.uv_sets,
+                                        &out.uv_set_count,
+                                        &out.arena_uv_sets)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
     }
     if (out.uv_set_count) {
       out.uvs = out.uv_sets[0].values;
       out.has_uvs = 1;
     }
 
-    if (!akb_extract_loop_float_attrs(&out,
-                                      prim,
-                                      raw_indices,
-                                      raw_count,
-                                      out.indices,
-                                      out.loop_count,
-                                      AK_INPUT_COLOR,
-                                      AK_INPUT_COLOR,
-                                      "COLOR",
-                                      NULL,
-                                      4,
-                                      0,
-                                      1.0f,
-                                      "Color",
-                                      &out.color_sets,
-                                      &out.color_set_count)) {
-      akb_primitive_free(&out);
-      return 0;
-    }
-    if (out.color_set_count) {
-      out.colors = out.color_sets[0].values;
-      out.has_colors = 1;
-    }
-
-    tangent_input = akb_find_input(prim,
-                                   AK_INPUT_TANGENT,
-                                   AK_INPUT_TEXTANGENT,
-                                   "TANGENT",
-                                   "TEXTANGENT");
-    out.tangents = akb_loop_attribute_copy(prim,
-                                           tangent_input,
+    if (input_scan.color_count == 1) {
+      if (!akb_extract_one_loop_float_attr(arena,
+                                           prim,
+                                           input_scan.color,
                                            raw_indices,
                                            raw_count,
                                            out.indices,
                                            out.loop_count,
                                            4,
                                            0,
-                                           &out.has_tangents);
-    if (out.tangents && tangent_input && tangent_input->accessor)
-      akb_fill_missing_components(out.tangents,
-                                  out.loop_count,
-                                  4,
-                                  tangent_input->accessor->componentCount,
-                                  1.0f);
+                                           1.0f,
+                                           "Color",
+                                           &out.color_sets,
+                                           &out.color_set_count,
+                                           &out.arena_color_sets)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
+    } else if (input_scan.color_count > 1) {
+      if (!akb_extract_loop_float_attrs(arena,
+                                        &out,
+                                        prim,
+                                        raw_indices,
+                                        raw_count,
+                                        out.indices,
+                                        out.loop_count,
+                                        AK_INPUT_COLOR,
+                                        AK_INPUT_COLOR,
+                                        "COLOR",
+                                        NULL,
+                                        4,
+                                        0,
+                                        1.0f,
+                                        "Color",
+                                        &out.color_sets,
+                                        &out.color_set_count,
+                                        &out.arena_color_sets)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
+    }
+    if (out.color_set_count) {
+      out.colors = out.color_sets[0].values;
+      out.has_colors = 1;
+    }
+
+    tangent_input = input_scan.tangent;
+    if (tangent_input) {
+      arena_tangents = 0;
+      out.tangents = akb_loop_attribute_copy(arena,
+                                             prim,
+                                             tangent_input,
+                                             raw_indices,
+                                             raw_count,
+                                             out.indices,
+                                             out.loop_count,
+                                             4,
+                                             0,
+                                             &out.has_tangents,
+                                             &arena_tangents);
+      if (arena_tangents)
+        out.borrowed_tangents = 1;
+      if (out.tangents && tangent_input->accessor)
+        akb_fill_missing_components(out.tangents,
+                                    out.loop_count,
+                                    4,
+                                    tangent_input->accessor->componentCount,
+                                    1.0f);
+    }
 
     if (node && node->geometry && node->geometry->morpher) {
       if (!akb_extract_morph_targets(&out,
@@ -6235,6 +7165,8 @@ akb_extract_primitive(AkbArena *arena,
   else
     snprintf(out.name, sizeof(out.name), "%s", base_name);
 
+  akb_finalize_primitive_buffers(arena, &out, options);
+
   if (!akb_list_push(list, &out)) {
     akb_primitive_free(&out);
     return 0;
@@ -6252,6 +7184,92 @@ akb_primitive_reuse_cache_free(AkbPrimitiveReuseCache *cache) {
   memset(cache, 0, sizeof(*cache));
 }
 
+static uint64_t
+akb_primitive_reuse_hash(AkGeometry *geom,
+                         AkMesh *mesh,
+                         AkMeshPrimitive *prim,
+                         AkBindMaterial *bind_material,
+                         uint32_t prim_index) {
+  uint64_t hash = UINT64_C(1469598103934665603);
+
+  hash = akb_fnv1a64_mix_u64(hash, (uintptr_t)geom);
+  hash = akb_fnv1a64_mix_u64(hash, (uintptr_t)mesh);
+  hash = akb_fnv1a64_mix_u64(hash, (uintptr_t)prim);
+  hash = akb_fnv1a64_mix_u64(hash, (uintptr_t)bind_material);
+  hash = akb_fnv1a64_mix_u64(hash, prim_index);
+  return hash;
+}
+
+static int
+akb_primitive_reuse_entry_matches(const AkbPrimitiveReuseEntry *entry,
+                                  AkGeometry *geom,
+                                  AkMesh *mesh,
+                                  AkMeshPrimitive *prim,
+                                  AkBindMaterial *bind_material,
+                                  uint32_t prim_index) {
+  return entry
+         && entry->occupied
+         && entry->geom == geom
+         && entry->mesh == mesh
+         && entry->prim == prim
+         && entry->bind_material == bind_material
+         && entry->prim_index == prim_index;
+}
+
+static void
+akb_primitive_reuse_cache_insert_entry(AkbPrimitiveReuseEntry *items,
+                                       size_t capacity,
+                                       AkbPrimitiveReuseEntry entry) {
+  size_t mask;
+  size_t index;
+
+  mask = capacity - 1;
+  index = (size_t)akb_primitive_reuse_hash(entry.geom,
+                                           entry.mesh,
+                                           entry.prim,
+                                           entry.bind_material,
+                                           entry.prim_index) & mask;
+  while (items[index].occupied)
+    index = (index + 1) & mask;
+  items[index] = entry;
+}
+
+static int
+akb_primitive_reuse_cache_resize(AkbPrimitiveReuseCache *cache, size_t capacity) {
+  AkbPrimitiveReuseEntry *items;
+  AkbPrimitiveReuseEntry *old_items;
+  size_t old_capacity;
+  size_t i;
+
+  if (!cache)
+    return 1;
+
+  if (capacity < 64)
+    capacity = 64;
+  if (capacity & (capacity - 1)) {
+    size_t pow2 = 64;
+    while (pow2 < capacity)
+      pow2 <<= 1;
+    capacity = pow2;
+  }
+
+  items = (AkbPrimitiveReuseEntry *)calloc(capacity, sizeof(*items));
+  if (!items)
+    return 0;
+
+  old_items = cache->items;
+  old_capacity = cache->capacity;
+  for (i = 0; i < old_capacity; i++) {
+    if (old_items[i].occupied)
+      akb_primitive_reuse_cache_insert_entry(items, capacity, old_items[i]);
+  }
+
+  free(old_items);
+  cache->items = items;
+  cache->capacity = capacity;
+  return 1;
+}
+
 static int
 akb_primitive_reuse_cache_find(const AkbPrimitiveReuseCache *cache,
                                AkGeometry *geom,
@@ -6260,23 +7278,28 @@ akb_primitive_reuse_cache_find(const AkbPrimitiveReuseCache *cache,
                                AkBindMaterial *bind_material,
                                uint32_t prim_index,
                                size_t *source_index) {
-  size_t i;
+  size_t mask;
+  size_t index;
 
-  if (!cache || !source_index)
+  if (!cache || !source_index || !cache->items || !cache->capacity)
     return 0;
 
-  for (i = 0; i < cache->count; i++) {
-    if (cache->items[i].geom == geom
-        && cache->items[i].mesh == mesh
-        && cache->items[i].prim == prim
-        && cache->items[i].bind_material == bind_material
-        && cache->items[i].prim_index == prim_index) {
-      *source_index = cache->items[i].source_index;
+  mask = cache->capacity - 1;
+  index = (size_t)akb_primitive_reuse_hash(geom, mesh, prim, bind_material, prim_index) & mask;
+  for (;;) {
+    if (!cache->items[index].occupied)
+      return 0;
+    if (akb_primitive_reuse_entry_matches(&cache->items[index],
+                                          geom,
+                                          mesh,
+                                          prim,
+                                          bind_material,
+                                          prim_index)) {
+      *source_index = cache->items[index].source_index;
       return 1;
     }
+    index = (index + 1) & mask;
   }
-
-  return 0;
 }
 
 static int
@@ -6287,28 +7310,28 @@ akb_primitive_reuse_cache_add(AkbPrimitiveReuseCache *cache,
                               AkBindMaterial *bind_material,
                               uint32_t prim_index,
                               size_t source_index) {
-  AkbPrimitiveReuseEntry *items;
-  size_t capacity;
+  AkbPrimitiveReuseEntry entry = {0};
 
   if (!cache)
     return 1;
 
-  if (cache->count == cache->capacity) {
-    capacity = cache->capacity ? cache->capacity * 2 : 32;
-    items = (AkbPrimitiveReuseEntry *)realloc(cache->items,
-                                              capacity * sizeof(*items));
-    if (!items)
+  if (!cache->capacity
+      || (cache->count + 1) * 10 >= cache->capacity * 7) {
+    if (!akb_primitive_reuse_cache_resize(cache,
+                                          cache->capacity
+                                          ? cache->capacity * 2
+                                          : 64))
       return 0;
-    cache->items = items;
-    cache->capacity = capacity;
   }
 
-  cache->items[cache->count].geom = geom;
-  cache->items[cache->count].mesh = mesh;
-  cache->items[cache->count].prim = prim;
-  cache->items[cache->count].bind_material = bind_material;
-  cache->items[cache->count].prim_index = prim_index;
-  cache->items[cache->count].source_index = source_index;
+  entry.geom = geom;
+  entry.mesh = mesh;
+  entry.prim = prim;
+  entry.bind_material = bind_material;
+  entry.prim_index = prim_index;
+  entry.source_index = source_index;
+  entry.occupied = 1;
+  akb_primitive_reuse_cache_insert_entry(cache->items, cache->capacity, entry);
   cache->count++;
   return 1;
 }
@@ -6379,11 +7402,13 @@ akb_primitive_clone_shared(AkbPrimitive *dst,
 
   dst->borrowed_vertices = src->vertices != NULL;
   dst->borrowed_indices = src->indices != NULL;
+  dst->borrowed_edges = src->edges != NULL;
   dst->borrowed_normals = src->normals != NULL;
   dst->borrowed_vertex_normals = src->vertex_normals != NULL;
   dst->borrowed_tangents = src->tangents != NULL;
   dst->arena_vertices = 0;
   dst->arena_indices = 0;
+  dst->arena_edges = 0;
   dst->arena_loop_meta = src->loop_meta != NULL;
   dst->arena_instance_matrices = src->instance_matrices != NULL;
   dst->arena_skin_joint_nodes = src->skin_joint_nodes != NULL;
@@ -6439,7 +7464,8 @@ akb_extract_primitive_cached(AkbArena *arena,
                              AkGeometry *geom,
                              AkMesh *mesh,
                              AkMeshPrimitive *prim,
-                             uint32_t prim_index) {
+                             uint32_t prim_index,
+                             const AkbLoadOptions *options) {
   AkbPrimitive out = {0};
   AkBindMaterial *bind_material;
   size_t source_index;
@@ -6486,7 +7512,8 @@ akb_extract_primitive_cached(AkbArena *arena,
                              geom,
                              mesh,
                              prim,
-                             prim_index))
+                             prim_index,
+                             options))
     return 0;
 
   if (can_reuse && list->count > before_count) {
@@ -6561,7 +7588,8 @@ akb_extract_mesh(AkbArena *arena,
                                       geom,
                                       mesh,
                                       prim,
-                                      prim_index))
+                                      prim_index,
+                                      options))
       return 0;
   }
 
@@ -6606,7 +7634,9 @@ akb_extract_node(AkbArena *arena,
     animation = akb_animation_retain(nodes->items[node_index].animation);
     morph_animation = NULL;
     ok = 1;
-    if (node->geometry->morpher) {
+    if (node->geometry->morpher
+        && ((anim_index && anim_index->count)
+            || (!anim_index && doc && doc->lib.animations))) {
       morph_animation = akb_morph_animation_new(doc,
                                                 doc_owner,
                                                 anim_index,
@@ -6840,6 +7870,7 @@ akb_extract_doc(AkDoc *doc,
   AkbCoordContext coord;
   AkbAnimationIndex anim_index;
   AkbSceneEstimate estimate;
+  AkbLoadOptions runtime_options;
   AkLibrary *lib;
   AkGeometry *geom;
   size_t fallback_estimate;
@@ -6856,11 +7887,12 @@ akb_extract_doc(AkDoc *doc,
   double set_coord_ms = 0.0;
   int profile;
 
+  runtime_options = *options;
   profile = akb_profile_enabled();
   if (profile)
     total_started_at = phase_started_at = akb_now_ms();
 
-  akb_prepare_blender_coords(doc, &coord, options);
+  akb_prepare_blender_coords(doc, &coord, &runtime_options);
   if (profile) {
     coord_ms = akb_now_ms() - phase_started_at;
     phase_started_at = akb_now_ms();
@@ -6873,7 +7905,12 @@ akb_extract_doc(AkDoc *doc,
     phase_started_at = akb_now_ms();
   }
 
-  estimate = akb_estimate_scene(doc, options);
+  estimate = akb_estimate_scene(doc, &runtime_options);
+  if (estimate.primitives >= AKB_LARGE_SCENE_PRIMITIVE_THRESHOLD) {
+    runtime_options.build_triangle_edges = 0;
+    runtime_options.geometry_keys = 0;
+    runtime_options.geometry_content_keys = 0;
+  }
   if ((estimate.primitives && !akb_list_reserve(&import->primitives, estimate.primitives))
       || (estimate.nodes && !akb_node_list_reserve(&import->nodes, estimate.nodes))) {
     akb_animation_index_free(&anim_index);
@@ -6887,7 +7924,7 @@ akb_extract_doc(AkDoc *doc,
                          &import->primitives,
                          &import->nodes,
                          &coord,
-                         options,
+                         &runtime_options,
                          &reuse_hits)) {
     akb_animation_index_free(&anim_index);
     return 0;
@@ -6912,7 +7949,7 @@ akb_extract_doc(AkDoc *doc,
   }
 
   if (import->primitives.count > 0) {
-    akb_list_set_coord_matrix(&import->primitives, &coord);
+    akb_list_set_coord_matrix(&import->primitives, &coord, skin_count > 0);
     if (profile) {
       set_coord_ms = akb_now_ms() - phase_started_at;
       akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
@@ -6935,7 +7972,12 @@ akb_extract_doc(AkDoc *doc,
 
   if (profile)
     phase_started_at = akb_now_ms();
-  fallback_estimate = akb_estimate_library_primitives(doc, options);
+  fallback_estimate = akb_estimate_library_primitives(doc, &runtime_options);
+  if (fallback_estimate >= AKB_LARGE_SCENE_PRIMITIVE_THRESHOLD) {
+    runtime_options.build_triangle_edges = 0;
+    runtime_options.geometry_keys = 0;
+    runtime_options.geometry_content_keys = 0;
+  }
   if (fallback_estimate && !akb_list_reserve(&import->primitives, fallback_estimate)) {
     akb_animation_index_free(&anim_index);
     return 0;
@@ -6954,7 +7996,7 @@ akb_extract_doc(AkDoc *doc,
                             NULL,
                             -1,
                             geom,
-                            options)) {
+                            &runtime_options)) {
         akb_animation_index_free(&anim_index);
         return 0;
       }
@@ -6965,7 +8007,7 @@ akb_extract_doc(AkDoc *doc,
     phase_started_at = akb_now_ms();
   }
 
-  akb_list_set_coord_matrix(&import->primitives, &coord);
+  akb_list_set_coord_matrix(&import->primitives, &coord, 1);
   if (profile) {
     set_coord_ms = akb_now_ms() - phase_started_at;
     akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
@@ -7034,6 +8076,39 @@ akb_unicode_from_cstr(const char *value) {
 
   PyErr_Clear();
   return PyUnicode_DecodeUTF8(value, (Py_ssize_t)len, "replace");
+}
+
+static int
+akb_float_default(float value, float defval) {
+  if (value == defval)
+    return 1;
+  return fabsf(value - defval) <= 1.0e-6f;
+}
+
+static PyObject *
+akb_float_or_none(float value, float defval) {
+  if (akb_float_default(value, defval))
+    Py_RETURN_NONE;
+  return PyFloat_FromDouble(value);
+}
+
+static PyObject *
+akb_vec3_or_none(const float value[3], float x, float y, float z) {
+  if (akb_float_default(value[0], x)
+      && akb_float_default(value[1], y)
+      && akb_float_default(value[2], z))
+    Py_RETURN_NONE;
+  return Py_BuildValue("(fff)", value[0], value[1], value[2]);
+}
+
+static PyObject *
+akb_vec4_or_none(const float value[4], float x, float y, float z, float w) {
+  if (akb_float_default(value[0], x)
+      && akb_float_default(value[1], y)
+      && akb_float_default(value[2], z)
+      && akb_float_default(value[3], w))
+    Py_RETURN_NONE;
+  return Py_BuildValue("(ffff)", value[0], value[1], value[2], value[3]);
 }
 
 static int
@@ -7506,21 +8581,112 @@ static PyObject *
 akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner);
 
 static int
+akb_float_eq(float a, float b) {
+  if (a == b)
+    return 1;
+  return fabsf(a - b) <= 1.0e-6f;
+}
+
+static int
+akb_vec3_eq(const float v[3], float x, float y, float z) {
+  return akb_float_eq(v[0], x)
+         && akb_float_eq(v[1], y)
+         && akb_float_eq(v[2], z);
+}
+
+static int
+akb_vec4_eq(const float v[4], float x, float y, float z, float w) {
+  return akb_float_eq(v[0], x)
+         && akb_float_eq(v[1], y)
+         && akb_float_eq(v[2], z)
+         && akb_float_eq(v[3], w);
+}
+
+static int
+akb_primitive_has_default_material_values(const AkbPrimitive *prim) {
+  return prim
+         && akb_vec4_eq(prim->base_color, 1.0f, 1.0f, 1.0f, 1.0f)
+         && akb_vec4_eq(prim->transparent_color, 1.0f, 1.0f, 1.0f, 1.0f)
+         && akb_vec3_eq(prim->emissive_color, 0.0f, 0.0f, 0.0f)
+         && akb_vec3_eq(prim->specular_color, 1.0f, 1.0f, 1.0f)
+         && akb_vec3_eq(prim->sheen_color, 0.0f, 0.0f, 0.0f)
+         && akb_vec3_eq(prim->volume_attenuation_color, 1.0f, 1.0f, 1.0f)
+         && akb_vec3_eq(prim->diffuse_transmission_color, 1.0f, 1.0f, 1.0f)
+         && akb_float_eq(prim->alpha_cutoff, 0.5f)
+         && akb_float_eq(prim->transparent_amount, 1.0f)
+         && akb_float_eq(prim->opacity, 1.0f)
+         && akb_float_eq(prim->normal_scale, 1.0f)
+         && akb_float_eq(prim->occlusion_strength, 1.0f)
+         && akb_float_eq(prim->emissive_strength, 1.0f)
+         && akb_float_eq(prim->specular_strength, 1.0f)
+         && akb_float_eq(prim->ior, 1.5f)
+         && akb_float_eq(prim->clearcoat, 0.0f)
+         && akb_float_eq(prim->clearcoat_roughness, 0.0f)
+         && akb_float_eq(prim->clearcoat_normal_scale, 1.0f)
+         && akb_float_eq(prim->transmission, 0.0f)
+         && akb_float_eq(prim->sheen_roughness, 0.0f)
+         && akb_float_eq(prim->iridescence, 0.0f)
+         && akb_float_eq(prim->iridescence_ior, 1.3f)
+         && akb_float_eq(prim->iridescence_thickness_minimum, 100.0f)
+         && akb_float_eq(prim->iridescence_thickness_maximum, 400.0f)
+         && akb_float_eq(prim->volume_thickness, 0.0f)
+         && akb_float_eq(prim->volume_attenuation_distance, INFINITY)
+         && akb_float_eq(prim->anisotropy, 0.0f)
+         && akb_float_eq(prim->anisotropy_rotation, 0.0f)
+         && akb_float_eq(prim->diffuse_transmission, 0.0f)
+         && akb_float_eq(prim->dispersion, 0.0f);
+}
+
+static int
+akb_primitive_simple_uvs_ok(const AkbPrimitive *prim) {
+  if (!prim || !prim->uv_set_count)
+    return 1;
+  if (prim->uv_set_count != 1 || !prim->uv_sets || !prim->uvs)
+    return 0;
+  if (prim->uv_sets[0].width != 2)
+    return 0;
+  if (prim->uv_sets[0].values != prim->uvs)
+    return 0;
+  return prim->uv_sets[0].name[0] == '\0'
+         || strcmp(prim->uv_sets[0].name, "UVMap") == 0;
+}
+
+static int
+akb_primitive_simple_base_color_texture_ok(const AkbPrimitive *prim) {
+  AkbTextureInfo *info;
+
+  if (!prim)
+    return 0;
+  if (!prim->base_color_texture[0])
+    return prim->texture_info_count == 0;
+  if (prim->texture_info_count == 0)
+    return 1;
+  if (prim->texture_info_count != 1)
+    return 0;
+
+  info = (AkbTextureInfo *)&prim->texture_infos[0];
+  if (strcmp(info->role, "base_color") != 0)
+    return 0;
+  if (info->has_transform || info->slot != 0 || info->transform_slot > 0)
+    return 0;
+  if (info->texture_extra || info->texref_extra || info->image_extra || info->sampler_extra)
+    return 0;
+  return 1;
+}
+
+static int
 akb_primitive_is_simple_py(const AkbPrimitive *prim) {
   return prim
-         && !prim->material_name[0]
-         && !prim->material_key
-         && !prim->texture_info_count
-         && !prim->uv_set_count
+         && akb_primitive_has_default_material_values(prim)
+         && akb_primitive_simple_uvs_ok(prim)
+         && akb_primitive_simple_base_color_texture_ok(prim)
          && !prim->color_set_count
          && !prim->point_attr_count
          && !prim->has_skin
          && !prim->has_gsplat
          && !prim->has_sheen
-         && !prim->double_sided
          && !prim->alpha_mode
          && !prim->transparent_opaque
-         && !prim->material_type
          && !prim->primitive_extra
          && !prim->mesh_extra
          && !prim->geometry_extra
@@ -7532,7 +8698,6 @@ akb_primitive_is_simple_py(const AkbPrimitive *prim) {
          && !(prim->animation && prim->animation->count)
          && !(prim->morph_animation && prim->morph_animation->count)
          && !(prim->material_animation && prim->material_animation->count)
-         && !prim->base_color_texture[0]
          && !prim->metallic_roughness_texture[0]
          && !prim->occlusion_texture[0]
          && !prim->normal_texture[0]
@@ -7635,6 +8800,28 @@ akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
                                            * 4
                                            * sizeof(float)
                                          : 0));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_GEOMETRY_KEY,
+                 PyLong_FromUnsignedLongLong((unsigned long long)prim->geometry_key));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_EDGE_COUNT, PyLong_FromUnsignedLong(prim->edge_count));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_EDGES_U32,
+                 akb_memoryview_or_empty(prim->edges,
+                                         (size_t)prim->edge_count * 2 * sizeof(uint32_t)));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_UVS_F32,
+                 akb_memoryview_or_empty(prim->uvs,
+                                         prim->has_uvs
+                                         ? (size_t)prim->loop_count
+                                           * 2
+                                           * sizeof(float)
+                                         : 0));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_BASE_COLOR_TEXTURE,
+                 akb_unicode_from_cstr(prim->base_color_texture));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_MATERIAL_TYPE,
+                 PyLong_FromUnsignedLong(prim->material_type));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_MATERIAL_KEY,
+                 PyLong_FromUnsignedLongLong((unsigned long long)prim->material_key));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_METALLIC, PyFloat_FromDouble(prim->metallic));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_ROUGHNESS, PyFloat_FromDouble(prim->roughness));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_DOUBLE_SIDED, PyBool_FromLong(prim->double_sided));
 
 #undef AKB_SIMPLE_SET
 
@@ -7860,64 +9047,48 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ(AKB_PY_PRIM_PRIMITIVE_TYPE, PyLong_FromUnsignedLong(prim->primitive_type));
   AKB_SET_OBJ(AKB_PY_PRIM_PRIMITIVE_MODE, PyLong_FromUnsignedLong(prim->primitive_mode));
   AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_NAME, akb_unicode_from_cstr(prim->material_name));
-  AKB_SET_OBJ(AKB_PY_PRIM_BASE_COLOR, Py_BuildValue("(ffff)",
-                                          prim->base_color[0],
-                                          prim->base_color[1],
-                                          prim->base_color[2],
-                                          prim->base_color[3]));
-  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_COLOR, Py_BuildValue("(ffff)",
-                                                 prim->transparent_color[0],
-                                                 prim->transparent_color[1],
-                                                 prim->transparent_color[2],
-                                                 prim->transparent_color[3]));
-  AKB_SET_OBJ(AKB_PY_PRIM_EMISSIVE_COLOR, Py_BuildValue("(fff)",
-                                             prim->emissive_color[0],
-                                             prim->emissive_color[1],
-                                             prim->emissive_color[2]));
-  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_COLOR, Py_BuildValue("(fff)",
-                                             prim->specular_color[0],
-                                             prim->specular_color[1],
-                                             prim->specular_color[2]));
-  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_COLOR, Py_BuildValue("(fff)",
-                                          prim->sheen_color[0],
-                                          prim->sheen_color[1],
-                                          prim->sheen_color[2]));
-  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_ATTENUATION_COLOR, Py_BuildValue("(fff)",
-                                                        prim->volume_attenuation_color[0],
-                                                        prim->volume_attenuation_color[1],
-                                                        prim->volume_attenuation_color[2]));
-  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR, Py_BuildValue("(fff)",
-                                                          prim->diffuse_transmission_color[0],
-                                                          prim->diffuse_transmission_color[1],
-                                                          prim->diffuse_transmission_color[2]));
-  AKB_SET_OBJ(AKB_PY_PRIM_METALLIC, PyFloat_FromDouble(prim->metallic));
-  AKB_SET_OBJ(AKB_PY_PRIM_ROUGHNESS, PyFloat_FromDouble(prim->roughness));
-  AKB_SET_OBJ(AKB_PY_PRIM_ALPHA_CUTOFF, PyFloat_FromDouble(prim->alpha_cutoff));
-  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_AMOUNT, PyFloat_FromDouble(prim->transparent_amount));
-  AKB_SET_OBJ(AKB_PY_PRIM_OPACITY, PyFloat_FromDouble(prim->opacity));
-  AKB_SET_OBJ(AKB_PY_PRIM_NORMAL_SCALE, PyFloat_FromDouble(prim->normal_scale));
-  AKB_SET_OBJ(AKB_PY_PRIM_OCCLUSION_STRENGTH, PyFloat_FromDouble(prim->occlusion_strength));
-  AKB_SET_OBJ(AKB_PY_PRIM_EMISSIVE_STRENGTH, PyFloat_FromDouble(prim->emissive_strength));
-  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_STRENGTH, PyFloat_FromDouble(prim->specular_strength));
-  AKB_SET_OBJ(AKB_PY_PRIM_IOR, PyFloat_FromDouble(prim->ior));
-  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT, PyFloat_FromDouble(prim->clearcoat));
-  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_ROUGHNESS, PyFloat_FromDouble(prim->clearcoat_roughness));
-  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_NORMAL_SCALE, PyFloat_FromDouble(prim->clearcoat_normal_scale));
-  AKB_SET_OBJ(AKB_PY_PRIM_TRANSMISSION, PyFloat_FromDouble(prim->transmission));
-  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_ROUGHNESS, PyFloat_FromDouble(prim->sheen_roughness));
-  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE, PyFloat_FromDouble(prim->iridescence));
-  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_IOR, PyFloat_FromDouble(prim->iridescence_ior));
+  AKB_SET_OBJ(AKB_PY_PRIM_BASE_COLOR,
+              akb_vec4_or_none(prim->base_color, 1.0f, 1.0f, 1.0f, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_COLOR,
+              akb_vec4_or_none(prim->transparent_color, 1.0f, 1.0f, 1.0f, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_EMISSIVE_COLOR,
+              akb_vec3_or_none(prim->emissive_color, 0.0f, 0.0f, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_COLOR,
+              akb_vec3_or_none(prim->specular_color, 1.0f, 1.0f, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_COLOR,
+              akb_vec3_or_none(prim->sheen_color, 0.0f, 0.0f, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_ATTENUATION_COLOR,
+              akb_vec3_or_none(prim->volume_attenuation_color, 1.0f, 1.0f, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR,
+              akb_vec3_or_none(prim->diffuse_transmission_color, 1.0f, 1.0f, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_METALLIC, akb_float_or_none(prim->metallic, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_ROUGHNESS, akb_float_or_none(prim->roughness, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_ALPHA_CUTOFF, akb_float_or_none(prim->alpha_cutoff, 0.5f));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_AMOUNT, akb_float_or_none(prim->transparent_amount, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_OPACITY, akb_float_or_none(prim->opacity, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_NORMAL_SCALE, akb_float_or_none(prim->normal_scale, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_OCCLUSION_STRENGTH, akb_float_or_none(prim->occlusion_strength, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_EMISSIVE_STRENGTH, akb_float_or_none(prim->emissive_strength, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_SPECULAR_STRENGTH, akb_float_or_none(prim->specular_strength, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_IOR, akb_float_or_none(prim->ior, 1.5f));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT, akb_float_or_none(prim->clearcoat, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_ROUGHNESS, akb_float_or_none(prim->clearcoat_roughness, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_CLEARCOAT_NORMAL_SCALE, akb_float_or_none(prim->clearcoat_normal_scale, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSMISSION, akb_float_or_none(prim->transmission, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_SHEEN_ROUGHNESS, akb_float_or_none(prim->sheen_roughness, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE, akb_float_or_none(prim->iridescence, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_IOR, akb_float_or_none(prim->iridescence_ior, 1.3f));
   AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_THICKNESS_MINIMUM,
-              PyFloat_FromDouble(prim->iridescence_thickness_minimum));
+              akb_float_or_none(prim->iridescence_thickness_minimum, 100.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_IRIDESCENCE_THICKNESS_MAXIMUM,
-              PyFloat_FromDouble(prim->iridescence_thickness_maximum));
-  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_THICKNESS, PyFloat_FromDouble(prim->volume_thickness));
+              akb_float_or_none(prim->iridescence_thickness_maximum, 400.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_THICKNESS, akb_float_or_none(prim->volume_thickness, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_ATTENUATION_DISTANCE,
-              PyFloat_FromDouble(prim->volume_attenuation_distance));
-  AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY, PyFloat_FromDouble(prim->anisotropy));
-  AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY_ROTATION, PyFloat_FromDouble(prim->anisotropy_rotation));
-  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION, PyFloat_FromDouble(prim->diffuse_transmission));
-  AKB_SET_OBJ(AKB_PY_PRIM_DISPERSION, PyFloat_FromDouble(prim->dispersion));
+              akb_float_or_none(prim->volume_attenuation_distance, INFINITY));
+  AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY, akb_float_or_none(prim->anisotropy, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY_ROTATION, akb_float_or_none(prim->anisotropy_rotation, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION, akb_float_or_none(prim->diffuse_transmission, 0.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_DISPERSION, akb_float_or_none(prim->dispersion, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_ALPHA_MODE, PyLong_FromUnsignedLong(prim->alpha_mode));
   AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_OPAQUE, PyLong_FromUnsignedLong(prim->transparent_opaque));
   AKB_SET_OBJ(AKB_PY_PRIM_DOUBLE_SIDED, PyBool_FromLong(prim->double_sided));
@@ -8107,6 +9278,12 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ(AKB_PY_PRIM_SKIN_BIND_SHAPE_MATRIX_F32,
               akb_memoryview_or_empty(prim->skin_bind_shape_matrix,
                                       prim->has_skin ? 16 * sizeof(float) : 0));
+  AKB_SET_OBJ(AKB_PY_PRIM_GEOMETRY_KEY,
+              PyLong_FromUnsignedLongLong((unsigned long long)prim->geometry_key));
+  AKB_SET_OBJ(AKB_PY_PRIM_EDGE_COUNT, PyLong_FromUnsignedLong(prim->edge_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_EDGES_U32,
+              akb_memoryview_or_empty(prim->edges,
+                                      (size_t)prim->edge_count * 2 * sizeof(uint32_t)));
 
 #undef AKB_SET_OBJ
 
@@ -8140,70 +9317,62 @@ akb_string_array_to_py(AkStringArray *array) {
 
 static PyObject *
 akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
-  PyObject *dict;
+  PyObject *tuple;
   PyObject *value;
 
-  dict = PyDict_New();
-  if (!dict)
+  tuple = PyTuple_New(AKB_PY_NODE_FIELD_COUNT);
+  if (!tuple)
     return NULL;
 
-#define AKB_NODE_SET_OBJ(KEY, OBJ) do {            \
-    value = (OBJ);                                 \
-    if (!value) { Py_DECREF(dict); return NULL; }  \
-    if (PyDict_SetItemString(dict, (KEY), value) < 0) { \
-      Py_DECREF(value);                            \
-      Py_DECREF(dict);                             \
-      return NULL;                                 \
-    }                                              \
-    Py_DECREF(value);                              \
+#define AKB_NODE_SET_OBJ(INDEX, OBJ) do {           \
+    value = (OBJ);                                  \
+    if (!value) { Py_DECREF(tuple); return NULL; }  \
+    PyTuple_SET_ITEM(tuple, (INDEX), value);        \
   } while (0)
 
-  if (PyDict_SetItemString(dict, "_owner", owner) < 0) {
-    Py_DECREF(dict);
-    return NULL;
-  }
-
-  AKB_NODE_SET_OBJ("name", akb_unicode_from_cstr(node->name));
-  AKB_NODE_SET_OBJ("parent_index", PyLong_FromLong(node->parent_index));
-  AKB_NODE_SET_OBJ("visible", PyBool_FromLong(node->visible));
-  AKB_NODE_SET_OBJ("layers", akb_string_array_to_py(node->layers));
-  AKB_NODE_SET_OBJ("camera_type", PyLong_FromUnsignedLong(node->camera_type));
-  AKB_NODE_SET_OBJ("camera_name", akb_unicode_from_cstr(node->camera_name));
-  AKB_NODE_SET_OBJ("camera_extra", akb_tree_to_py(node->camera_extra));
-  AKB_NODE_SET_OBJ("camera_imager_extra", akb_tree_to_py(node->camera_imager_extra));
-  AKB_NODE_SET_OBJ("camera_values", Py_BuildValue("(ffffff)",
-                                                  node->camera_values[0],
-                                                  node->camera_values[1],
-                                                  node->camera_values[2],
-                                                  node->camera_values[3],
-                                                  node->camera_values[4],
-                                                  node->camera_values[5]));
-  AKB_NODE_SET_OBJ("light_type", PyLong_FromUnsignedLong(node->light_type));
-  AKB_NODE_SET_OBJ("light_name", akb_unicode_from_cstr(node->light_name));
-  AKB_NODE_SET_OBJ("light_extra", akb_tree_to_py(node->light_extra));
-  AKB_NODE_SET_OBJ("light_color", Py_BuildValue("(fff)",
-                                                node->light_color[0],
-                                                node->light_color[1],
-                                                node->light_color[2]));
-  AKB_NODE_SET_OBJ("light_values", Py_BuildValue("(fffff)",
-                                                 node->light_values[0],
-                                                 node->light_values[1],
-                                                 node->light_values[2],
-                                                 node->light_values[3],
-                                                 node->light_values[4]));
-  AKB_NODE_SET_OBJ("matrix_f32",
+  Py_INCREF(owner);
+  PyTuple_SET_ITEM(tuple, AKB_PY_NODE_OWNER, owner);
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_NAME, akb_unicode_from_cstr(node->name));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_PARENT_INDEX, PyLong_FromLong(node->parent_index));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_VISIBLE, PyBool_FromLong(node->visible));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_LAYERS, akb_string_array_to_py(node->layers));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_CAMERA_TYPE, PyLong_FromUnsignedLong(node->camera_type));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_CAMERA_NAME, akb_unicode_from_cstr(node->camera_name));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_CAMERA_EXTRA, akb_tree_to_py(node->camera_extra));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_CAMERA_IMAGER_EXTRA, akb_tree_to_py(node->camera_imager_extra));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_CAMERA_VALUES, Py_BuildValue("(ffffff)",
+                                                            node->camera_values[0],
+                                                            node->camera_values[1],
+                                                            node->camera_values[2],
+                                                            node->camera_values[3],
+                                                            node->camera_values[4],
+                                                            node->camera_values[5]));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_LIGHT_TYPE, PyLong_FromUnsignedLong(node->light_type));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_LIGHT_NAME, akb_unicode_from_cstr(node->light_name));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_LIGHT_EXTRA, akb_tree_to_py(node->light_extra));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_LIGHT_COLOR, Py_BuildValue("(fff)",
+                                                          node->light_color[0],
+                                                          node->light_color[1],
+                                                          node->light_color[2]));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_LIGHT_VALUES, Py_BuildValue("(fffff)",
+                                                           node->light_values[0],
+                                                           node->light_values[1],
+                                                           node->light_values[2],
+                                                           node->light_values[3],
+                                                           node->light_values[4]));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_MATRIX_F32,
                    akb_memoryview_or_empty(node->matrix,
                                            node->has_transform ? 16 * sizeof(float) : 0));
-  AKB_NODE_SET_OBJ("extra", akb_tree_to_py(node->source ? ak_extra(node->source) : NULL));
-  AKB_NODE_SET_OBJ("anim_count",
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_EXTRA, akb_tree_to_py(node->source ? ak_extra(node->source) : NULL));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_ANIM_COUNT,
                    PyLong_FromUnsignedLong(node->animation
                                            ? (unsigned long)node->animation->count
                                            : 0));
-  AKB_NODE_SET_OBJ("anim_channels", akb_anim_channels_to_py(node->animation));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_ANIM_CHANNELS, akb_anim_channels_to_py(node->animation));
 
 #undef AKB_NODE_SET_OBJ
 
-  return dict;
+  return tuple;
 }
 
 static PyThread_type_lock akb_load_lock;
@@ -9083,6 +10252,121 @@ akb_offset_i32(PyObject *self, PyObject *args) {
 }
 
 static PyObject *
+akb_write_offset_i32(PyObject *self, PyObject *args) {
+  PyObject *dst_obj;
+  PyObject *src_obj;
+  Py_buffer dst_view;
+  Py_buffer src_view;
+  Py_ssize_t dst_offset_py;
+  const int32_t *in;
+  int32_t *out;
+  long offset;
+  size_t dst_offset;
+  size_t count;
+  size_t nbytes;
+  size_t i;
+
+  (void)self;
+
+  memset(&dst_view, 0, sizeof(dst_view));
+  memset(&src_view, 0, sizeof(src_view));
+  if (!PyArg_ParseTuple(args, "OnOl", &dst_obj, &dst_offset_py, &src_obj, &offset))
+    return NULL;
+  if (dst_offset_py < 0) {
+    PyErr_SetString(PyExc_ValueError, "destination offset must be non-negative");
+    return NULL;
+  }
+  if (PyObject_GetBuffer(dst_obj, &dst_view, PyBUF_WRITABLE) < 0)
+    return NULL;
+  if (PyObject_GetBuffer(src_obj, &src_view, PyBUF_SIMPLE) < 0) {
+    PyBuffer_Release(&dst_view);
+    return NULL;
+  }
+  if ((size_t)src_view.len % sizeof(int32_t) != 0) {
+    PyBuffer_Release(&src_view);
+    PyBuffer_Release(&dst_view);
+    PyErr_SetString(PyExc_ValueError, "source buffer size is not int32-aligned");
+    return NULL;
+  }
+
+  dst_offset = (size_t)dst_offset_py;
+  count      = (size_t)src_view.len / sizeof(int32_t);
+  nbytes     = count * sizeof(int32_t);
+  if (dst_offset > (size_t)dst_view.len
+      || nbytes > (size_t)dst_view.len - dst_offset) {
+    PyBuffer_Release(&src_view);
+    PyBuffer_Release(&dst_view);
+    PyErr_SetString(PyExc_ValueError, "destination buffer is too small");
+    return NULL;
+  }
+
+  in  = (const int32_t *)src_view.buf;
+  out = (int32_t *)((char *)dst_view.buf + dst_offset);
+  Py_BEGIN_ALLOW_THREADS
+  if (offset == 0) {
+    memcpy(out, in, nbytes);
+  } else {
+    for (i = 0; i < count; i++)
+      out[i] = (int32_t)((int64_t)in[i] + (int64_t)offset);
+  }
+  Py_END_ALLOW_THREADS
+
+  PyBuffer_Release(&src_view);
+  PyBuffer_Release(&dst_view);
+  return PyLong_FromSize_t(nbytes);
+}
+
+static PyObject *
+akb_fill_i32(PyObject *self, PyObject *args) {
+  PyObject *dst_obj;
+  Py_buffer dst_view;
+  Py_ssize_t dst_offset_py;
+  Py_ssize_t count_py;
+  int32_t *out;
+  long value;
+  size_t dst_offset;
+  size_t count;
+  size_t nbytes;
+  size_t i;
+
+  (void)self;
+
+  memset(&dst_view, 0, sizeof(dst_view));
+  if (!PyArg_ParseTuple(args, "Onln", &dst_obj, &dst_offset_py, &value, &count_py))
+    return NULL;
+  if (dst_offset_py < 0 || count_py < 0) {
+    PyErr_SetString(PyExc_ValueError, "destination offset and count must be non-negative");
+    return NULL;
+  }
+  if (PyObject_GetBuffer(dst_obj, &dst_view, PyBUF_WRITABLE) < 0)
+    return NULL;
+
+  dst_offset = (size_t)dst_offset_py;
+  count      = (size_t)count_py;
+  if (count > SIZE_MAX / sizeof(int32_t)) {
+    PyBuffer_Release(&dst_view);
+    PyErr_SetString(PyExc_OverflowError, "fill size is too large");
+    return NULL;
+  }
+  nbytes = count * sizeof(int32_t);
+  if (dst_offset > (size_t)dst_view.len
+      || nbytes > (size_t)dst_view.len - dst_offset) {
+    PyBuffer_Release(&dst_view);
+    PyErr_SetString(PyExc_ValueError, "destination buffer is too small");
+    return NULL;
+  }
+
+  out = (int32_t *)((char *)dst_view.buf + dst_offset);
+  Py_BEGIN_ALLOW_THREADS
+  for (i = 0; i < count; i++)
+    out[i] = (int32_t)value;
+  Py_END_ALLOW_THREADS
+
+  PyBuffer_Release(&dst_view);
+  return PyLong_FromSize_t(nbytes);
+}
+
+static PyObject *
 akb_skin_group_assignments(PyObject *self, PyObject *args) {
   PyObject *joints_obj;
   PyObject *weights_obj;
@@ -9301,6 +10585,8 @@ static PyMethodDef akb_methods[] = {
   {"anim_coords", akb_anim_coords, METH_VARARGS, "Build an interleaved FCurve coordinate buffer for an animation channel."},
   {"anim_component_constant", akb_anim_component_constant, METH_VARARGS, "Return true when an animation channel component is constant."},
   {"offset_i32", akb_offset_i32, METH_VARARGS, "Build an int32 buffer with a constant offset added to each element."},
+  {"write_offset_i32", akb_write_offset_i32, METH_VARARGS, "Write an int32 buffer with a constant offset into a writable destination buffer."},
+  {"fill_i32", akb_fill_i32, METH_VARARGS, "Fill a writable destination buffer with one int32 value."},
   {"skin_group_assignments", akb_skin_group_assignments, METH_VARARGS, "Build rigid skin vertex-group assignment buffers."},
   {NULL, NULL, 0, NULL}
 };

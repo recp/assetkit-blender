@@ -116,7 +116,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         items=(
             ("AUTO", "Auto", "Defer image file loading in the UI so geometry appears first"),
             ("IMMEDIATE", "Immediate", "Load texture image files during import"),
-            ("DEFERRED", "Deferred", "Create materials first and load texture images after import starts"),
+            ("DEFERRED", "Deferred", "Defer simple texture materials and image loading so geometry appears first"),
         ),
         default="AUTO",
     )

@@ -30,9 +30,11 @@ from .assetkit import (
     native_animation_component_constant,
     native_animation_coords,
     native_load_meshes,
+    native_fill_i32,
     native_offset_i32,
     native_open_scene_stream,
     native_skin_group_assignments,
+    native_write_offset_i32,
 )
 from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
 
@@ -110,6 +112,7 @@ _ANIM_TEXTURE_TRANSFORM_ROLES = (
 )
 _MATERIAL_TEXTURE_FIELDS = tuple(f"{role}_texture" for role in _ANIM_TEXTURE_TRANSFORM_ROLES)
 _TEXTURE_IMAGE_CACHE: dict[tuple[str, str], object] = {}
+_TEXTURE_PATH_CACHE: dict[str, str] = {}
 _ACTIVE_TEXTURE_NODE_CACHE: dict[object, object] | None = None
 _ACTIVE_SEPARATE_COLOR_CACHE: dict[int, object] | None = None
 _ACTIVE_TEXTURE_LOAD_MODE = "IMMEDIATE"
@@ -117,6 +120,12 @@ _DEFERRED_TEXTURE_WAITERS: dict[tuple[str, str], list[object]] = {}
 _DEFERRED_TEXTURE_KEYS: deque[tuple[str, str]] = deque()
 _DEFERRED_TEXTURE_TIMER_ACTIVE = False
 _DEFERRED_TEXTURE_TIME_BUDGET = 0.006
+_DEFERRED_MATERIAL_NODE_TASKS: deque[tuple[object, str, TextureRefData | None, tuple[float, float, float, float], float, float, bool]] = deque()
+_DEFERRED_MATERIAL_NODE_TIMER_ACTIVE = False
+_DEFERRED_MATERIAL_NODE_TIME_BUDGET = 0.006
+_DEFERRED_MATERIAL_SLOT_TASKS: deque["_DeferredMaterialSpec"] = deque()
+_DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE = False
+_DEFERRED_MATERIAL_SLOT_TIME_BUDGET = 0.006
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_HERMITE = 4
 _INTERPOLATION_STEP = 6
@@ -125,6 +134,7 @@ _AK_MATERIAL_BLINN = 2
 _AK_MATERIAL_LAMBERT = 3
 _AK_MATERIAL_CONSTANT = 4
 _AK_MATERIAL_SPECULAR_GLOSSINESS = 6
+_AK_MATERIAL_PBR = 7
 _AK_OPAQUE_A_ONE = 1
 _AK_OPAQUE_A_ZERO = 2
 _AK_OPAQUE_RGB_ONE = 3
@@ -138,6 +148,10 @@ _GLTF_SETTINGS_SOCKETS = (
     ("Iridescence Thickness Minimum", 100.0),
 )
 _GLTF_SETTINGS_GROUP_CACHE = None
+_TEXTURE_WRAP_DEFAULT = 1
+_TEXTURE_FILTER_DEFAULT = 0
+_TEXTURE_EXTENSION_DEFAULT = "REPEAT"
+_TEXTURE_INTERPOLATION_DEFAULT = "Linear"
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_FIRST_BATCH_SIZE = 8
 _PROGRESSIVE_TIME_BUDGET = 0.025
@@ -152,7 +166,10 @@ _ACTION_FRAME_RANGES: dict[int, tuple[float, float]] = {}
 _KEYFRAME_ENUM_VALUES: dict[tuple[str, str], int] = {}
 _KEYFRAME_ENUM_ARRAYS: dict[tuple[int, int], array] = {}
 _BOOL_ARRAYS: dict[tuple[int, int], array] = {}
+_TRI_LOOP_START_ARRAYS: dict[int, array] = {}
+_TRI_LOOP_START_CACHE_LIMIT = 65536
 _ACTION_SLOTS_SUPPORTED: bool | None = None
+_PROFILE_MATERIAL_STATS: dict[str, float | int] | None = None
 _CH_KEYS = (
     "target",
     "target_offset",
@@ -199,7 +216,49 @@ _CH_KEYS = (
     _S_DEFERRED_SKIN_ANIMATIONS,
     _S_MESH_CACHE_HITS,
     _S_DEFER_CUSTOM_NORMALS,
-) = range(14)
+    _S_HAS_NODE_VISIBILITY_ANIMATION,
+    _S_HAS_NODE_ANIMATION,
+    _S_DYNAMIC_SKIN_ANIMATION_SKIP,
+) = range(17)
+_SKIN_CACHE_DEFER_BIND_SKINS = object()
+
+
+class _DeferredMaterialSpec:
+    __slots__ = (
+        "name",
+        "cache",
+        "cache_key",
+        "path",
+        "tex_info",
+        "base_color",
+        "metallic",
+        "roughness",
+        "double_sided",
+        "slots",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        cache: dict | None,
+        cache_key: object,
+        path: str,
+        tex_info: TextureRefData | None,
+        base_color: tuple[float, float, float, float],
+        metallic: float,
+        roughness: float,
+        double_sided: bool,
+    ) -> None:
+        self.name = name
+        self.cache = cache
+        self.cache_key = cache_key
+        self.path = path
+        self.tex_info = tex_info
+        self.base_color = base_color
+        self.metallic = metallic
+        self.roughness = roughness
+        self.double_sided = double_sided
+        self.slots: list[tuple[object, object | None, int, bool]] = []
 
 
 def import_assetkit_file(
@@ -217,9 +276,10 @@ def import_assetkit_file(
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
     _reset_action_cache()
+    _reset_material_profile()
     existing_actions = _snapshot_actions(fit_timeline)
     texture_load_mode = _texture_load_mode(load_options)
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
     total_started_at = time.perf_counter() if profile_detail else 0.0
     load_started_at = total_started_at
@@ -260,6 +320,7 @@ def import_assetkit_file(
     try:
         for unit in import_units:
             objects.extend(_create_import_unit(unit, state, collection or bpy.context.collection, shading_mode))
+        _apply_deferred_bind_pose_skins(state)
     finally:
         _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
     if profile_detail:
@@ -269,6 +330,7 @@ def import_assetkit_file(
             f"mesh_cache_hits={int(state[_S_MESH_CACHE_HITS])} "
             f"elapsed={(time.perf_counter() - build_started_at) * 1000.0:.3f}ms"
         )
+        _log_material_profile("blocking")
 
     finish_started_at = time.perf_counter() if profile_detail else 0.0
     _finish_import(
@@ -308,6 +370,7 @@ def import_assetkit_file_progressive(
     fit_timeline: bool = False,
 ) -> "_ProgressiveImportJob":
     _reset_action_cache()
+    _reset_material_profile()
     job = _ProgressiveImportJob(
         filepath,
         library_path,
@@ -344,6 +407,7 @@ def import_assetkit_file_auto(
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object] | "_ProgressiveImportJob":
     _reset_action_cache()
+    _reset_material_profile()
     active_collection = collection or bpy.context.collection
     job = _ProgressiveImportJob(
         filepath,
@@ -387,6 +451,181 @@ def _load_assetkit_scene(
     return loaded, [], None, None, {}, []
 
 
+def _reset_material_profile() -> None:
+    global _PROFILE_MATERIAL_STATS
+    if not _profile_enabled():
+        _PROFILE_MATERIAL_STATS = None
+        return
+    _PROFILE_MATERIAL_STATS = {
+        "calls": 0,
+        "cache_hits": 0,
+        "created": 0,
+        "cache_key_ms": 0.0,
+        "new_ms": 0.0,
+        "simple_ms": 0.0,
+        "nodes_ms": 0.0,
+        "props_ms": 0.0,
+        "settings_ms": 0.0,
+        "textures_ms": 0.0,
+        "animation_ms": 0.0,
+        "total_ms": 0.0,
+        "mesh_calls": 0,
+        "mesh_alloc_ms": 0.0,
+        "mesh_views_ms": 0.0,
+        "mesh_topology_ms": 0.0,
+        "mesh_uv_ms": 0.0,
+        "mesh_color_ms": 0.0,
+        "mesh_tangent_ms": 0.0,
+        "mesh_update_ms": 0.0,
+        "mesh_shading_ms": 0.0,
+        "mesh_finish_ms": 0.0,
+        "mesh_total_ms": 0.0,
+        "finish_calls": 0,
+        "finish_bind_shape_ms": 0.0,
+        "finish_object_ms": 0.0,
+        "finish_material_ms": 0.0,
+        "finish_props_ms": 0.0,
+        "finish_morph_ms": 0.0,
+        "finish_skin_ms": 0.0,
+        "finish_animation_ms": 0.0,
+        "finish_instancing_ms": 0.0,
+        "finish_total_ms": 0.0,
+    }
+
+
+def _record_material_profile(
+    *,
+    cache_hit: bool,
+    cache_key_ms: float,
+    new_ms: float,
+    simple_ms: float,
+    nodes_ms: float,
+    props_ms: float,
+    settings_ms: float,
+    textures_ms: float,
+    animation_ms: float,
+    total_ms: float,
+) -> None:
+    stats = _PROFILE_MATERIAL_STATS
+    if stats is None:
+        return
+    stats["calls"] = int(stats["calls"]) + 1
+    if cache_hit:
+        stats["cache_hits"] = int(stats["cache_hits"]) + 1
+    else:
+        stats["created"] = int(stats["created"]) + 1
+    stats["cache_key_ms"] = float(stats["cache_key_ms"]) + cache_key_ms
+    stats["new_ms"] = float(stats["new_ms"]) + new_ms
+    stats["simple_ms"] = float(stats["simple_ms"]) + simple_ms
+    stats["nodes_ms"] = float(stats["nodes_ms"]) + nodes_ms
+    stats["props_ms"] = float(stats["props_ms"]) + props_ms
+    stats["settings_ms"] = float(stats["settings_ms"]) + settings_ms
+    stats["textures_ms"] = float(stats["textures_ms"]) + textures_ms
+    stats["animation_ms"] = float(stats["animation_ms"]) + animation_ms
+    stats["total_ms"] = float(stats["total_ms"]) + total_ms
+
+
+def _log_material_profile(label: str) -> None:
+    stats = _PROFILE_MATERIAL_STATS
+    if stats is None:
+        return
+    if int(stats["calls"]):
+        _profile_log(
+            "material_profile "
+            f"{label} calls={int(stats['calls'])} "
+            f"created={int(stats['created'])} "
+            f"cache_hits={int(stats['cache_hits'])} "
+            f"cache_key={float(stats['cache_key_ms']):.3f}ms "
+            f"new={float(stats['new_ms']):.3f}ms "
+            f"simple={float(stats['simple_ms']):.3f}ms "
+            f"nodes={float(stats['nodes_ms']):.3f}ms "
+            f"props={float(stats['props_ms']):.3f}ms "
+            f"settings={float(stats['settings_ms']):.3f}ms "
+            f"textures={float(stats['textures_ms']):.3f}ms "
+            f"animation={float(stats['animation_ms']):.3f}ms "
+            f"total={float(stats['total_ms']):.3f}ms"
+        )
+    mesh_calls = int(stats.get("mesh_calls", 0) or 0)
+    if mesh_calls:
+        _profile_log(
+            "mesh_profile "
+            f"{label} calls={mesh_calls} "
+            f"alloc={float(stats['mesh_alloc_ms']):.3f}ms "
+            f"views={float(stats['mesh_views_ms']):.3f}ms "
+            f"topology={float(stats['mesh_topology_ms']):.3f}ms "
+            f"uv={float(stats['mesh_uv_ms']):.3f}ms "
+            f"color={float(stats['mesh_color_ms']):.3f}ms "
+            f"tangent={float(stats['mesh_tangent_ms']):.3f}ms "
+            f"update={float(stats['mesh_update_ms']):.3f}ms "
+            f"shading={float(stats['mesh_shading_ms']):.3f}ms "
+            f"finish={float(stats['mesh_finish_ms']):.3f}ms "
+            f"total={float(stats['mesh_total_ms']):.3f}ms"
+        )
+    finish_calls = int(stats.get("finish_calls", 0) or 0)
+    if finish_calls:
+        _profile_log(
+            "finish_profile "
+            f"{label} calls={finish_calls} "
+            f"bind_shape={float(stats['finish_bind_shape_ms']):.3f}ms "
+            f"object={float(stats['finish_object_ms']):.3f}ms "
+            f"material={float(stats['finish_material_ms']):.3f}ms "
+            f"props={float(stats['finish_props_ms']):.3f}ms "
+            f"morph={float(stats['finish_morph_ms']):.3f}ms "
+            f"skin={float(stats['finish_skin_ms']):.3f}ms "
+            f"animation={float(stats['finish_animation_ms']):.3f}ms "
+            f"instancing={float(stats['finish_instancing_ms']):.3f}ms "
+            f"total={float(stats['finish_total_ms']):.3f}ms"
+        )
+
+
+def _record_mesh_profile(phases: dict[str, float], total_ms: float) -> None:
+    stats = _PROFILE_MATERIAL_STATS
+    if stats is None:
+        return
+    stats["mesh_calls"] = int(stats.get("mesh_calls", 0) or 0) + 1
+    for name in (
+        "alloc",
+        "views",
+        "topology",
+        "uv",
+        "color",
+        "tangent",
+        "update",
+        "shading",
+        "finish",
+    ):
+        key = f"mesh_{name}_ms"
+        stats[key] = float(stats.get(key, 0.0) or 0.0) + float(phases.get(name, 0.0))
+    stats["mesh_total_ms"] = float(stats.get("mesh_total_ms", 0.0) or 0.0) + total_ms
+
+
+def _record_finish_profile(
+    *,
+    bind_shape_ms: float,
+    object_ms: float,
+    material_ms: float,
+    props_ms: float,
+    morph_ms: float,
+    skin_ms: float,
+    animation_ms: float,
+    instancing_ms: float,
+    total_ms: float,
+) -> None:
+    stats = _PROFILE_MATERIAL_STATS
+    if stats is None:
+        return
+    stats["finish_calls"] = int(stats.get("finish_calls", 0) or 0) + 1
+    stats["finish_bind_shape_ms"] = float(stats.get("finish_bind_shape_ms", 0.0) or 0.0) + bind_shape_ms
+    stats["finish_object_ms"] = float(stats.get("finish_object_ms", 0.0) or 0.0) + object_ms
+    stats["finish_material_ms"] = float(stats.get("finish_material_ms", 0.0) or 0.0) + material_ms
+    stats["finish_props_ms"] = float(stats.get("finish_props_ms", 0.0) or 0.0) + props_ms
+    stats["finish_morph_ms"] = float(stats.get("finish_morph_ms", 0.0) or 0.0) + morph_ms
+    stats["finish_skin_ms"] = float(stats.get("finish_skin_ms", 0.0) or 0.0) + skin_ms
+    stats["finish_animation_ms"] = float(stats.get("finish_animation_ms", 0.0) or 0.0) + animation_ms
+    stats["finish_instancing_ms"] = float(stats.get("finish_instancing_ms", 0.0) or 0.0) + instancing_ms
+    stats["finish_total_ms"] = float(stats.get("finish_total_ms", 0.0) or 0.0) + total_ms
+
+
 def _texture_load_mode(load_options: dict | None) -> str:
     mode = str((load_options or {}).get("texture_loading") or "IMMEDIATE").upper()
     if mode == "AUTO":
@@ -428,8 +667,9 @@ def _begin_scene_build(
     doc_images: list[dict] | None = None,
     apply_node_animation: bool = True,
     defer_custom_normals: bool = False,
+    dynamic_skin_animation_skip: bool = False,
 ) -> dict:
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     started_at = time.perf_counter() if profile_detail else 0.0
     _set_document_extra_props(collection, doc_extra, scene_extra, scene_info, doc_images)
     doc_ms = (time.perf_counter() - started_at) * 1000.0 if profile_detail else 0.0
@@ -437,12 +677,26 @@ def _begin_scene_build(
     coord_root = _create_coord_root(primitives, collection)
     coord_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
-    node_visibility = _effective_static_node_visibility_map(scene_nodes)
-    node_object_visibility = _node_object_visibility_map(scene_nodes, node_visibility)
+    node_visibility_animation = False
+    node_animation = False
+    node_hidden = False
+    for node in scene_nodes:
+        if not node.visible:
+            node_hidden = True
+        if node.anim_count or node.anim_channels:
+            node_animation = True
+        if _node_has_visibility_animation(node):
+            node_visibility_animation = True
+    if node_hidden or node_visibility_animation:
+        node_visibility = _effective_static_node_visibility_map(scene_nodes)
+        node_object_visibility = _node_object_visibility_map(scene_nodes, node_visibility)
+    else:
+        node_visibility = None
+        node_object_visibility = None
     visibility_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
     node_animation_skip_indices = _skinned_node_animation_skip_indices(primitives)
-    required_node_indices = _required_scene_node_indices(primitives, scene_nodes)
+    required_node_indices = _required_scene_node_indices(primitives, scene_nodes, node_animation_skip_indices)
     node_objects = _create_scene_nodes(
         scene_nodes,
         coord_root,
@@ -478,6 +732,9 @@ def _begin_scene_build(
         _S_DEFERRED_SKIN_ANIMATIONS: [],
         _S_MESH_CACHE_HITS: 0,
         _S_DEFER_CUSTOM_NORMALS: defer_custom_normals,
+        _S_HAS_NODE_VISIBILITY_ANIMATION: node_visibility_animation,
+        _S_HAS_NODE_ANIMATION: node_animation,
+        _S_DYNAMIC_SKIN_ANIMATION_SKIP: dynamic_skin_animation_skip,
     }
 
 
@@ -691,11 +948,13 @@ def _create_import_object(
     parent = node_parent or state[_S_COORD_ROOT]
     use_node_parent = node_parent is not None
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
+    node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
     mesh_cache_key = _mesh_data_reuse_key(primitive, shading_mode)
     mesh_cache = state[_S_MESH_CACHE] if mesh_cache_key is not None else None
     if mesh_cache is not None:
         cached_mesh = mesh_cache.get(mesh_cache_key)
         if cached_mesh is not None:
+            use_object_material_slot = _has_material_data(primitive)
             state[_S_MESH_CACHE_HITS] += 1
             return _finish_mesh_object(
                 cached_mesh,
@@ -711,7 +970,8 @@ def _create_import_object(
                 apply_skin_animation=not bool(state[_S_SKIN_ANIMATION_DEFERRED]),
                 deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
                 collection=collection,
-                assign_material=False,
+                object_material_slot=use_object_material_slot,
+                node_visibility_animation=node_visibility_animation,
             )
 
     objects = _create_mesh_object(
@@ -729,6 +989,8 @@ def _create_import_object(
         shading_mode=shading_mode,
         defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
         collection=collection,
+        object_material_slot=False,
+        node_visibility_animation=node_visibility_animation,
     )
     if mesh_cache is not None and len(objects) == 1 and isinstance(objects[0].data, bpy.types.Mesh):
         mesh_cache[mesh_cache_key] = objects[0].data
@@ -741,7 +1003,8 @@ def _create_import_unit(
     collection: bpy.types.Collection,
     shading_mode: str = "AUTO",
 ) -> list[bpy.types.Object]:
-    _mark_skinned_node_animation_skip(state, unit if isinstance(unit, list) else [unit])
+    if state[_S_DYNAMIC_SKIN_ANIMATION_SKIP]:
+        _mark_skinned_node_animation_skip(state, unit if isinstance(unit, list) else [unit])
     if isinstance(unit, list):
         return _create_grouped_mesh_object(unit, state, collection, shading_mode)
     return _create_import_object(unit, state, collection, shading_mode)
@@ -753,7 +1016,7 @@ def _create_grouped_mesh_object(
     collection: bpy.types.Collection,
     shading_mode: str = "AUTO",
 ) -> list[bpy.types.Object]:
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     first = primitives[0]
     node_objects = state[_S_NODE_OBJECTS]
@@ -761,6 +1024,7 @@ def _create_grouped_mesh_object(
     parent = node_parent or state[_S_COORD_ROOT]
     use_node_parent = node_parent is not None
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
+    node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
 
     count_started_at = time.perf_counter() if profile_detail else 0.0
     total_vertex_count = sum(int(primitive.vertex_count) for primitive in primitives)
@@ -795,10 +1059,13 @@ def _create_grouped_mesh_object(
             return [_create_import_object(primitive, state, collection, shading_mode)[0]]
 
         _copy_buffer_bytes(vertices, vertex_offset * 3 * 4, primitive_vertices, "f")
-        shifted_indices = native_offset_i32(primitive_indices, vertex_offset)
-        if shifted_indices is not None:
-            _copy_buffer_bytes(indices, loop_offset * 4, shifted_indices, "i")
-        else:
+        copied = native_write_offset_i32(indices, loop_offset * 4, primitive_indices, vertex_offset)
+        if copied is None:
+            shifted_indices = native_offset_i32(primitive_indices, vertex_offset)
+            if shifted_indices is not None:
+                _copy_buffer_bytes(indices, loop_offset * 4, shifted_indices, "i")
+                copied = len(shifted_indices) * 4
+        if copied is None:
             tmp_indices = array("i")
             for index in primitive_indices:
                 tmp_indices.append(int(index) + vertex_offset)
@@ -806,10 +1073,13 @@ def _create_grouped_mesh_object(
 
         primitive_loop_starts = _buffer_view(primitive.loop_starts_i32, "i")
         if primitive_loop_starts is not None:
-            shifted_starts = native_offset_i32(primitive_loop_starts, loop_offset)
-            if shifted_starts is not None:
-                _copy_buffer_bytes(loop_starts, face_offset * 4, shifted_starts, "i")
-            else:
+            copied = native_write_offset_i32(loop_starts, face_offset * 4, primitive_loop_starts, loop_offset)
+            if copied is None:
+                shifted_starts = native_offset_i32(primitive_loop_starts, loop_offset)
+                if shifted_starts is not None:
+                    _copy_buffer_bytes(loop_starts, face_offset * 4, shifted_starts, "i")
+                    copied = len(shifted_starts) * 4
+            if copied is None:
                 tmp_starts = array("i")
                 for start in primitive_loop_starts:
                     tmp_starts.append(int(start) + loop_offset)
@@ -823,7 +1093,9 @@ def _create_grouped_mesh_object(
             )
 
         if has_materials:
-            _copy_buffer_bytes(material_indices, face_offset * 4, array("i", [slot_index]) * int(primitive.face_count), "i")
+            face_count = int(primitive.face_count)
+            if native_fill_i32(material_indices, face_offset * 4, slot_index, face_count) is None:
+                _copy_buffer_bytes(material_indices, face_offset * 4, array("i", [slot_index]) * face_count, "i")
         if normals is not None:
             view = _buffer_view(primitive.normals_f32, "f")
             if view is not None:
@@ -890,6 +1162,7 @@ def _create_grouped_mesh_object(
         shading_mode=shading_mode,
         defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
         collection=collection,
+        node_visibility_animation=node_visibility_animation,
     )
     if profile_detail:
         _profile_log(
@@ -963,9 +1236,10 @@ def _create_grouped_mesh_object_bulk(
     shading_mode: str = "AUTO",
     defer_custom_normals: bool = False,
     collection: bpy.types.Collection | None = None,
+    node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
     total_started_at = time.perf_counter()
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     phase_started_at = total_started_at
     detail_parts: list[str] = []
     mesh = bpy.data.meshes.new(data.name)
@@ -1003,7 +1277,7 @@ def _create_grouped_mesh_object_bulk(
         uvs = _buffer_view(attr.values_f32, "f")
         uv_layer = mesh.uv_layers.new(name=attr.name or ("UVMap" if index == 0 else f"UVMap.{index:03d}"))
         if uvs is not None:
-            uv_layer.data.foreach_set("uv", uvs)
+            _set_uv_layer_values(uv_layer, uvs)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"uv={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -1038,7 +1312,10 @@ def _create_grouped_mesh_object_bulk(
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
-    shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
+    if shading_mode != "SMOOTH" and not normals and vertex_normals is None:
+        shading_done = True
+    else:
+        shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     mesh.update(calc_edges=True)
     if profile_detail:
         now = time.perf_counter()
@@ -1073,9 +1350,10 @@ def _create_grouped_mesh_object_bulk(
 
     if has_materials:
         for primitive in primitives:
-            material = _create_material(primitive, material_cache)
-            if material:
-                mesh.materials.append(material)
+            if not _try_defer_material_assignment(mesh, obj, primitive, material_cache, False):
+                material = _create_material(primitive, material_cache)
+                if material:
+                    mesh.materials.append(material)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"materials={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -1101,8 +1379,12 @@ def _create_grouped_mesh_object_bulk(
         now = time.perf_counter()
         detail_parts.append(f"skin={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
-    has_node_visibility_animation = _node_has_effective_visibility_animation(data.node_index, node_lookup)
-    if apply_animation:
+    has_node_visibility_animation = (
+        _node_has_effective_visibility_animation(data.node_index, node_lookup)
+        if node_visibility_animation
+        else False
+    )
+    if apply_animation and (data.anim_count or data.anim_channels):
         _apply_animation(obj, data, skip_visibility=has_node_visibility_animation)
     if profile_detail:
         now = time.perf_counter()
@@ -1187,7 +1469,7 @@ def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
 def _mesh_data_reuse_key(primitive: MeshPrimitiveData, shading_mode: str) -> tuple | None:
     if int(primitive.primitive_type) != AK_PRIMITIVE_TRIANGLES:
         return None
-    if not primitive.mesh_key or not primitive.vertices_f32 or not primitive.indices_u32:
+    if not primitive.vertices_f32 or not primitive.indices_u32:
         return None
     if int(primitive.loop_count) != int(primitive.face_count) * 3:
         return None
@@ -1199,13 +1481,18 @@ def _mesh_data_reuse_key(primitive: MeshPrimitiveData, shading_mode: str) -> tup
         return None
     if primitive.point_attr_count:
         return None
-    if not primitive.material_key and _has_material_data(primitive):
+
+    geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
+    mesh_key = int(primitive.mesh_key or 0)
+    if geometry_key:
+        source_key = (1, geometry_key)
+    elif mesh_key:
+        source_key = (0, mesh_key, int(primitive.primitive_index))
+    else:
         return None
 
     return (
-        int(primitive.mesh_key),
-        int(primitive.primitive_index),
-        int(primitive.material_key),
+        source_key,
         int(primitive.primitive_mode),
         int(primitive.vertex_count),
         int(primitive.loop_count),
@@ -1868,7 +2155,7 @@ class _ProgressiveImportJob:
         self.first_object_at = 0.0
         self.created_count = 0
         self.progress_active = False
-        self.profile_detail = _profile_enabled()
+        self.profile_detail = _PROFILE_MATERIAL_STATS is not None
         self._queue: queue.SimpleQueue[list[MeshPrimitiveData]] = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._produce, name="AssetKit progressive import", daemon=True)
 
@@ -1986,6 +2273,7 @@ class _ProgressiveImportJob:
                 self.doc_images,
                 apply_node_animation=False,
                 defer_custom_normals=self.defer_custom_normals,
+                dynamic_skin_animation_skip=True,
             )
             if self.profile_detail:
                 _profile_log(
@@ -2131,6 +2419,7 @@ class _ProgressiveImportJob:
             )
 
     def _finish_success(self) -> None:
+        _apply_deferred_bind_pose_skins(self.state)
         _apply_deferred_scene_node_animations(self.state)
         _apply_deferred_skin_animations(self.state)
         _finish_import(
@@ -2158,6 +2447,7 @@ class _ProgressiveImportJob:
                 f"load={load_seconds:.3f}s build={build_seconds:.3f}s "
                 f"total={finished_at - self.load_started_at:.3f}s"
             )
+            _log_material_profile("progressive")
         self._finish()
 
     def _finish(self) -> None:
@@ -2226,6 +2516,8 @@ def _create_mesh_object(
     shading_mode: str = "AUTO",
     defer_custom_normals: bool = False,
     collection: bpy.types.Collection | None = None,
+    object_material_slot: bool = False,
+    node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
     if data.vertices_f32 and data.indices_u32:
         return _create_mesh_object_bulk(
@@ -2243,11 +2535,13 @@ def _create_mesh_object(
             shading_mode=shading_mode,
             defer_custom_normals=defer_custom_normals,
             collection=collection,
+            object_material_slot=object_material_slot,
+            node_visibility_animation=node_visibility_animation,
         )
 
     mesh = bpy.data.meshes.new(data.name)
     mesh.from_pydata(data.vertices, [], data.faces)
-    mesh.update(calc_edges=True)
+    mesh.update(calc_edges=False)
 
     if data.uvs and len(data.uvs) >= len(mesh.loops):
         uv_layer = mesh.uv_layers.new(name="UVMap")
@@ -2271,6 +2565,8 @@ def _create_mesh_object(
         apply_skin_animation=apply_skin_animation,
         deferred_skin_animations=deferred_skin_animations,
         collection=collection,
+        object_material_slot=object_material_slot,
+        node_visibility_animation=node_visibility_animation,
     )
 
 
@@ -2290,6 +2586,8 @@ def _create_mesh_object_bulk(
     shading_mode: str = "AUTO",
     defer_custom_normals: bool = False,
     collection: bpy.types.Collection | None = None,
+    object_material_slot: bool = False,
+    node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
     if data.primitive_type == AK_PRIMITIVE_LINES:
         return _create_line_mesh_object_bulk(
@@ -2305,6 +2603,7 @@ def _create_mesh_object_bulk(
             apply_skin_animation=apply_skin_animation,
             deferred_skin_animations=deferred_skin_animations,
             collection=collection,
+            node_visibility_animation=node_visibility_animation,
         )
     if data.primitive_type == AK_PRIMITIVE_POINTS:
         return _create_point_mesh_object_bulk(
@@ -2320,42 +2619,70 @@ def _create_mesh_object_bulk(
             apply_skin_animation=apply_skin_animation,
             deferred_skin_animations=deferred_skin_animations,
             collection=collection,
+            node_visibility_animation=node_visibility_animation,
         )
+
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
+    phase_total_ms = 0.0
+    phase_samples: dict[str, float] = {}
+    detail_parts: list[str] = []
+
+    def lap_detail(name: str) -> None:
+        nonlocal phase_started_at, phase_total_ms
+        if not profile_detail:
+            return
+        now = time.perf_counter()
+        elapsed = (now - phase_started_at) * 1000.0
+        phase_total_ms += elapsed
+        phase_samples[name] = phase_samples.get(name, 0.0) + elapsed
+        detail_parts.append(f"{name}={elapsed:.3f}ms")
+        phase_started_at = now
 
     mesh = bpy.data.meshes.new(data.name)
 
     mesh.vertices.add(data.vertex_count)
     mesh.loops.add(data.loop_count)
+    if data.edge_count and data.edges_u32:
+        mesh.edges.add(data.edge_count)
     mesh.polygons.add(data.face_count)
+    lap_detail("alloc")
 
     vertices = _buffer_view(data.vertices_f32, "f")
     indices = _buffer_view(data.indices_u32, "i")
+    edges = _buffer_view(data.edges_u32, "i") if data.edge_count and data.edges_u32 else None
     loop_starts = _buffer_view(data.loop_starts_i32, "i")
     loop_totals = _buffer_view(data.loop_totals_i32, "i")
+    lap_detail("views")
 
     if vertices is None or indices is None:
         raise RuntimeError("AssetKit native bridge returned incomplete mesh buffers")
     if loop_starts is None:
-        loop_starts = array("i", range(0, data.loop_count, 3))
+        loop_starts = _triangle_loop_starts(int(data.loop_count))
 
     _set_mesh_positions(mesh, vertices)
     _set_mesh_loop_vertex_indices(mesh, indices)
+    if edges is not None:
+        _set_mesh_edges(mesh, edges)
     mesh.polygons.foreach_set("loop_start", loop_starts)
     if loop_totals is not None and int(data.loop_count) != int(data.face_count) * 3:
         mesh.polygons.foreach_set("loop_total", loop_totals)
     _apply_point_attributes(mesh, data)
+    lap_detail("topology")
 
     if data.uv_sets:
         for index, attr in enumerate(data.uv_sets):
             uvs = _buffer_view(attr.values_f32, "f")
             uv_layer = mesh.uv_layers.new(name=attr.name or ("UVMap" if index == 0 else f"UVMap.{index:03d}"))
             if uvs is not None:
-                uv_layer.data.foreach_set("uv", uvs)
+                _set_uv_layer_values(uv_layer, uvs)
     elif data.uvs_f32:
         uvs = _buffer_view(data.uvs_f32, "f")
         uv_layer = mesh.uv_layers.new(name="UVMap")
         if uvs is not None:
-            uv_layer.data.foreach_set("uv", uvs)
+            _set_uv_layer_values(uv_layer, uvs)
+    lap_detail("uv")
 
     if data.color_sets:
         for index, attr in enumerate(data.color_sets):
@@ -2374,22 +2701,29 @@ def _create_mesh_object_bulk(
             color_attr = mesh.color_attributes.new(name="Color", type="FLOAT_COLOR", domain="CORNER")
             color_attr.data.foreach_set("color", colors)
             _set_render_color_index(mesh)
+    lap_detail("color")
 
     if data.tangents_f32:
         tangents = _buffer_view(data.tangents_f32, "f")
         if tangents is not None:
             if not _apply_vector_attribute(mesh, "assetkit_tangent", tangents, "FLOAT4", "CORNER"):
                 _apply_split_attribute(mesh, "assetkit_tangent", tangents, ("x", "y", "z", "w"), "CORNER")
+    lap_detail("tangent")
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
-    shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
-    mesh.update(calc_edges=True)
+    if shading_mode != "SMOOTH" and not normals and vertex_normals is None:
+        shading_done = True
+    else:
+        shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
+    mesh.update(calc_edges=False)
+    lap_detail("update")
     if not shading_done and defer_custom_normals:
         shading_done = _queue_deferred_custom_normals(mesh, normals, vertex_normals, data)
     if not shading_done:
         _apply_shading(mesh, shading_mode, normals, vertex_normals, smooth_already=True)
-    return _finish_mesh_object(
+    lap_detail("shading")
+    objects = _finish_mesh_object(
         mesh,
         data,
         parent,
@@ -2403,7 +2737,22 @@ def _create_mesh_object_bulk(
         apply_skin_animation=apply_skin_animation,
         deferred_skin_animations=deferred_skin_animations,
         collection=collection,
+        object_material_slot=object_material_slot,
+        node_visibility_animation=node_visibility_animation,
     )
+    if profile_detail:
+        total_ms = (time.perf_counter() - total_started_at) * 1000.0
+        phase_samples["finish"] = max(0.0, total_ms - phase_total_ms)
+        _record_mesh_profile(phase_samples, total_ms)
+        if total_ms >= 10.0:
+            _profile_log(
+                "create_mesh_object_bulk_detail "
+                f"name={data.name!r} verts={data.vertex_count} faces={data.face_count} "
+                + " ".join(detail_parts)
+                + f" finish={total_ms - phase_total_ms:.3f}ms "
+                f"total={total_ms:.3f}ms"
+            )
+    return objects
 
 
 def _create_line_mesh_object_bulk(
@@ -2420,6 +2769,7 @@ def _create_line_mesh_object_bulk(
     apply_skin_animation: bool = True,
     deferred_skin_animations: list | None = None,
     collection: bpy.types.Collection | None = None,
+    node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
     mesh = bpy.data.meshes.new(data.name)
     edge_count = data.loop_count // 2
@@ -2452,6 +2802,7 @@ def _create_line_mesh_object_bulk(
         apply_skin_animation=apply_skin_animation,
         deferred_skin_animations=deferred_skin_animations,
         collection=collection,
+        node_visibility_animation=node_visibility_animation,
     )
 
 
@@ -2469,6 +2820,7 @@ def _create_point_mesh_object_bulk(
     apply_skin_animation: bool = True,
     deferred_skin_animations: list | None = None,
     collection: bpy.types.Collection | None = None,
+    node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
     mesh = bpy.data.meshes.new(data.name)
 
@@ -2495,6 +2847,7 @@ def _create_point_mesh_object_bulk(
         apply_skin_animation=apply_skin_animation,
         deferred_skin_animations=deferred_skin_animations,
         collection=collection,
+        node_visibility_animation=node_visibility_animation,
     )
 
 
@@ -2514,8 +2867,10 @@ def _finish_mesh_object(
     deferred_skin_animations: list | None = None,
     collection: bpy.types.Collection | None = None,
     assign_material: bool = True,
+    object_material_slot: bool = False,
+    node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = total_started_at
     _apply_skin_bind_shape(mesh, data)
@@ -2536,43 +2891,55 @@ def _finish_mesh_object(
         object_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
     if assign_material:
-        material = _create_material(data, material_cache)
-        if material:
-            mesh.materials.append(material)
+        if not _try_defer_material_assignment(mesh, obj, data, material_cache, object_material_slot):
+            material = _create_material(data, material_cache)
+            if material:
+                if object_material_slot:
+                    _assign_object_material_slot(obj, material)
+                else:
+                    mesh.materials.append(material)
     if profile_detail:
         now = time.perf_counter()
         material_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
     _apply_assetkit_extra_props(obj, data)
-    if assign_material:
+    if assign_material and data.material_variants:
         _apply_material_variants(obj, data, material_cache)
     if profile_detail:
         now = time.perf_counter()
         props_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
-    _apply_shape_keys(obj, data)
-    _apply_morph_presets(obj, data)
+    if data.morph_targets:
+        _apply_shape_keys(obj, data)
+    if data.morph_presets:
+        _apply_morph_presets(obj, data)
     if profile_detail:
         now = time.perf_counter()
         morph_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
     node_lookup = node_data or {}
-    _apply_skin(
-        obj,
-        data,
-        node_objects or {},
-        node_lookup,
-        active_collection,
-        skin_cache,
-        apply_animation=apply_skin_animation,
-        deferred_skin_animations=deferred_skin_animations,
-    )
+    if data.has_skin:
+        _apply_skin(
+            obj,
+            data,
+            node_objects or {},
+            node_lookup,
+            active_collection,
+            skin_cache,
+            apply_animation=apply_skin_animation,
+            deferred_skin_animations=deferred_skin_animations,
+        )
     if profile_detail:
         now = time.perf_counter()
         skin_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
-    has_node_visibility_animation = _node_has_effective_visibility_animation(data.node_index, node_lookup)
-    if apply_animation:
+    has_animation = bool(data.anim_count or data.anim_channels)
+    has_node_visibility_animation = (
+        _node_has_effective_visibility_animation(data.node_index, node_lookup)
+        if node_visibility_animation and (has_animation or node_lookup)
+        else False
+    )
+    if apply_animation and has_animation:
         _apply_animation(obj, data, skip_visibility=has_node_visibility_animation)
     if has_node_visibility_animation:
         _apply_effective_node_visibility_animation(obj, data.node_index, node_lookup)
@@ -2581,12 +2948,23 @@ def _finish_mesh_object(
         animation_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
 
-    objects = _apply_instancing(obj, data, active_collection)
+    objects = _apply_instancing(obj, data, active_collection) if data.instance_count else [obj]
     if profile_detail:
         now = time.perf_counter()
         instancing_ms = (now - phase_started_at) * 1000.0
         total_ms = (now - total_started_at) * 1000.0
-    if profile_detail and total_ms >= 2.0:
+        _record_finish_profile(
+            bind_shape_ms=bind_shape_ms,
+            object_ms=object_ms,
+            material_ms=material_ms,
+            props_ms=props_ms,
+            morph_ms=morph_ms,
+            skin_ms=skin_ms,
+            animation_ms=animation_ms,
+            instancing_ms=instancing_ms,
+            total_ms=total_ms,
+        )
+    if profile_detail and total_ms >= 10.0:
         _profile_log(
             "finish_mesh_object_detail "
             f"name={obj.name!r} "
@@ -2602,6 +2980,85 @@ def _finish_mesh_object(
             f"total={total_ms:.3f}ms"
         )
     return objects
+
+
+def _try_defer_material_assignment(
+    mesh: bpy.types.Mesh,
+    obj: bpy.types.Object,
+    data: MeshPrimitiveData,
+    material_cache: dict[object, object] | None,
+    object_material_slot: bool,
+) -> bool:
+    if _ACTIVE_TEXTURE_LOAD_MODE != "DEFERRED":
+        return False
+
+    fast_key = _fast_simple_native_base_color_texture_key(data)
+    if fast_key is None:
+        fast_key = _fast_base_color_texture_visual_key(data, "")
+    if fast_key is not None:
+        cache_key = fast_key
+        color_attr = ""
+        base_color = data.base_color
+    else:
+        if not _has_material_data(data):
+            return False
+        color_attr = _color_attribute_name(data)
+        base_color = _material_base_color(data)
+        if not _can_use_base_color_texture_fast_material(data, color_attr, base_color):
+            return False
+        cache_key = _material_cache_key(data)
+
+    cached = material_cache.get(cache_key) if material_cache is not None else None
+    if isinstance(cached, _DeferredMaterialSpec):
+        spec = cached
+    elif cached is not None:
+        if object_material_slot:
+            _assign_object_material_slot(obj, cached)
+        else:
+            mesh.materials.append(cached)
+        return True
+    else:
+        material_name = data.material_name or f"{data.name}_Material"
+        if data.material_name and color_attr:
+            material_name = f"{material_name}_{color_attr}"
+        spec = _DeferredMaterialSpec(
+            material_name,
+            material_cache,
+            cache_key,
+            data.base_color_texture,
+            _texture_info(data, "base_color"),
+            base_color,
+            float(data.metallic),
+            float(data.roughness),
+            _is_double_sided_material(data),
+        )
+        if material_cache is not None:
+            material_cache[cache_key] = spec
+        _queue_deferred_material_slot(spec)
+
+    slot_index = -1
+    spec.slots.append((mesh, obj if object_material_slot else None, slot_index, object_material_slot))
+    return True
+
+
+def _ensure_object_material_slot(mesh: bpy.types.Mesh) -> int:
+    if not mesh.materials:
+        mesh.materials.append(None)
+    return 0
+
+
+def _assign_object_material_slot(obj: bpy.types.Object, material: bpy.types.Material) -> None:
+    mesh = obj.data
+    if mesh is None:
+        return
+    if not mesh.materials:
+        mesh.materials.append(None)
+    try:
+        slot = obj.material_slots[0]
+        slot.link = "OBJECT"
+        slot.material = material
+    except Exception:
+        mesh.materials[0] = material
 
 
 def _apply_point_attributes(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> None:
@@ -2739,6 +3196,17 @@ def _set_mesh_edges(mesh: bpy.types.Mesh, indices: memoryview) -> None:
     mesh.edges.foreach_set("vertices", indices)
 
 
+def _set_uv_layer_values(uv_layer: bpy.types.MeshUVLoopLayer, values: memoryview) -> None:
+    uv_attr = getattr(uv_layer, "uv", None)
+    if uv_attr is not None:
+        try:
+            uv_attr.foreach_set("vector", values)
+            return
+        except Exception:
+            pass
+    uv_layer.data.foreach_set("uv", values)
+
+
 def _set_mesh_material_indices(mesh: bpy.types.Mesh, material_indices: object) -> None:
     if not material_indices:
         return
@@ -2774,7 +3242,7 @@ def _queue_deferred_custom_normals(
 def _deferred_custom_normals_timer() -> float | None:
     started_at = time.perf_counter()
     processed = 0
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
 
     while _DEFERRED_NORMAL_TASKS:
         mesh, normals, vertex_normals, _owner = _DEFERRED_NORMAL_TASKS.popleft()
@@ -2817,7 +3285,7 @@ def _apply_shading(
         _set_mesh_smooth(mesh, True)
         return True
 
-    if not normals:
+    if not normals and vertex_normals is None:
         _set_mesh_smooth(mesh, False)
         return True
 
@@ -2874,6 +3342,17 @@ def _bool_array(value: int, count: int) -> array:
     return values
 
 
+def _triangle_loop_starts(loop_count: int) -> array:
+    if loop_count > _TRI_LOOP_START_CACHE_LIMIT:
+        return array("i", range(0, loop_count, 3))
+    cached = _TRI_LOOP_START_ARRAYS.get(loop_count)
+    if cached is not None:
+        return cached
+    values = array("i", range(0, loop_count, 3))
+    _TRI_LOOP_START_ARRAYS[loop_count] = values
+    return values
+
+
 def _set_render_color_index(mesh: bpy.types.Mesh) -> None:
     try:
         mesh.color_attributes.render_color_index = 0
@@ -2893,7 +3372,7 @@ def _create_scene_nodes(
     objects: dict[int, bpy.types.Object] = {}
     node_lookup = {index: node for index, node in enumerate(nodes)}
     skip_animation_nodes = skip_animation_nodes or set()
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     create_started_at = time.perf_counter() if profile_detail else 0.0
 
     for index, node in enumerate(nodes):
@@ -2944,24 +3423,41 @@ def _create_scene_nodes(
 def _required_scene_node_indices(
     primitives: list[MeshPrimitiveData],
     nodes: list[SceneNodeData],
+    skipped_animation_indices: set[int] | None = None,
 ) -> set[int] | None:
     if not nodes:
         return None
 
     required: set[int] = set()
+    child_counts = _scene_node_child_counts(nodes)
+    primitive_node_indices = {
+        int(primitive.node_index)
+        for primitive in primitives
+        if int(primitive.node_index) >= 0
+    }
+    skipped_animation_indices = skipped_animation_indices or set()
     for primitive in primitives:
-        _add_node_ancestors(required, nodes, int(primitive.node_index))
+        node_index = int(primitive.node_index)
+        if _primitive_node_needs_helper(node_index, nodes, child_counts):
+            _add_node_ancestors(required, nodes, node_index)
+        else:
+            _add_node_parent_ancestors(required, nodes, node_index)
 
         if primitive.has_skin:
             _add_node_ancestors(required, nodes, int(primitive.skin_root_node_index))
-            joint_nodes = _buffer_view(primitive.skin_joint_nodes_i32, "i")
-            if joint_nodes is not None:
-                count = min(len(joint_nodes), int(primitive.skin_joint_count))
-                for index in range(count):
-                    _add_node_ancestors(required, nodes, int(joint_nodes[index]))
+            if not primitive.skin_mesh_in_bind_pose:
+                joint_nodes = _buffer_view(primitive.skin_joint_nodes_i32, "i")
+                if joint_nodes is not None:
+                    count = min(len(joint_nodes), int(primitive.skin_joint_count))
+                    for index in range(count):
+                        _add_node_ancestors(required, nodes, int(joint_nodes[index]))
 
     for index, node in enumerate(nodes):
-        if _scene_node_has_required_payload(node):
+        if _scene_node_payload_can_inline(index, node, primitive_node_indices, child_counts):
+            continue
+        if _scene_node_requires_standalone_object(node):
+            _add_node_ancestors(required, nodes, index)
+        elif index not in skipped_animation_indices and (node.anim_count or node.anim_channels):
             _add_node_ancestors(required, nodes, index)
 
     if len(required) >= len(nodes):
@@ -2979,11 +3475,35 @@ def _add_node_ancestors(required: set[int], nodes: list[SceneNodeData], node_ind
         current = nodes[current].parent_index
 
 
-def _scene_node_has_required_payload(node: SceneNodeData) -> bool:
+def _add_node_parent_ancestors(required: set[int], nodes: list[SceneNodeData], node_index: int) -> None:
+    if 0 <= node_index < len(nodes):
+        _add_node_ancestors(required, nodes, nodes[node_index].parent_index)
+
+
+def _scene_node_child_counts(nodes: list[SceneNodeData]) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    for node in nodes:
+        parent_index = int(node.parent_index)
+        if parent_index >= 0:
+            counts[parent_index] = counts.get(parent_index, 0) + 1
+    return counts
+
+
+def _primitive_node_needs_helper(
+    node_index: int,
+    nodes: list[SceneNodeData],
+    child_counts: dict[int, int],
+) -> bool:
+    if node_index < 0 or node_index >= len(nodes):
+        return False
+    if child_counts.get(node_index, 0) > 0:
+        return True
+    return _scene_node_requires_standalone_object(nodes[node_index])
+
+
+def _scene_node_requires_standalone_object(node: SceneNodeData) -> bool:
     return bool(
-        node.anim_count
-        or node.anim_channels
-        or node.camera_type
+        node.camera_type
         or node.light_type
         or node.layers
         or node.extra
@@ -2993,7 +3513,30 @@ def _scene_node_has_required_payload(node: SceneNodeData) -> bool:
     )
 
 
+def _scene_node_payload_can_inline(
+    node_index: int,
+    node: SceneNodeData,
+    primitive_node_indices: set[int],
+    child_counts: dict[int, int],
+) -> bool:
+    if node_index not in primitive_node_indices:
+        return False
+    if child_counts.get(node_index, 0) > 0:
+        return False
+    return not _scene_node_requires_standalone_object(node)
+
+
+def _scene_node_has_required_payload(node: SceneNodeData) -> bool:
+    return bool(
+        node.anim_count
+        or node.anim_channels
+        or _scene_node_requires_standalone_object(node)
+    )
+
+
 def _skinned_node_animation_skip_indices(primitives: list[MeshPrimitiveData]) -> set[int]:
+    if not any(primitive.has_skin and primitive.skin_mesh_in_bind_pose for primitive in primitives):
+        return set()
     skip: set[int] = set()
     _mark_skinned_node_animation_skip({_S_NODE_ANIMATION_SKIP_INDICES: skip}, primitives)
     return skip
@@ -3027,8 +3570,11 @@ def _mark_skinned_node_animation_skip(state: dict | None, primitives: list[MeshP
 def _apply_deferred_scene_node_animations(state: dict | None) -> None:
     if not state or not state.get(_S_NODE_ANIMATION_DEFERRED):
         return
+    if not state.get(_S_HAS_NODE_ANIMATION) and not state.get(_S_HAS_NODE_VISIBILITY_ANIMATION):
+        state[_S_NODE_ANIMATION_DEFERRED] = False
+        return
 
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     started_at = time.perf_counter() if profile_detail else 0.0
     node_objects = state.get(_S_NODE_OBJECTS) or {}
     node_data = state.get(_S_NODE_DATA) or {}
@@ -3063,6 +3609,310 @@ def _apply_deferred_scene_node_animations(state: dict | None) -> None:
         )
 
 
+def _apply_deferred_bind_pose_skins(state: dict | None) -> None:
+    if not state:
+        return
+
+    skin_cache = state.get(_S_SKIN_CACHE) or {}
+    pending = skin_cache.get(_SKIN_CACHE_DEFER_BIND_SKINS) or []
+    if not pending:
+        return
+    skin_cache[_SKIN_CACHE_DEFER_BIND_SKINS] = []
+
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+    started_at = time.perf_counter() if profile_detail else 0.0
+    groups: dict[object, list[tuple]] = {}
+    for item in pending:
+        _obj, data, _joint_names, joint_nodes, _node_objects, node_data, *_rest = item
+        key = _bind_pose_skin_group_key(data, joint_nodes, node_data)
+        groups.setdefault(key, []).append(item)
+
+    armature_count = _create_bind_pose_skin_armature_groups(list(groups.values()))
+
+    pending.clear()
+    if profile_detail:
+        _profile_log(
+            "deferred_bind_pose_skins "
+            f"skins={sum(len(items) for items in groups.values())} "
+            f"armatures={armature_count} "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+
+
+def _bind_pose_skin_group_key(
+    data: MeshPrimitiveData,
+    joint_nodes: memoryview,
+    node_data: dict[int, SceneNodeData],
+) -> object:
+    root_index = int(data.skin_root_node_index)
+    if root_index >= 0:
+        return root_index
+    first_index = int(joint_nodes[0]) if len(joint_nodes) else -1
+    first_node = node_data.get(first_index)
+    parent_index = int(first_node.parent_index) if first_node else -1
+    if parent_index >= 0:
+        return ("parent", parent_index)
+    count = min(len(joint_nodes), int(data.skin_joint_count))
+    return ("skin", tuple(int(joint_nodes[index]) for index in range(count)))
+
+
+def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
+    groups = [items for items in groups if items]
+    if not groups:
+        return 0
+
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
+
+    def lap_ms() -> float:
+        nonlocal phase_started_at
+        if not profile_detail:
+            return 0.0
+        now = time.perf_counter()
+        elapsed = (now - phase_started_at) * 1000.0
+        phase_started_at = now
+        return elapsed
+
+    records = []
+    for items in groups:
+        (
+            first_obj,
+            first_data,
+            _first_joint_names,
+            first_joint_nodes,
+            first_node_objects,
+            first_node_data,
+            collection,
+            _first_apply_animation,
+            _first_pose_channels,
+            _first_deferred_skin_animations,
+        ) = items[0]
+        armature_data = bpy.data.armatures.new(f"{first_obj.name}_Armature")
+        armature = bpy.data.objects.new(f"{first_obj.name}_Armature", armature_data)
+        collection.objects.link(armature)
+        armature_source = _skin_armature_source(
+            first_data,
+            first_joint_nodes,
+            first_node_objects,
+            first_node_data,
+        ) or first_obj
+        _match_object_space(armature, armature_source)
+        bone_node_indices = _bind_pose_group_bone_node_indices(items)
+        records.append({
+            "items": items,
+            "armature": armature,
+            "armature_data": armature_data,
+            "armature_source": armature_source,
+            "node_data": first_node_data,
+            "bone_node_indices": bone_node_indices,
+            "bone_names_by_node": _bind_pose_group_bone_names(items),
+            "rest_matrices_by_node": _skin_rest_matrices_from_assetkit_nodes(
+                first_data,
+                first_node_data,
+                bone_node_indices,
+            ),
+        })
+    create_ms = lap_ms()
+
+    previous_active = bpy.context.view_layer.objects.active
+    previous_selection = list(bpy.context.selected_objects)
+    if previous_active and previous_active.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    for obj in previous_selection:
+        obj.select_set(False)
+    for record in records:
+        record["armature"].select_set(True)
+    bpy.context.view_layer.objects.active = records[0]["armature"]
+    bpy.ops.object.mode_set(mode="EDIT")
+    mode_enter_ms = lap_ms()
+
+    total_bones = 0
+    for record in records:
+        edit_bones = record["armature_data"].edit_bones
+        bone_node_indices = record["bone_node_indices"]
+        bone_names_by_node = record["bone_names_by_node"]
+        rest_matrices_by_node = record["rest_matrices_by_node"]
+        node_data = record["node_data"]
+        for node_index in bone_node_indices:
+            name = bone_names_by_node.get(node_index)
+            if not name:
+                continue
+            bone = edit_bones.new(name)
+            matrix = rest_matrices_by_node.get(node_index) or Matrix.Identity(4)
+            _set_bone_from_rest_matrix(
+                bone,
+                matrix,
+                _skin_bone_length(node_index, bone_node_indices, node_data, rest_matrices_by_node),
+            )
+            total_bones += 1
+    create_bones_ms = lap_ms()
+
+    for record in records:
+        edit_bones = record["armature_data"].edit_bones
+        bone_names_by_node = record["bone_names_by_node"]
+        node_data = record["node_data"]
+        for node_index, name in bone_names_by_node.items():
+            parent_joint = None
+            parent_index = node_data.get(node_index).parent_index if node_data.get(node_index) else -1
+            while parent_index >= 0 and parent_joint is None:
+                parent_name = bone_names_by_node.get(parent_index)
+                if parent_name:
+                    parent_joint = parent_name
+                    break
+                parent_node = node_data.get(parent_index)
+                parent_index = parent_node.parent_index if parent_node else -1
+            if parent_joint is not None and parent_joint in edit_bones:
+                edit_bones[name].parent = edit_bones[parent_joint]
+    parent_bones_ms = lap_ms()
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    mode_exit_ms = lap_ms()
+
+    skin_count = 0
+    for record in records:
+        armature = record["armature"]
+        immediate_items = [item for item in record["items"] if item[7]]
+        deferred_items = [item for item in record["items"] if not item[7]]
+        if immediate_items:
+            root_animation_applied: set[int] = set()
+            for _obj, data, _joint_names, _joint_nodes, _node_objects, node_data, _collection, _apply_animation_flag, _pose_channels, _deferred_skin_animations in immediate_items:
+                root_index = int(data.skin_root_node_index)
+                if root_index in root_animation_applied:
+                    continue
+                root_node = node_data.get(root_index)
+                if root_node:
+                    _apply_animation(armature, root_node)
+                root_animation_applied.add(root_index)
+            joint_names, joint_nodes, node_data, pose_channels = _bind_pose_group_animation_payload(immediate_items)
+            _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels)
+        if deferred_items:
+            joint_names, joint_nodes, node_data, pose_channels = _bind_pose_group_animation_payload(deferred_items)
+            _obj, data, _old_joint_names, _old_joint_nodes, _node_objects, _old_node_data, _collection, _apply_animation_flag, _old_pose_channels, deferred_skin_animations = deferred_items[0]
+            include_root = int(data.skin_root_node_index) >= 0
+            if deferred_skin_animations is not None:
+                deferred_skin_animations.append((armature, data, joint_names, joint_nodes, node_data, pose_channels, include_root))
+        skin_count += len(record["items"])
+    animation_ms = lap_ms()
+
+    for record in records:
+        armature = record["armature"]
+        _match_object_space(armature, record["armature_source"])
+        _hide_helper_object(armature)
+        _hide_bind_pose_skin_helpers(record["items"])
+    hide_ms = lap_ms()
+
+    for record in records:
+        armature = record["armature"]
+        for obj, _data, _joint_names, _joint_nodes, _node_objects, _node_data, _collection, _apply_anim_flag, _pose_channels, _deferred_skin_animations in record["items"]:
+            modifier = obj.modifiers.new("AssetKit Skin", "ARMATURE")
+            modifier.object = armature
+            modifier.use_vertex_groups = True
+            _parent_skinned_mesh_to_armature(obj, armature)
+    bind_ms = lap_ms()
+
+    for record in records:
+        record["armature"].select_set(False)
+    for obj in previous_selection:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = previous_active
+    cleanup_ms = lap_ms()
+
+    if profile_detail:
+        _profile_log(
+            "create_bind_pose_skin_armature_groups "
+            f"skins={skin_count} armatures={len(records)} bones={total_bones} "
+            f"create={create_ms:.3f}ms mode_enter={mode_enter_ms:.3f}ms "
+            f"create_bones={create_bones_ms:.3f}ms parent_bones={parent_bones_ms:.3f}ms "
+            f"mode_exit={mode_exit_ms:.3f}ms animation={animation_ms:.3f}ms "
+            f"hide={hide_ms:.3f}ms bind={bind_ms:.3f}ms cleanup={cleanup_ms:.3f}ms "
+            f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
+    return len(records)
+
+
+def _bind_pose_group_bone_node_indices(items: list[tuple]) -> list[int]:
+    indices: list[int] = []
+    seen: set[int] = set()
+    for _obj, data, _joint_names, joint_nodes, _node_objects, node_data, *_rest in items:
+        for node_index in _skin_bone_node_indices(data, joint_nodes, node_data):
+            if node_index in seen:
+                continue
+            seen.add(node_index)
+            indices.append(node_index)
+    return indices
+
+
+def _bind_pose_group_bone_names(items: list[tuple]) -> dict[int, str]:
+    names: dict[int, str] = {}
+    for _obj, _data, joint_names, joint_nodes, _node_objects, _node_data, *_rest in items:
+        count = min(len(joint_nodes), len(joint_names))
+        for joint_index in range(count):
+            node_index = int(joint_nodes[joint_index])
+            if node_index >= 0 and node_index not in names:
+                names[node_index] = joint_names[joint_index]
+    return names
+
+
+def _bind_pose_group_animation_payload(items: list[tuple]) -> tuple[list[str], list[int], dict[int, SceneNodeData], list[list[dict]]]:
+    joint_names_out: list[str] = []
+    joint_nodes_out: list[int] = []
+    pose_channels_out: list[list[dict]] = []
+    seen: set[str] = set()
+    node_data_out: dict[int, SceneNodeData] = items[0][5] if items else {}
+
+    for _obj, _data, joint_names, joint_nodes, _node_objects, node_data, *_rest in items:
+        node_data_out = node_data
+        pose_channels = _rest[2] if len(_rest) > 2 else None
+        count = min(len(joint_names), len(joint_nodes))
+        for joint_index in range(count):
+            name = joint_names[joint_index]
+            if name in seen:
+                continue
+            seen.add(name)
+            joint_names_out.append(name)
+            joint_nodes_out.append(int(joint_nodes[joint_index]))
+            pose_channels_out.append(
+                list(pose_channels[joint_index] or [])
+                if pose_channels is not None and joint_index < len(pose_channels)
+                else []
+            )
+
+    return joint_names_out, joint_nodes_out, node_data_out, pose_channels_out
+
+
+def _hide_bind_pose_skin_helpers(items: list[tuple]) -> None:
+    if not items:
+        return
+
+    helpers: set[int] = set()
+    _first_obj, _first_data, _first_joint_names, _first_joint_nodes, node_objects, node_data, *_rest = items[0]
+    children_by_parent: dict[int, list[int]] = {}
+    for node_index, node in node_data.items():
+        children_by_parent.setdefault(int(node.parent_index), []).append(node_index)
+
+    for _obj, _data, _joint_names, joint_nodes, _node_objects, _node_data, *_item_rest in items:
+        for index in range(len(joint_nodes)):
+            node_index = int(joint_nodes[index])
+            if node_index >= 0:
+                helpers.add(node_index)
+
+    stack = list(helpers)
+    while stack:
+        node_index = stack.pop()
+        for child_index in children_by_parent.get(node_index, ()):
+            if child_index in helpers:
+                continue
+            helpers.add(child_index)
+            stack.append(child_index)
+
+    for node_index in helpers:
+        node = node_objects.get(node_index)
+        if node and node.type == "EMPTY":
+            _hide_empty_helper_object(node)
+
+
 def _apply_deferred_skin_animations(state: dict | None) -> None:
     if not state or not state.get(_S_SKIN_ANIMATION_DEFERRED):
         return
@@ -3072,7 +3922,7 @@ def _apply_deferred_skin_animations(state: dict | None) -> None:
         state[_S_SKIN_ANIMATION_DEFERRED] = False
         return
 
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     started_at = time.perf_counter() if profile_detail else 0.0
     skin_count = len(pending)
     for armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, include_root in pending:
@@ -3279,7 +4129,6 @@ def _visibility_action_for(obj: bpy.types.Object, channel: dict) -> bpy.types.Ac
 
     obj.animation_data_create()
     action = bpy.data.actions.new(_animation_action_name(obj.name, "", channel))
-    action.use_fake_user = True
     clip_index, _clip_name = _channel_action_clip(channel)
     if obj.animation_data.action is None or clip_index == 0:
         obj.animation_data.action = action
@@ -3405,10 +4254,7 @@ def _hide_helper_object(obj: bpy.types.Object, hide_empty: bool = False) -> None
         obj.hide_select = False
         obj.empty_display_size = max(0.1, min(obj.empty_display_size, 0.35))
         if hide_empty:
-            obj.hide_select = True
-            obj.hide_viewport = True
-            obj.hide_render = True
-            obj["assetkit_helper_hidden"] = True
+            _hide_empty_helper_object(obj)
         return
 
     obj.hide_select = True
@@ -3416,6 +4262,17 @@ def _hide_helper_object(obj: bpy.types.Object, hide_empty: bool = False) -> None
     if action and any(fcurve.data_path in {"hide_viewport", "hide_render"} for fcurve in _iter_action_fcurves(action)):
         return
 
+    obj.hide_viewport = True
+    obj.hide_render = True
+    obj["assetkit_helper_hidden"] = True
+
+
+def _hide_empty_helper_object(obj: bpy.types.Object) -> None:
+    if obj.get("assetkit_helper_hidden"):
+        return
+    if not obj.get("assetkit_helper_object"):
+        obj["assetkit_helper_object"] = True
+    obj.hide_select = True
     obj.hide_viewport = True
     obj.hide_render = True
     obj["assetkit_helper_hidden"] = True
@@ -3874,7 +4731,6 @@ def _shared_animation_action(suffix: str, channel: dict | None) -> bpy.types.Act
 
 def _new_animation_action(name: str) -> bpy.types.Action:
     action = bpy.data.actions.new(name)
-    action.use_fake_user = True
     _ensure_action_layer_strip(action)
     return action
 
@@ -4386,7 +5242,7 @@ def _apply_skin(
     if not data.has_skin or data.skin_vertex_count <= 0 or data.skin_joint_count <= 0:
         return
 
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = total_started_at
     detail_parts: list[str] = []
@@ -4407,6 +5263,31 @@ def _apply_skin(
         now = time.perf_counter()
         detail_parts.append(f"vertex_groups={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
+    if data.skin_mesh_in_bind_pose:
+        queue = _deferred_bind_pose_skin_queue(skin_cache)
+        if queue is not None:
+            queue.append((
+                obj,
+                data,
+                joint_names,
+                joint_nodes,
+                node_objects,
+                node_data,
+                collection,
+                apply_animation,
+                data.skin_pose_anim_channels,
+                deferred_skin_animations,
+            ))
+            if profile_detail:
+                now = time.perf_counter()
+                detail_parts.append(f"defer={(now - phase_started_at) * 1000.0:.3f}ms")
+                _profile_log(
+                    "apply_skin_detail "
+                    f"name={obj.name!r} joints={data.skin_joint_count} verts={vertex_count} "
+                    f"total={(now - total_started_at) * 1000.0:.3f}ms "
+                    + " ".join(detail_parts)
+                )
+            return
     cache_key = _skin_cache_key(data, joint_nodes, obj)
     armature = skin_cache.get(cache_key) if skin_cache is not None else None
     if armature is None:
@@ -4465,7 +5346,7 @@ def _hide_skin_node_helpers(
     for node_index in node_indices:
         node = node_objects.get(node_index)
         if node and node.type == "EMPTY":
-            _hide_helper_object(node, hide_empty=True)
+            _hide_empty_helper_object(node)
 
 
 def _skin_helper_node_indices(
@@ -4505,7 +5386,7 @@ def _apply_skin_bind_shape(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> Non
         return
 
     mesh.transform(matrix)
-    mesh.update(calc_edges=True)
+    mesh.update(calc_edges=False)
 
 
 def _matrix_is_identity(matrix: Matrix, epsilon: float = 1.0e-6) -> bool:
@@ -4530,6 +5411,30 @@ def _skin_cache_key(
     )
 
 
+def _deferred_bind_pose_skin_queue(skin_cache: dict | None) -> list | None:
+    if skin_cache is None:
+        return None
+    queue = skin_cache.get(_SKIN_CACHE_DEFER_BIND_SKINS)
+    if queue is None:
+        queue = []
+        skin_cache[_SKIN_CACHE_DEFER_BIND_SKINS] = queue
+    return queue
+
+
+def _skin_joint_name(
+    joint_index: int,
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+) -> str:
+    node_index = int(joint_nodes[joint_index]) if joint_index < len(joint_nodes) else -1
+    node = node_objects.get(node_index)
+    if node:
+        return node.name
+    if node_index >= 0:
+        return f"AssetKitJoint_{node_index}"
+    return f"AssetKitJoint_{joint_index}"
+
+
 def _create_skin_vertex_groups(
     obj: bpy.types.Object,
     data: MeshPrimitiveData,
@@ -4540,14 +5445,12 @@ def _create_skin_vertex_groups(
     joint_nodes: memoryview,
     node_objects: dict[int, bpy.types.Object],
 ) -> list[str]:
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = total_started_at
     groups = []
     for joint_index in range(data.skin_joint_count):
-        node_index = int(joint_nodes[joint_index]) if joint_index < len(joint_nodes) else -1
-        node = node_objects.get(node_index)
-        group = obj.vertex_groups.new(name=node.name if node else f"AssetKitJoint_{joint_index}")
+        group = obj.vertex_groups.new(name=_skin_joint_name(joint_index, joint_nodes, node_objects))
         groups.append(group)
     if profile_detail:
         now = time.perf_counter()
@@ -4638,7 +5541,7 @@ def _create_skin_armature(
     if not joint_names:
         return None
 
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = total_started_at
 
@@ -5033,7 +5936,7 @@ def _apply_bone_animations(
     node_data: dict[int, SceneNodeData],
     pose_channels_by_joint: list[list[dict]] | None = None,
 ) -> None:
-    profile_detail = _profile_enabled()
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = total_started_at
     animated = False
@@ -5757,8 +6660,43 @@ def _create_material(
     if not _has_material_data(data):
         return None
 
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+    profile_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = profile_started_at
+    cache_key_ms = 0.0
+    new_ms = 0.0
+    simple_ms = 0.0
+    nodes_ms = 0.0
+    props_ms = 0.0
+    settings_ms = 0.0
+    textures_ms = 0.0
+    animation_ms = 0.0
+
+    def lap_ms() -> float:
+        nonlocal phase_started_at
+        if not profile_detail:
+            return 0.0
+        now = time.perf_counter()
+        elapsed = (now - phase_started_at) * 1000.0
+        phase_started_at = now
+        return elapsed
+
     cache_key = _material_cache_key(data)
+    cache_key_ms = lap_ms()
     if material_cache is not None and cache_key in material_cache:
+        if profile_detail:
+            _record_material_profile(
+                cache_hit=True,
+                cache_key_ms=cache_key_ms,
+                new_ms=0.0,
+                simple_ms=0.0,
+                nodes_ms=0.0,
+                props_ms=0.0,
+                settings_ms=0.0,
+                textures_ms=0.0,
+                animation_ms=0.0,
+                total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+            )
         return material_cache[cache_key]
 
     color_attr = _color_attribute_name(data)
@@ -5768,11 +6706,90 @@ def _create_material(
     base_color = _material_base_color(data)
     mat = bpy.data.materials.new(material_name)
     mat.diffuse_color = base_color
+    new_ms = lap_ms()
     if _can_use_simple_material(data, color_attr):
         _configure_simple_material(mat, data, base_color)
+        simple_ms = lap_ms()
         if material_cache is not None:
             material_cache[cache_key] = mat
+        if profile_detail:
+            _record_material_profile(
+                cache_hit=False,
+                cache_key_ms=cache_key_ms,
+                new_ms=new_ms,
+                simple_ms=simple_ms,
+                nodes_ms=0.0,
+                props_ms=0.0,
+                settings_ms=0.0,
+                textures_ms=0.0,
+                animation_ms=0.0,
+                total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+            )
         return mat
+
+    if _can_defer_base_color_texture_material(data, color_attr, base_color):
+        _configure_deferred_base_color_texture_material(mat, data, base_color)
+        simple_ms = lap_ms()
+        if material_cache is not None:
+            material_cache[cache_key] = mat
+        if profile_detail:
+            _record_material_profile(
+                cache_hit=False,
+                cache_key_ms=cache_key_ms,
+                new_ms=new_ms,
+                simple_ms=simple_ms,
+                nodes_ms=0.0,
+                props_ms=0.0,
+                settings_ms=0.0,
+                textures_ms=0.0,
+                animation_ms=0.0,
+                total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+            )
+        return mat
+
+    if _can_use_scalar_principled_material(data, color_attr):
+        if _configure_scalar_principled_material(mat, data, base_color):
+            nodes_ms = lap_ms()
+            _set_assetkit_material_props(mat, data)
+            _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
+            _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
+            props_ms = lap_ms()
+            if material_cache is not None:
+                material_cache[cache_key] = mat
+            if profile_detail:
+                _record_material_profile(
+                    cache_hit=False,
+                    cache_key_ms=cache_key_ms,
+                    new_ms=new_ms,
+                    simple_ms=0.0,
+                    nodes_ms=nodes_ms,
+                    props_ms=props_ms,
+                    settings_ms=0.0,
+                    textures_ms=0.0,
+                    animation_ms=0.0,
+                    total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+                )
+            return mat
+
+    if _can_use_base_color_texture_fast_material(data, color_attr, base_color):
+        if _configure_base_color_texture_fast_material(mat, data, base_color):
+            nodes_ms = lap_ms()
+            if material_cache is not None:
+                material_cache[cache_key] = mat
+            if profile_detail:
+                _record_material_profile(
+                    cache_hit=False,
+                    cache_key_ms=cache_key_ms,
+                    new_ms=new_ms,
+                    simple_ms=0.0,
+                    nodes_ms=nodes_ms,
+                    props_ms=0.0,
+                    settings_ms=0.0,
+                    textures_ms=0.0,
+                    animation_ms=0.0,
+                    total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+                )
+            return mat
 
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
@@ -5782,6 +6799,20 @@ def _create_material(
     if not bsdf:
         if material_cache is not None:
             material_cache[cache_key] = mat
+        if profile_detail:
+            nodes_ms = lap_ms()
+            _record_material_profile(
+                cache_hit=False,
+                cache_key_ms=cache_key_ms,
+                new_ms=new_ms,
+                simple_ms=0.0,
+                nodes_ms=nodes_ms,
+                props_ms=0.0,
+                settings_ms=0.0,
+                textures_ms=0.0,
+                animation_ms=0.0,
+                total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+            )
         return mat
 
     color_target = bsdf
@@ -5837,11 +6868,14 @@ def _create_material(
             alpha_socket.default_value = data.opacity
         except TypeError:
             pass
+    nodes_ms = lap_ms()
 
     _set_assetkit_material_props(mat, data)
-    _set_assetkit_json_prop(mat, "assetkit_material_extra_json", data.material_extra)
+    _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
     _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
-    settings_node = _ensure_gltf_settings_node(mat, data)
+    props_ms = lap_ms()
+    settings_node = _ensure_gltf_settings_node(mat, data, bsdf)
+    settings_ms = lap_ms()
 
     global _ACTIVE_SEPARATE_COLOR_CACHE, _ACTIVE_TEXTURE_NODE_CACHE
     previous_texture_node_cache = _ACTIVE_TEXTURE_NODE_CACHE
@@ -6052,11 +7086,26 @@ def _create_material(
     finally:
         _ACTIVE_TEXTURE_NODE_CACHE = previous_texture_node_cache
         _ACTIVE_SEPARATE_COLOR_CACHE = previous_separate_color_cache
+    textures_ms = lap_ms()
 
     _apply_material_animation(mat, data, bsdf, color_target, color_input, alpha_socket, settings_node)
+    animation_ms = lap_ms()
 
     if material_cache is not None:
         material_cache[cache_key] = mat
+    if profile_detail:
+        _record_material_profile(
+            cache_hit=False,
+            cache_key_ms=cache_key_ms,
+            new_ms=new_ms,
+            simple_ms=0.0,
+            nodes_ms=nodes_ms,
+            props_ms=props_ms,
+            settings_ms=settings_ms,
+            textures_ms=textures_ms,
+            animation_ms=animation_ms,
+            total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+        )
     return mat
 
 
@@ -6082,6 +7131,451 @@ def _can_use_simple_material(data: MeshPrimitiveData, color_attr: str) -> bool:
     return True
 
 
+def _can_use_scalar_principled_material(data: MeshPrimitiveData, color_attr: str) -> bool:
+    if color_attr:
+        return False
+    if data.material_anim_channels:
+        return False
+    if _is_unlit_material(data) or _is_legacy_lit_material(data) or _is_specular_glossiness_material(data):
+        return False
+    if any(getattr(data, name) for name in _MATERIAL_TEXTURE_FIELDS):
+        return False
+    if data.texture_infos:
+        return False
+    if float(data.volume_thickness) > 0.0 or _has_volume_scatter(data):
+        return False
+    return True
+
+
+def _can_use_base_color_texture_fast_material(
+    data: MeshPrimitiveData,
+    color_attr: str,
+    base_color: tuple[float, float, float, float],
+) -> bool:
+    if color_attr or not data.base_color_texture:
+        return False
+    if data.material_anim_channels:
+        return False
+    if data.material_extra or data.effect_extra or data.material_variants:
+        return False
+    if _is_unlit_material(data) or _is_legacy_lit_material(data) or _is_specular_glossiness_material(data):
+        return False
+    if any(getattr(data, name) for name in _MATERIAL_TEXTURE_FIELDS if name != "base_color_texture"):
+        return False
+    texture_infos = data.texture_infos or {}
+    if any(role != "base_color" for role in texture_infos):
+        return False
+    tex_info = _texture_info(data, "base_color")
+    if tex_info is not None:
+        if tex_info.has_transform or _texture_uv_slot(tex_info) != 0:
+            return False
+        if tex_info.texture_extra or tex_info.texref_extra or tex_info.image_extra or tex_info.sampler_extra:
+            return False
+    if not _tuple_close(base_color, (1.0, 1.0, 1.0, 1.0)):
+        return False
+    if data.alpha_mode or abs(float(data.opacity) - 1.0) > 1e-6:
+        return False
+    if _has_emission(data) or _has_specular(data) or _has_clearcoat(data):
+        return False
+    if _has_transmission(data) or _has_sheen(data) or _has_anisotropy(data) or _has_iridescence(data):
+        return False
+    if _has_diffuse_transmission(data) or _has_volume_scatter(data):
+        return False
+    return float(data.volume_thickness) <= 0.0 and float(data.dispersion) == 0.0
+
+
+def _can_defer_base_color_texture_material(
+    data: MeshPrimitiveData,
+    color_attr: str,
+    base_color: tuple[float, float, float, float],
+) -> bool:
+    return (
+        _ACTIVE_TEXTURE_LOAD_MODE == "DEFERRED"
+        and _can_use_base_color_texture_fast_material(data, color_attr, base_color)
+    )
+
+
+def _configure_deferred_base_color_texture_material(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> None:
+    mat.diffuse_color = base_color
+    mat.use_backface_culling = not _is_double_sided_material(data)
+    _set_material_alpha_mode(mat, data)
+    _set_material_scalar(mat, "metallic", data.metallic)
+    _set_material_scalar(mat, "roughness", data.roughness)
+    _set_material_scalar(mat, "specular_intensity", _pbr_specular_level(data))
+    try:
+        mat["assetkit_deferred_material_nodes"] = True
+        mat["assetkit_deferred_base_color_texture"] = data.base_color_texture
+    except Exception:
+        pass
+    _queue_deferred_material_nodes(
+        mat,
+        data.base_color_texture,
+        _texture_info(data, "base_color"),
+        base_color,
+        float(data.metallic),
+        float(data.roughness),
+        _is_double_sided_material(data),
+    )
+
+
+def _queue_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
+    global _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE
+    _DEFERRED_MATERIAL_SLOT_TASKS.append(spec)
+    if not _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE:
+        _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE = True
+        bpy.app.timers.register(_deferred_material_slot_timer, first_interval=0.001)
+
+
+def _deferred_material_slot_timer() -> float | None:
+    global _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE
+    started_at = time.perf_counter()
+    processed = 0
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+
+    while _DEFERRED_MATERIAL_SLOT_TASKS:
+        spec = _DEFERRED_MATERIAL_SLOT_TASKS.popleft()
+        try:
+            _apply_deferred_material_slot(spec)
+            processed += 1
+        except Exception:
+            pass
+        if time.perf_counter() - started_at >= _DEFERRED_MATERIAL_SLOT_TIME_BUDGET:
+            if profile_detail and processed:
+                _profile_log(
+                    "deferred_material_slots "
+                    f"materials={processed} remaining={len(_DEFERRED_MATERIAL_SLOT_TASKS)} "
+                    f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+                )
+            return 0.001
+
+    _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE = False
+    if profile_detail and processed:
+        _profile_log(
+            "deferred_material_slots "
+            f"materials={processed} remaining=0 "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+    return None
+
+
+def _apply_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
+    if not spec.slots:
+        return
+
+    mat = bpy.data.materials.new(spec.name)
+    mat.diffuse_color = spec.base_color
+    mat.use_backface_culling = not spec.double_sided
+    _set_material_scalar(mat, "metallic", spec.metallic)
+    _set_material_scalar(mat, "roughness", spec.roughness)
+    _set_material_scalar(mat, "specular_intensity", 0.5)
+    try:
+        mat["assetkit_deferred_material_nodes"] = True
+        mat["assetkit_deferred_base_color_texture"] = spec.path
+    except Exception:
+        pass
+
+    cache = spec.cache
+    if cache is not None:
+        cache[spec.cache_key] = mat
+
+    for mesh, obj, slot_index, object_material_slot in spec.slots:
+        try:
+            if not _mesh_ref_alive(mesh):
+                continue
+            if object_material_slot and obj is not None and _object_ref_alive(obj):
+                if slot_index < 0:
+                    slot_index = _ensure_object_material_slot(mesh)
+                elif slot_index >= len(mesh.materials):
+                    continue
+                slot = obj.material_slots[slot_index]
+                slot.link = "OBJECT"
+                slot.material = mat
+            else:
+                if slot_index < 0:
+                    mesh.materials.append(mat)
+                elif slot_index < len(mesh.materials):
+                    mesh.materials[slot_index] = mat
+        except Exception:
+            continue
+
+    _queue_deferred_material_nodes(
+        mat,
+        spec.path,
+        spec.tex_info,
+        spec.base_color,
+        spec.metallic,
+        spec.roughness,
+        spec.double_sided,
+    )
+
+
+def _mesh_ref_alive(mesh: bpy.types.Mesh) -> bool:
+    try:
+        return bpy.data.meshes.get(mesh.name) is mesh
+    except Exception:
+        return False
+
+
+def _object_ref_alive(obj: bpy.types.Object) -> bool:
+    try:
+        return bpy.data.objects.get(obj.name) is obj
+    except Exception:
+        return False
+
+
+def _configure_base_color_texture_fast_material(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> bool:
+    mat.diffuse_color = base_color
+    mat.use_nodes = True
+    mat.use_backface_culling = not _is_double_sided_material(data)
+
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if not tree or not bsdf:
+        return False
+
+    bsdf_inputs = bsdf.inputs
+    if abs(float(data.metallic)) > 1e-6:
+        socket = bsdf_inputs.get("Metallic")
+        if socket:
+            socket.default_value = data.metallic
+    if abs(float(data.roughness) - 0.5) > 1e-6:
+        socket = bsdf_inputs.get("Roughness")
+        if socket:
+            socket.default_value = data.roughness
+
+    tex_info = _texture_info(data, "base_color")
+    colorspace = _texture_color_space(tex_info, "sRGB")
+    path = data.base_color_texture
+    image = _cached_texture_image(path, colorspace) if _should_defer_texture_image(path) else _load_texture_image(path, colorspace)
+    if not image and not _should_defer_texture_image(path):
+        return False
+
+    tex = tree.nodes.new("ShaderNodeTexImage")
+    extension = _texture_extension(tex_info)
+    if extension != _TEXTURE_EXTENSION_DEFAULT:
+        tex.extension = extension
+    interpolation = _texture_interpolation(tex_info)
+    if interpolation != _TEXTURE_INTERPOLATION_DEFAULT:
+        tex.interpolation = interpolation
+    if image:
+        tex.image = image
+    else:
+        _queue_deferred_texture_image(tex, path, colorspace, store_props=False)
+
+    color_socket = bsdf_inputs.get("Base Color")
+    color_output = tex.outputs.get("Color")
+    if color_socket and color_output:
+        tree.links.new(color_output, color_socket)
+    return True
+
+
+def _configure_scalar_principled_material(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> bool:
+    mat.diffuse_color = base_color
+    mat.use_nodes = True
+    mat.use_backface_culling = not _is_double_sided_material(data)
+    _set_material_alpha_mode(mat, data)
+
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if not tree or not bsdf:
+        return False
+
+    diffuse_transmission_inputs = ("Diffuse Transmission Weight", "Diffuse Transmission")
+    if _has_diffuse_transmission(data) and not _has_input(bsdf, diffuse_transmission_inputs):
+        return False
+    if float(data.dispersion) != 0.0 and not _has_input(bsdf, ("Dispersion",)):
+        return False
+
+    inputs = bsdf.inputs
+
+    def set_input(name: str, value) -> None:
+        socket = inputs.get(name)
+        if socket:
+            try:
+                socket.default_value = value
+            except TypeError:
+                pass
+
+    def set_first(names: tuple[str, ...], value) -> None:
+        for name in names:
+            socket = inputs.get(name)
+            if socket:
+                try:
+                    socket.default_value = value
+                except TypeError:
+                    pass
+                return
+
+    set_input("Base Color", base_color)
+    set_input("Metallic", data.metallic)
+    set_input("Roughness", data.roughness)
+    set_first(("Specular IOR Level", "Specular"), _pbr_specular_level(data))
+    set_first(("IOR",), _material_ior(data))
+
+    alpha_socket = inputs.get("Alpha")
+    if alpha_socket:
+        try:
+            alpha_socket.default_value = data.opacity
+        except TypeError:
+            pass
+
+    if _has_emission(data):
+        set_input("Emission Color", (*data.emissive_color, 1.0))
+        set_first(("Emission Strength",), _emission_strength(data))
+    if _has_specular(data):
+        set_first(("Specular Tint",), (*data.specular_color, 1.0))
+    if _has_clearcoat(data):
+        set_first(("Coat Weight", "Clearcoat"), data.clearcoat)
+        set_first(("Coat Roughness", "Clearcoat Roughness"), data.clearcoat_roughness)
+    if _has_transmission(data):
+        set_first(("Transmission Weight", "Transmission"), data.transmission)
+    if _has_sheen(data):
+        set_first(("Sheen Weight", "Sheen"), 1.0 if data.has_sheen else 0.0)
+        set_first(("Sheen Tint",), (*data.sheen_color, 1.0))
+        set_first(("Sheen Roughness",), data.sheen_roughness)
+    if _has_anisotropy(data):
+        set_first(("Anisotropic",), data.anisotropy)
+        set_first(("Anisotropic Rotation",), _blender_anisotropy_rotation(data.anisotropy_rotation))
+    if _has_iridescence(data):
+        set_first(("Thin Film IOR",), data.iridescence_ior)
+        set_first(("Thin Film Weight", "Iridescence Weight", "Iridescence"), data.iridescence)
+        set_first(("Thin Film Thickness",), data.iridescence_thickness_maximum)
+    if data.dispersion:
+        set_first(("Dispersion",), data.dispersion)
+    if _has_diffuse_transmission(data):
+        set_first(diffuse_transmission_inputs, data.diffuse_transmission)
+        set_first(("Diffuse Transmission Color",), (*data.diffuse_transmission_color, 1.0))
+
+    return True
+
+
+def _queue_deferred_material_nodes(
+    mat: bpy.types.Material,
+    path: str,
+    tex_info: TextureRefData | None,
+    base_color: tuple[float, float, float, float],
+    metallic: float,
+    roughness: float,
+    double_sided: bool,
+) -> None:
+    if not path:
+        return
+
+    global _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
+    _DEFERRED_MATERIAL_NODE_TASKS.append(
+        (mat, path, tex_info, base_color, metallic, roughness, double_sided)
+    )
+    if not _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE:
+        _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE = True
+        bpy.app.timers.register(_deferred_material_node_timer, first_interval=0.001)
+
+
+def _deferred_material_node_timer() -> float | None:
+    global _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
+    started_at = time.perf_counter()
+    processed = 0
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+
+    while _DEFERRED_MATERIAL_NODE_TASKS:
+        task = _DEFERRED_MATERIAL_NODE_TASKS.popleft()
+        mat = task[0]
+        try:
+            if _material_ref_alive(mat):
+                _apply_deferred_base_color_texture_material(*task)
+                processed += 1
+        except Exception:
+            pass
+        if time.perf_counter() - started_at >= _DEFERRED_MATERIAL_NODE_TIME_BUDGET:
+            if profile_detail and processed:
+                _profile_log(
+                    "deferred_material_nodes "
+                    f"materials={processed} remaining={len(_DEFERRED_MATERIAL_NODE_TASKS)} "
+                    f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+                )
+            return 0.001
+
+    _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE = False
+    if profile_detail and processed:
+        _profile_log(
+            "deferred_material_nodes "
+            f"materials={processed} remaining=0 "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+    return None
+
+
+def _material_ref_alive(mat: bpy.types.Material) -> bool:
+    try:
+        return bpy.data.materials.get(mat.name) is mat
+    except Exception:
+        return False
+
+
+def _apply_deferred_base_color_texture_material(
+    mat: bpy.types.Material,
+    path: str,
+    tex_info: TextureRefData | None,
+    base_color: tuple[float, float, float, float],
+    metallic: float,
+    roughness: float,
+    double_sided: bool,
+) -> None:
+    mat.diffuse_color = base_color
+    mat.use_nodes = True
+    mat.use_backface_culling = not double_sided
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if not tree or not bsdf:
+        return
+
+    bsdf_inputs = bsdf.inputs
+    color_socket = bsdf_inputs.get("Base Color")
+    if color_socket:
+        color_socket.default_value = base_color
+    if abs(float(metallic)) > 1e-6:
+        socket = bsdf_inputs.get("Metallic")
+        if socket:
+            socket.default_value = metallic
+    if abs(float(roughness) - 0.5) > 1e-6:
+        socket = bsdf_inputs.get("Roughness")
+        if socket:
+            socket.default_value = roughness
+
+    colorspace = _texture_color_space(tex_info, "sRGB")
+    image = _cached_texture_image(path, colorspace)
+    tex = tree.nodes.new("ShaderNodeTexImage")
+    extension = _texture_extension(tex_info)
+    if extension != _TEXTURE_EXTENSION_DEFAULT:
+        tex.extension = extension
+    interpolation = _texture_interpolation(tex_info)
+    if interpolation != _TEXTURE_INTERPOLATION_DEFAULT:
+        tex.interpolation = interpolation
+    if image:
+        tex.image = image
+    else:
+        _queue_deferred_texture_image(tex, path, colorspace, store_props=False)
+
+    color_output = tex.outputs.get("Color")
+    if color_socket and color_output:
+        tree.links.new(color_output, color_socket)
+    try:
+        mat["assetkit_deferred_material_nodes"] = False
+    except Exception:
+        pass
+
+
 def _configure_simple_material(
     mat: bpy.types.Material,
     data: MeshPrimitiveData,
@@ -6091,7 +7585,7 @@ def _configure_simple_material(
     _set_material_alpha_mode(mat, data)
     if _has_nondefault_assetkit_material_props(data):
         _set_assetkit_material_props(mat, data)
-    _set_assetkit_json_prop(mat, "assetkit_material_extra_json", data.material_extra)
+    _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
     _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
     if not getattr(mat, "use_nodes", False):
         _set_material_scalar(mat, "metallic", data.metallic)
@@ -6944,8 +8438,11 @@ def _emission_strength(data: MeshPrimitiveData) -> float:
 def _material_cache_key(data: MeshPrimitiveData) -> object:
     color_attr = _color_attribute_name(data)
     native_key = int(getattr(data, "material_key", 0) or 0)
-    if native_key:
+    if native_key and _preserve_native_material_identity(data):
         return ("native", int(data.file_type), native_key, color_attr)
+    visual_key = _fast_visual_material_cache_key(data, color_attr)
+    if visual_key is not None:
+        return visual_key
     return (
         "props",
         data.material_name,
@@ -7014,6 +8511,128 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
     )
 
 
+def _preserve_native_material_identity(data: MeshPrimitiveData) -> bool:
+    return bool(
+        data.material_name
+        or data.material_extra
+        or data.effect_extra
+        or data.material_anim_channels
+        or data.material_variants
+    )
+
+
+def _fast_visual_material_cache_key(data: MeshPrimitiveData, color_attr: str) -> object | None:
+    key = _fast_simple_native_base_color_texture_key(data)
+    if key is not None and not color_attr:
+        return key
+    key = _fast_base_color_texture_visual_key(data, color_attr)
+    if key is not None:
+        return key
+    return None
+
+
+def _fast_simple_native_base_color_texture_key(data: MeshPrimitiveData) -> object | None:
+    if not getattr(data, "simple_native", False) or not data.base_color_texture:
+        return None
+    return (
+        "visual-base-color-texture",
+        int(data.file_type),
+        int(data.material_type),
+        data.base_color_texture,
+        round(float(data.metallic), 6),
+        round(float(data.roughness), 6),
+        bool(data.double_sided),
+    )
+
+
+def _fast_base_color_texture_visual_key(data: MeshPrimitiveData, color_attr: str) -> object | None:
+    if color_attr or not data.base_color_texture:
+        return None
+    if _preserve_native_material_identity(data):
+        return None
+    if data.texture_infos or data.color_sets or data.colors_f32 or data.point_attrs:
+        return None
+
+    material_type = int(data.material_type)
+    if material_type in {
+        _AK_MATERIAL_PHONG,
+        _AK_MATERIAL_BLINN,
+        _AK_MATERIAL_LAMBERT,
+        _AK_MATERIAL_CONSTANT,
+        _AK_MATERIAL_SPECULAR_GLOSSINESS,
+    }:
+        return None
+    if (
+        data.metallic_roughness_texture
+        or data.occlusion_texture
+        or data.normal_texture
+        or data.emissive_texture
+        or data.transparent_texture
+        or data.specular_texture
+        or data.specular_color_texture
+        or data.clearcoat_texture
+        or data.clearcoat_roughness_texture
+        or data.clearcoat_normal_texture
+        or data.transmission_texture
+        or data.sheen_color_texture
+        or data.sheen_roughness_texture
+        or data.iridescence_texture
+        or data.iridescence_thickness_texture
+        or data.volume_thickness_texture
+        or data.anisotropy_texture
+        or data.diffuse_transmission_texture
+        or data.diffuse_transmission_color_texture
+    ):
+        return None
+    if (
+        data.alpha_mode
+        or data.transparent_opaque
+        or abs(float(data.opacity) - 1.0) > 1e-6
+        or abs(float(data.transparent_amount) - 1.0) > 1e-6
+        or abs(float(data.normal_scale) - 1.0) > 1e-6
+        or abs(float(data.occlusion_strength) - 1.0) > 1e-6
+        or abs(float(data.emissive_strength) - 1.0) > 1e-6
+        or abs(float(data.specular_strength) - 1.0) > 1e-6
+        or abs(float(data.ior) - 1.5) > 1e-6
+        or abs(float(data.clearcoat)) > 1e-6
+        or abs(float(data.clearcoat_roughness)) > 1e-6
+        or abs(float(data.clearcoat_normal_scale) - 1.0) > 1e-6
+        or abs(float(data.transmission)) > 1e-6
+        or abs(float(data.sheen_roughness)) > 1e-6
+        or abs(float(data.iridescence)) > 1e-6
+        or abs(float(data.iridescence_ior) - 1.3) > 1e-6
+        or abs(float(data.iridescence_thickness_minimum) - 100.0) > 1e-6
+        or abs(float(data.iridescence_thickness_maximum) - 400.0) > 1e-6
+        or abs(float(data.volume_thickness)) > 1e-6
+        or abs(float(data.anisotropy)) > 1e-6
+        or abs(float(data.anisotropy_rotation)) > 1e-6
+        or abs(float(data.diffuse_transmission)) > 1e-6
+        or abs(float(data.dispersion)) > 1e-6
+        or data.has_sheen
+    ):
+        return None
+    if (
+        not _tuple_close(data.base_color, (1.0, 1.0, 1.0, 1.0))
+        or not _tuple_close(data.emissive_color, (0.0, 0.0, 0.0))
+        or not _tuple_close(data.specular_color, (1.0, 1.0, 1.0))
+        or not _tuple_close(data.sheen_color, (0.0, 0.0, 0.0))
+        or not _tuple_close(data.transparent_color, (1.0, 1.0, 1.0, 1.0))
+        or not _tuple_close(data.volume_attenuation_color, (1.0, 1.0, 1.0))
+        or not _tuple_close(data.diffuse_transmission_color, (1.0, 1.0, 1.0))
+    ):
+        return None
+
+    return (
+        "visual-base-color-texture",
+        int(data.file_type),
+        int(data.material_type),
+        data.base_color_texture,
+        round(float(data.metallic), 6),
+        round(float(data.roughness), 6),
+        bool(data.double_sided),
+    )
+
+
 def _default_material_cache_key() -> object:
     return (
         "props",
@@ -7046,7 +8665,7 @@ def _default_material_cache_key() -> object:
         100.0,
         400.0,
         0.0,
-        1000000.0,
+        math.inf,
         0.0,
         0.0,
         0.0,
@@ -7199,7 +8818,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
 
     for role, info in (data.texture_infos or {}).items():
         prefix = f"assetkit_texture_{role}"
-        mat[f"{prefix}_slot"] = info.slot
+        _set_prop_if_nondefault(mat, f"{prefix}_slot", int(info.slot), 0)
         if info.image_name:
             mat[f"{prefix}_image_name"] = info.image_name
         if info.sampler_name:
@@ -7212,14 +8831,14 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
             mat[f"{prefix}_texcoord"] = info.texcoord
         if info.coord_input_name:
             mat[f"{prefix}_coord_input_name"] = info.coord_input_name
-        mat[f"{prefix}_wrap_s"] = info.wrap_s
-        mat[f"{prefix}_wrap_t"] = info.wrap_t
-        mat[f"{prefix}_wrap_p"] = info.wrap_p
-        mat[f"{prefix}_min_filter"] = info.min_filter
-        mat[f"{prefix}_mag_filter"] = info.mag_filter
-        mat[f"{prefix}_mip_filter"] = info.mip_filter
-        mat[f"{prefix}_extension"] = _texture_extension(info)
-        mat[f"{prefix}_interpolation"] = _texture_interpolation(info)
+        _set_prop_if_nondefault(mat, f"{prefix}_wrap_s", int(info.wrap_s), _TEXTURE_WRAP_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_wrap_t", int(info.wrap_t), _TEXTURE_WRAP_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_wrap_p", int(info.wrap_p), _TEXTURE_WRAP_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_min_filter", int(info.min_filter), _TEXTURE_FILTER_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_mag_filter", int(info.mag_filter), _TEXTURE_FILTER_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_mip_filter", int(info.mip_filter), _TEXTURE_FILTER_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_extension", _texture_extension(info), _TEXTURE_EXTENSION_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_interpolation", _texture_interpolation(info), _TEXTURE_INTERPOLATION_DEFAULT)
         _set_assetkit_json_prop(mat, f"{prefix}_texture_extra_json", info.texture_extra)
         _set_assetkit_json_prop(mat, f"{prefix}_texref_extra_json", info.texref_extra)
         _set_assetkit_json_prop(mat, f"{prefix}_image_extra_json", info.image_extra)
@@ -7230,6 +8849,12 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
             mat[f"{prefix}_transform_rotation"] = info.transform_rotation
 
 
+def _set_prop_if_nondefault(target, key: str, value, default) -> None:
+    if value == default:
+        return
+    target[key] = value
+
+
 _MATERIAL_PROP_DEFAULTS = {
     "assetkit_iridescence": 0.0,
     "assetkit_iridescence_ior": 1.3,
@@ -7237,7 +8862,7 @@ _MATERIAL_PROP_DEFAULTS = {
     "assetkit_iridescence_thickness_maximum": 400.0,
     "assetkit_volume_thickness": 0.0,
     "assetkit_volume_attenuation_color": (1.0, 1.0, 1.0),
-    "assetkit_volume_attenuation_distance": 1000000.0,
+    "assetkit_volume_attenuation_distance": math.inf,
     "assetkit_anisotropy": 0.0,
     "assetkit_anisotropy_rotation": 0.0,
     "assetkit_diffuse_transmission": 0.0,
@@ -7265,6 +8890,8 @@ def _is_default_material_prop(key: str, value) -> bool:
     if isinstance(default, tuple):
         return _tuple_close(value, default)
     try:
+        if float(value) == float(default):
+            return True
         return abs(float(value) - float(default)) <= 1.0e-6
     except (TypeError, ValueError):
         return value == default
@@ -7280,8 +8907,8 @@ def _tuple_close(value, default: tuple[float, ...]) -> bool:
     return all(abs(float(item) - float(expected)) <= 1.0e-6 for item, expected in zip(values, default))
 
 
-def _ensure_gltf_settings_node(mat: bpy.types.Material, data: MeshPrimitiveData):
-    if not _needs_gltf_settings_node(data):
+def _ensure_gltf_settings_node(mat: bpy.types.Material, data: MeshPrimitiveData, bsdf=None):
+    if not _needs_gltf_settings_node(data, bsdf):
         return None
 
     group = _ensure_gltf_settings_group()
@@ -7310,28 +8937,50 @@ def _ensure_gltf_settings_node(mat: bpy.types.Material, data: MeshPrimitiveData)
     return node
 
 
-def _needs_gltf_settings_node(data: MeshPrimitiveData) -> bool:
-    return (
-        bool(data.occlusion_texture)
-        or float(data.volume_thickness) > 0.0
-        or bool(data.volume_thickness_texture)
-        or float(data.dispersion) != 0.0
-        or float(data.iridescence) != 0.0
-        or bool(data.iridescence_texture)
+def _needs_gltf_settings_node(data: MeshPrimitiveData, bsdf=None) -> bool:
+    if data.occlusion_texture:
+        return True
+
+    if float(data.dispersion) != 0.0:
+        return not _has_input(bsdf, ("Dispersion",))
+
+    if float(data.volume_thickness) > 0.0 or data.volume_thickness_texture:
+        if not _has_input(bsdf, ("Volume Thickness", "Thickness")):
+            return True
+
+    if (
+        float(data.iridescence) != 0.0
+        or data.iridescence_texture
         or float(data.iridescence_thickness_minimum) != 100.0
-        or _has_material_settings_animation(data)
-    )
+    ):
+        if data.iridescence_texture and not _has_input(
+            bsdf,
+            ("Thin Film Weight", "Iridescence Weight", "Iridescence"),
+        ):
+            return True
+        if data.iridescence_thickness_texture and not _has_input(bsdf, ("Thin Film Thickness",)):
+            return True
+
+    return _has_material_settings_animation_needing_node(data, bsdf)
 
 
-def _has_material_settings_animation(data: MeshPrimitiveData) -> bool:
-    settings_targets = {
-        _ANIM_MATERIAL_OCCLUSION_STRENGTH,
-        _ANIM_MATERIAL_IRIDESCENCE,
-        _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM,
-        _ANIM_MATERIAL_VOLUME_THICKNESS,
-        _ANIM_MATERIAL_DISPERSION,
-    }
-    return any(_channel_target(channel) in settings_targets for channel in data.material_anim_channels or [])
+def _has_material_settings_animation_needing_node(data: MeshPrimitiveData, bsdf=None) -> bool:
+    for channel in data.material_anim_channels or ():
+        target = _channel_target(channel)
+        if target == _ANIM_MATERIAL_OCCLUSION_STRENGTH:
+            return True
+        if target == _ANIM_MATERIAL_IRIDESCENCE_THICKNESS_MINIMUM:
+            continue
+        if target == _ANIM_MATERIAL_IRIDESCENCE and not _has_input(
+            bsdf,
+            ("Thin Film Weight", "Iridescence Weight", "Iridescence"),
+        ):
+            return True
+        if target == _ANIM_MATERIAL_VOLUME_THICKNESS and not _has_input(bsdf, ("Volume Thickness", "Thickness")):
+            return True
+        if target == _ANIM_MATERIAL_DISPERSION and not _has_input(bsdf, ("Dispersion",)):
+            return True
+    return False
 
 
 def _ensure_gltf_settings_group():
@@ -7415,6 +9064,44 @@ def _material_extra_extension(data: MeshPrimitiveData, name: str) -> object | No
     return _assetkit_extra_path(extensions, name)
 
 
+_MAPPED_MATERIAL_EXTRA_EXTENSIONS = {
+    "KHR_materials_anisotropy",
+    "KHR_materials_clearcoat",
+    "KHR_materials_diffuse_transmission",
+    "KHR_materials_dispersion",
+    "KHR_materials_emissive_strength",
+    "KHR_materials_ior",
+    "KHR_materials_iridescence",
+    "KHR_materials_pbrSpecularGlossiness",
+    "KHR_materials_sheen",
+    "KHR_materials_specular",
+    "KHR_materials_transmission",
+    "KHR_materials_unlit",
+    "KHR_materials_volume",
+    "KHR_materials_volume_scatter",
+    "ADOBE_materials_clearcoat_specular",
+    "ADOBE_materials_clearcoat_tint",
+    "ADOBE_materials_thin_transparency",
+}
+
+
+def _material_extra_for_custom_prop(data: MeshPrimitiveData) -> object | None:
+    extra = data.material_extra
+    if not isinstance(extra, dict):
+        return extra
+
+    children = _assetkit_extra_children(extra)
+    if len(children) != 1 or children[0].get("name") != "extensions":
+        return extra
+
+    extensions = _assetkit_extra_children(children[0])
+    if not extensions:
+        return extra
+    if all(str(ext.get("name") or "") in _MAPPED_MATERIAL_EXTRA_EXTENSIONS for ext in extensions):
+        return None
+    return extra
+
+
 def _assetkit_extra_path(value: object | None, *path: str) -> object | None:
     node = value
     for name in path:
@@ -7427,10 +9114,16 @@ def _assetkit_extra_path(value: object | None, *path: str) -> object | None:
 def _assetkit_extra_child(value: object | None, name: str) -> object | None:
     if not isinstance(value, dict):
         return None
-    for child in value.get("children") or ():
-        if isinstance(child, dict) and child.get("name") == name:
+    for child in _assetkit_extra_children(value):
+        if child.get("name") == name:
             return child
     return None
+
+
+def _assetkit_extra_children(value: object | None) -> list[dict]:
+    if not isinstance(value, dict):
+        return []
+    return [child for child in (value.get("children") or ()) if isinstance(child, dict)]
 
 
 def _assetkit_extra_float(value: object | None, default: float = 0.0) -> float:
@@ -7840,7 +9533,7 @@ def _link_volume_scatter(mat: bpy.types.Material, data: MeshPrimitiveData) -> No
     density = scatter.inputs.get("Density")
     if density:
         distance = float(data.volume_attenuation_distance)
-        if distance > 0.0 and distance < 1000000.0:
+        if distance > 0.0 and math.isfinite(distance):
             density.default_value = min(1.0 / distance, 1.0)
         else:
             density.default_value = max(0.0, min(float(data.volume_thickness), 1.0))
@@ -8362,8 +10055,10 @@ def _image_texture_node(
     if tex_info and tex_info.role:
         tex.label = f"AssetKit {tex_info.role}"
         tex["assetkit_texture_role"] = tex_info.role
-        tex["assetkit_texture_slot"] = tex_info.slot
-        tex["assetkit_texture_colorspace"] = colorspace
+        if tex_info.slot:
+            tex["assetkit_texture_slot"] = tex_info.slot
+        if colorspace:
+            tex["assetkit_texture_colorspace"] = colorspace
         if tex_info.image_name:
             tex["assetkit_texture_image_name"] = tex_info.image_name
         if tex_info.sampler_name:
@@ -8386,7 +10081,7 @@ def _texture_node_cache_key(path: str, colorspace: str, tex_info: TextureRefData
         return None
 
     try:
-        source_path = os.path.abspath(os.fspath(path))
+        source_path = _texture_abs_path(path)
     except Exception:
         return None
 
@@ -8449,7 +10144,7 @@ def _should_defer_texture_image(path: str) -> bool:
     return _ACTIVE_TEXTURE_LOAD_MODE == "DEFERRED" and bool(path)
 
 
-def _queue_deferred_texture_image(tex, path: str, colorspace: str) -> None:
+def _queue_deferred_texture_image(tex, path: str, colorspace: str, store_props: bool = True) -> None:
     global _DEFERRED_TEXTURE_TIMER_ACTIVE
     key = _texture_image_cache_key(path, colorspace)
     image = _cached_texture_image_by_key(key)
@@ -8464,11 +10159,12 @@ def _queue_deferred_texture_image(tex, path: str, colorspace: str) -> None:
     else:
         waiters.append(tex)
 
-    try:
-        tex["assetkit_texture_pending_path"] = key[0]
-        tex["assetkit_texture_pending_colorspace"] = key[1]
-    except Exception:
-        pass
+    if store_props:
+        try:
+            tex["assetkit_texture_pending_path"] = key[0]
+            tex["assetkit_texture_pending_colorspace"] = key[1]
+        except Exception:
+            pass
 
     if not _DEFERRED_TEXTURE_TIMER_ACTIVE:
         _DEFERRED_TEXTURE_TIMER_ACTIVE = True
@@ -8530,7 +10226,7 @@ def _load_texture_image(path: str, colorspace: str):
 
 
 def _load_texture_image_immediate(path: str, colorspace: str):
-    source_path = os.path.abspath(os.fspath(path))
+    source_path = _texture_abs_path(path)
     image = _find_texture_image(source_path, colorspace)
     if image:
         return image
@@ -8616,7 +10312,17 @@ def _register_texture_image(image, path: str, colorspace: str) -> None:
 
 
 def _texture_image_cache_key(path: str, colorspace: str) -> tuple[str, str]:
-    return os.path.abspath(os.fspath(path)), str(colorspace or "")
+    return _texture_abs_path(path), str(colorspace or "")
+
+
+def _texture_abs_path(path: str) -> str:
+    source = os.fspath(path)
+    cached = _TEXTURE_PATH_CACHE.get(source)
+    if cached is not None:
+        return cached
+    cached = os.path.abspath(source)
+    _TEXTURE_PATH_CACHE[source] = cached
+    return cached
 
 
 def _image_colorspace(image) -> str:
@@ -8648,7 +10354,7 @@ def _is_ktx2_path(path: str) -> bool:
 
 
 def _decode_ktx2_image(path: str, colorspace: str):
-    source_path = os.path.abspath(os.fspath(path))
+    source_path = _texture_abs_path(path)
     image = _find_texture_image(source_path, colorspace)
     if image:
         return image
@@ -8661,7 +10367,7 @@ def _decode_ktx2_image(path: str, colorspace: str):
     try:
         decoded = _assetkit_blender.decode_ktx2(source_path)
     except Exception as exc:
-        if _profile_enabled():
+        if _PROFILE_MATERIAL_STATS is not None:
             _profile_log(f"KTX2 decode skipped path={path!r} error={exc}")
         return None
 
@@ -8828,7 +10534,9 @@ def _uv_layer_name(slot: int) -> str:
     return "UVMap" if slot <= 0 else f"UVMap.{slot:03d}"
 
 
-def _texture_extension(tex_info: TextureRefData) -> str:
+def _texture_extension(tex_info: TextureRefData | None) -> str:
+    if tex_info is None:
+        return _TEXTURE_EXTENSION_DEFAULT
     wrap_s = tex_info.wrap_s
     wrap_t = tex_info.wrap_t
     if wrap_s != wrap_t:
@@ -8842,7 +10550,9 @@ def _texture_extension(tex_info: TextureRefData) -> str:
     return "REPEAT"
 
 
-def _texture_interpolation(tex_info: TextureRefData) -> str:
+def _texture_interpolation(tex_info: TextureRefData | None) -> str:
+    if tex_info is None:
+        return _TEXTURE_INTERPOLATION_DEFAULT
     if tex_info.mag_filter == 1 or tex_info.min_filter in {1, 4, 5}:
         return "Closest"
     return "Linear"
@@ -8851,11 +10561,11 @@ def _texture_interpolation(tex_info: TextureRefData) -> str:
 def _set_texture_sampler_props(tex, tex_info: TextureRefData) -> None:
     extension = _texture_extension(tex_info)
     interpolation = _texture_interpolation(tex_info)
-    tex["assetkit_texture_wrap_s"] = int(tex_info.wrap_s)
-    tex["assetkit_texture_wrap_t"] = int(tex_info.wrap_t)
-    tex["assetkit_texture_wrap_p"] = int(tex_info.wrap_p)
-    tex["assetkit_texture_min_filter"] = int(tex_info.min_filter)
-    tex["assetkit_texture_mag_filter"] = int(tex_info.mag_filter)
-    tex["assetkit_texture_mip_filter"] = int(tex_info.mip_filter)
-    tex["assetkit_texture_extension"] = extension
-    tex["assetkit_texture_interpolation"] = interpolation
+    _set_prop_if_nondefault(tex, "assetkit_texture_wrap_s", int(tex_info.wrap_s), _TEXTURE_WRAP_DEFAULT)
+    _set_prop_if_nondefault(tex, "assetkit_texture_wrap_t", int(tex_info.wrap_t), _TEXTURE_WRAP_DEFAULT)
+    _set_prop_if_nondefault(tex, "assetkit_texture_wrap_p", int(tex_info.wrap_p), _TEXTURE_WRAP_DEFAULT)
+    _set_prop_if_nondefault(tex, "assetkit_texture_min_filter", int(tex_info.min_filter), _TEXTURE_FILTER_DEFAULT)
+    _set_prop_if_nondefault(tex, "assetkit_texture_mag_filter", int(tex_info.mag_filter), _TEXTURE_FILTER_DEFAULT)
+    _set_prop_if_nondefault(tex, "assetkit_texture_mip_filter", int(tex_info.mip_filter), _TEXTURE_FILTER_DEFAULT)
+    _set_prop_if_nondefault(tex, "assetkit_texture_extension", extension, _TEXTURE_EXTENSION_DEFAULT)
+    _set_prop_if_nondefault(tex, "assetkit_texture_interpolation", interpolation, _TEXTURE_INTERPOLATION_DEFAULT)
