@@ -219,7 +219,8 @@ _CH_KEYS = (
     _S_HAS_NODE_VISIBILITY_ANIMATION,
     _S_HAS_NODE_ANIMATION,
     _S_DYNAMIC_SKIN_ANIMATION_SKIP,
-) = range(17)
+    _S_NODE_PARENT_CACHE,
+) = range(18)
 _SKIN_CACHE_DEFER_BIND_SKINS = object()
 
 
@@ -735,6 +736,7 @@ def _begin_scene_build(
         _S_HAS_NODE_VISIBILITY_ANIMATION: node_visibility_animation,
         _S_HAS_NODE_ANIMATION: node_animation,
         _S_DYNAMIC_SKIN_ANIMATION_SKIP: dynamic_skin_animation_skip,
+        _S_NODE_PARENT_CACHE: {},
     }
 
 
@@ -937,6 +939,42 @@ def _scene_root_objects(
     return roots
 
 
+def _mesh_node_parent(state: dict, node_index: int) -> tuple[bpy.types.Object | None, bool]:
+    cache = state.get(_S_NODE_PARENT_CACHE)
+    if cache is not None:
+        cached = cache.get(node_index)
+        if cached is not None:
+            return cached
+
+    node_objects = state[_S_NODE_OBJECTS]
+    node_parent = node_objects.get(node_index)
+    if node_parent is not None:
+        result = (node_parent, True)
+        if cache is not None:
+            cache[node_index] = result
+        return result
+
+    node_data = state[_S_NODE_DATA]
+    current = node_data.get(node_index)
+    parent_index = int(current.parent_index) if current is not None else -1
+    remaining = len(node_data)
+    while parent_index >= 0 and remaining > 0:
+        parent = node_objects.get(parent_index)
+        if parent is not None:
+            result = (parent, False)
+            if cache is not None:
+                cache[node_index] = result
+            return result
+        current = node_data.get(parent_index)
+        parent_index = int(current.parent_index) if current is not None else -1
+        remaining -= 1
+
+    result = (state[_S_COORD_ROOT], False)
+    if cache is not None:
+        cache[node_index] = result
+    return result
+
+
 def _create_import_object(
     primitive: MeshPrimitiveData,
     state: dict,
@@ -944,9 +982,7 @@ def _create_import_object(
     shading_mode: str = "AUTO",
 ) -> list[bpy.types.Object]:
     node_objects = state[_S_NODE_OBJECTS]
-    node_parent = node_objects.get(primitive.node_index)
-    parent = node_parent or state[_S_COORD_ROOT]
-    use_node_parent = node_parent is not None
+    parent, use_node_parent = _mesh_node_parent(state, int(primitive.node_index))
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
     node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
     mesh_cache_key = _mesh_data_reuse_key(primitive, shading_mode)
@@ -1020,9 +1056,7 @@ def _create_grouped_mesh_object(
     total_started_at = time.perf_counter() if profile_detail else 0.0
     first = primitives[0]
     node_objects = state[_S_NODE_OBJECTS]
-    node_parent = node_objects.get(first.node_index)
-    parent = node_parent or state[_S_COORD_ROOT]
-    use_node_parent = node_parent is not None
+    parent, use_node_parent = _mesh_node_parent(state, int(first.node_index))
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
     node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
 
