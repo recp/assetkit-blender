@@ -792,6 +792,7 @@ def native_open_scene_stream(
         result.get("doc_extra"),
         result.get("scene_extra"),
         list(result.get("images") or []),
+        list(result.get("required_node_indices") or []),
         _native_result_int(result, "scene_index", -1),
         _native_result_int(result, "scene_count", 0),
         str(result.get("scene_name") or ""),
@@ -931,6 +932,7 @@ class NativeSceneStream:
         doc_extra: object | None = None,
         scene_extra: object | None = None,
         images: list[dict] | None = None,
+        required_node_indices: list[int] | None = None,
         scene_index: int = -1,
         scene_count: int = 0,
         scene_name: str = "",
@@ -943,6 +945,7 @@ class NativeSceneStream:
         self.doc_extra = doc_extra
         self.scene_extra = scene_extra
         self.images = images or []
+        self.required_node_indices = required_node_indices or []
         self.scene_index = scene_index
         self.scene_count = scene_count
         self.scene_name = scene_name

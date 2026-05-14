@@ -9390,6 +9390,195 @@ akb_load_lock_ensure(void) {
   return 0;
 }
 
+static int
+akb_scene_node_requires_object(const AkbSceneNode *node) {
+  return node
+         && (node->camera_type
+             || node->light_type
+             || node->camera_extra
+             || node->camera_imager_extra
+             || node->light_extra
+             || (node->layers && node->layers->count)
+             || (node->source && ak_extra(node->source)));
+}
+
+static void
+akb_required_node_add_ancestors(uint8_t                *required,
+                                const AkbSceneNodeList *nodes,
+                                int32_t                 node_index) {
+  size_t  count;
+  int32_t current;
+  int32_t remaining;
+
+  if (!required || !nodes)
+    return;
+
+  count     = nodes->count;
+  current   = node_index;
+  remaining = (int32_t)count;
+  while (current >= 0 && (size_t)current < count && remaining-- > 0) {
+    required[current] = 1;
+    current = nodes->items[current].parent_index;
+  }
+}
+
+static void
+akb_required_node_add_parent_ancestors(uint8_t                *required,
+                                       const AkbSceneNodeList *nodes,
+                                       int32_t                 node_index) {
+  if (!nodes || node_index < 0 || (size_t)node_index >= nodes->count)
+    return;
+
+  akb_required_node_add_ancestors(required,
+                                  nodes,
+                                  nodes->items[node_index].parent_index);
+}
+
+static PyObject *
+akb_required_node_indices_to_py(const AkbImport *import) {
+  const AkbPrimitive *prim;
+  const AkbSceneNode *node;
+  const AkbSceneNodeList *nodes;
+  PyObject *list;
+  PyObject *item;
+  uint32_t *child_counts;
+  uint8_t  *required;
+  uint8_t  *primitive_nodes;
+  uint8_t  *skip_animation;
+  size_t    node_count;
+  size_t    required_count;
+  size_t    i;
+  uint32_t  joint_count;
+  int32_t   node_index;
+  int32_t   parent_index;
+
+  nodes = import ? &import->nodes : NULL;
+  if (!nodes || nodes->count == 0)
+    return PyList_New(0);
+
+  node_count = nodes->count;
+  child_counts = (uint32_t *)calloc(node_count, sizeof(*child_counts));
+  required = (uint8_t *)calloc(node_count, sizeof(*required));
+  primitive_nodes = (uint8_t *)calloc(node_count, sizeof(*primitive_nodes));
+  skip_animation = (uint8_t *)calloc(node_count, sizeof(*skip_animation));
+  if (!child_counts || !required || !primitive_nodes || !skip_animation) {
+    free(skip_animation);
+    free(primitive_nodes);
+    free(required);
+    free(child_counts);
+    return PyErr_NoMemory();
+  }
+
+  for (i = 0; i < node_count; i++) {
+    parent_index = nodes->items[i].parent_index;
+    if (parent_index >= 0 && (size_t)parent_index < node_count)
+      child_counts[parent_index]++;
+  }
+
+  for (i = 0; i < import->primitives.count; i++) {
+    prim = &import->primitives.items[i];
+    node_index = prim->node_index;
+    if (node_index >= 0 && (size_t)node_index < node_count)
+      primitive_nodes[node_index] = 1;
+
+    if (!prim->has_skin || !prim->skin_mesh_in_bind_pose)
+      continue;
+
+    node_index = prim->skin_root_node_index;
+    if (node_index >= 0 && (size_t)node_index < node_count)
+      skip_animation[node_index] = 1;
+
+    if (!prim->skin_joint_nodes)
+      continue;
+
+    joint_count = prim->skin_joint_count;
+    for (uint32_t j = 0; j < joint_count; j++) {
+      node_index = prim->skin_joint_nodes[j];
+      if (node_index >= 0 && (size_t)node_index < node_count)
+        skip_animation[node_index] = 1;
+    }
+  }
+
+  for (i = 0; i < import->primitives.count; i++) {
+    prim = &import->primitives.items[i];
+    node_index = prim->node_index;
+    if (node_index >= 0
+        && (size_t)node_index < node_count
+        && (child_counts[node_index]
+            || akb_scene_node_requires_object(&nodes->items[node_index]))) {
+      akb_required_node_add_ancestors(required, nodes, node_index);
+    } else {
+      akb_required_node_add_parent_ancestors(required, nodes, node_index);
+    }
+
+    if (!prim->has_skin)
+      continue;
+
+    akb_required_node_add_ancestors(required,
+                                    nodes,
+                                    prim->skin_root_node_index);
+    if (!prim->skin_mesh_in_bind_pose
+        && prim->skin_joint_nodes
+        && prim->skin_joint_count > 0) {
+      joint_count = prim->skin_joint_count;
+      for (uint32_t j = 0; j < joint_count; j++)
+        akb_required_node_add_ancestors(required, nodes, prim->skin_joint_nodes[j]);
+    }
+  }
+
+  for (i = 0; i < node_count; i++) {
+    node = &nodes->items[i];
+    if (primitive_nodes[i]
+        && !child_counts[i]
+        && !akb_scene_node_requires_object(node)) {
+      continue;
+    }
+    if (akb_scene_node_requires_object(node)
+        || (!skip_animation[i]
+            && node->animation
+            && node->animation->count > 0)) {
+      akb_required_node_add_ancestors(required, nodes, (int32_t)i);
+    }
+  }
+
+  required_count = 0;
+  for (i = 0; i < node_count; i++) {
+    if (required[i])
+      required_count++;
+  }
+
+  list = PyList_New((Py_ssize_t)required_count);
+  if (!list) {
+    free(skip_animation);
+    free(primitive_nodes);
+    free(required);
+    free(child_counts);
+    return NULL;
+  }
+
+  required_count = 0;
+  for (i = 0; i < node_count; i++) {
+    if (!required[i])
+      continue;
+    item = PyLong_FromSize_t(i);
+    if (!item) {
+      Py_DECREF(list);
+      free(skip_animation);
+      free(primitive_nodes);
+      free(required);
+      free(child_counts);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, (Py_ssize_t)required_count++, item);
+  }
+
+  free(skip_animation);
+  free(primitive_nodes);
+  free(required);
+  free(child_counts);
+  return list;
+}
+
 static PyObject *
 akb_load_meshes(PyObject *self, PyObject *args) {
   const char *filepath;
@@ -9786,6 +9975,17 @@ akb_open_scene(PyObject *self, PyObject *args) {
     akb_shared_doc_release(doc_owner);
     return NULL;
   }
+
+  item = akb_required_node_indices_to_py(owner_import);
+  if (!item || PyDict_SetItemString(out, "required_node_indices", item) < 0) {
+    Py_XDECREF(item);
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(item);
 
   Py_DECREF(node_list);
   if (profile) {

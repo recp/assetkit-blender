@@ -126,6 +126,7 @@ _DEFERRED_MATERIAL_NODE_TIME_BUDGET = 0.006
 _DEFERRED_MATERIAL_SLOT_TASKS: deque["_DeferredMaterialSpec"] = deque()
 _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE = False
 _DEFERRED_MATERIAL_SLOT_TIME_BUDGET = 0.006
+_REQUIRED_NODE_INDICES_AUTO = object()
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_HERMITE = 4
 _INTERPOLATION_STEP = 6
@@ -669,6 +670,8 @@ def _begin_scene_build(
     apply_node_animation: bool = True,
     defer_custom_normals: bool = False,
     dynamic_skin_animation_skip: bool = False,
+    create_all_nodes: bool = False,
+    required_node_indices: object = _REQUIRED_NODE_INDICES_AUTO,
 ) -> dict:
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     started_at = time.perf_counter() if profile_detail else 0.0
@@ -697,7 +700,12 @@ def _begin_scene_build(
     visibility_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
     node_animation_skip_indices = _skinned_node_animation_skip_indices(primitives)
-    required_node_indices = _required_scene_node_indices(primitives, scene_nodes, node_animation_skip_indices)
+    if create_all_nodes:
+        required_node_indices = None
+    elif required_node_indices is _REQUIRED_NODE_INDICES_AUTO:
+        required_node_indices = _required_scene_node_indices(primitives, scene_nodes, node_animation_skip_indices)
+    elif required_node_indices is not None:
+        required_node_indices = set(required_node_indices)
     node_objects = _create_scene_nodes(
         scene_nodes,
         coord_root,
@@ -2176,6 +2184,7 @@ class _ProgressiveImportJob:
         self.scene_extra: object | None = getattr(stream, "scene_extra", None)
         self.scene_info: dict = _scene_info_from_loaded(stream)
         self.doc_images: list[dict] = list(getattr(stream, "images", []) or [])
+        self.required_node_indices: list[int] | None = getattr(stream, "required_node_indices", None)
         self.mesh_count = 0
         self.pending_primitives: deque[MeshPrimitiveData] = deque()
         self.deferred_primitives: deque[MeshPrimitiveData] = deque()
@@ -2219,6 +2228,7 @@ class _ProgressiveImportJob:
                     self.scene_extra = stream.scene_extra
                     self.doc_images = list(stream.images or [])
                     self.scene_info = _scene_info_from_loaded(stream)
+                    self.required_node_indices = stream.required_node_indices
                     self.mesh_count = stream.mesh_count
                     start = 0
                     producer_batch_size = max(self.batch_size * 4, 256)
@@ -2259,6 +2269,7 @@ class _ProgressiveImportJob:
             self.scene_extra = scene_extra
             self.scene_info = scene_info
             self.doc_images = doc_images
+            self.required_node_indices = None
             self.mesh_count = len(primitives)
             if primitives:
                 self._queue.put(primitives)
@@ -2308,6 +2319,12 @@ class _ProgressiveImportJob:
                 apply_node_animation=False,
                 defer_custom_normals=self.defer_custom_normals,
                 dynamic_skin_animation_skip=True,
+                create_all_nodes=self.required_node_indices is None and not self.producer_done,
+                required_node_indices=(
+                    self.required_node_indices
+                    if self.required_node_indices is not None
+                    else _REQUIRED_NODE_INDICES_AUTO
+                ),
             )
             if self.profile_detail:
                 _profile_log(
