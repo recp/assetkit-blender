@@ -3275,6 +3275,19 @@ akb_loop_attr_name(AkbLoopFloatAttribute *attr,
 }
 
 static int
+akb_blender_flip_uv_v(const AkDoc *doc) {
+  if (!doc || !doc->inf)
+    return 1;
+
+  /*
+   * AssetKit flips image pixels for formats whose source texture convention
+   * needs it. Blender loads the source image itself, so keep those UVs as-is
+   * and only flip formats that AssetKit would not flip on image load.
+   */
+  return !doc->inf->flipImage;
+}
+
+static int
 akb_extract_loop_float_attrs(AkbArena *arena,
                              AkbPrimitive *out,
                              AkMeshPrimitive *prim,
@@ -6824,6 +6837,7 @@ akb_extract_primitive(AkbArena *arena,
   AkBindMaterial *bind_material;
   uint8_t arena_normals;
   uint8_t arena_tangents;
+  int flip_uv_v;
 
   index_width = akb_primitive_index_width(prim);
   if (!index_width)
@@ -6849,6 +6863,7 @@ akb_extract_primitive(AkbArena *arena,
   out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
   out.primitive_type = (uint32_t)prim->type;
   out.primitive_mode = akb_primitive_mode(prim);
+  flip_uv_v = akb_blender_flip_uv_v(doc);
   if (!fast_extract) {
     out.primitive_extra = ak_extra(prim);
     out.mesh_extra = ak_extra(mesh);
@@ -7020,7 +7035,7 @@ akb_extract_primitive(AkbArena *arena,
                                            out.indices,
                                            out.loop_count,
                                            2,
-                                           1,
+                                           flip_uv_v,
                                            0.0f,
                                            "UVMap",
                                            &out.uv_sets,
@@ -7042,7 +7057,7 @@ akb_extract_primitive(AkbArena *arena,
                                         "TEXCOORD",
                                         "UV",
                                         2,
-                                        1,
+                                        flip_uv_v,
                                         0.0f,
                                         "UVMap",
                                         &out.uv_sets,

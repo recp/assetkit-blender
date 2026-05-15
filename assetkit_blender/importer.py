@@ -1638,6 +1638,14 @@ def _set_viewport_material_preview() -> None:
                 try:
                     space.shading.color_type = "MATERIAL"
                     space.shading.type = "MATERIAL"
+                    overlay = getattr(space, "overlay", None)
+                    if overlay:
+                        if hasattr(overlay, "show_wireframes"):
+                            overlay.show_wireframes = False
+                        if hasattr(overlay, "wireframe_opacity"):
+                            overlay.wireframe_opacity = 0.0
+                        if hasattr(overlay, "show_relationship_lines"):
+                            overlay.show_relationship_lines = False
                 except Exception:
                     pass
 
