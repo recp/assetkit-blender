@@ -275,6 +275,7 @@ def import_assetkit_file(
     select_imported: bool = False,
     shading_mode: str = "AUTO",
     set_viewport_shading: bool = True,
+    clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
     _reset_action_cache()
@@ -345,6 +346,7 @@ def import_assetkit_file(
         focus_camera,
         select_imported,
         set_viewport_shading,
+        clean_viewport_overlays,
         existing_actions,
     )
     if profile_detail:
@@ -369,6 +371,7 @@ def import_assetkit_file_progressive(
     select_imported: bool = False,
     shading_mode: str = "AUTO",
     set_viewport_shading: bool = True,
+    clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
 ) -> "_ProgressiveImportJob":
     _reset_action_cache()
@@ -386,6 +389,7 @@ def import_assetkit_file_progressive(
         select_imported,
         shading_mode,
         set_viewport_shading,
+        clean_viewport_overlays,
         _snapshot_actions(fit_timeline),
         prefer_grouped=True,
     )
@@ -406,6 +410,7 @@ def import_assetkit_file_auto(
     select_imported: bool = False,
     shading_mode: str = "AUTO",
     set_viewport_shading: bool = True,
+    clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object] | "_ProgressiveImportJob":
     _reset_action_cache()
@@ -424,6 +429,7 @@ def import_assetkit_file_auto(
         select_imported,
         shading_mode,
         set_viewport_shading,
+        clean_viewport_overlays,
         _snapshot_actions(fit_timeline),
         prefer_grouped=True,
     )
@@ -1584,14 +1590,15 @@ def _finish_import(
     focus_camera: bpy.types.Object | None,
     select_imported: bool,
     set_viewport_shading: bool,
+    clean_viewport_overlays: bool,
     existing_actions: set[bpy.types.Action] | None,
 ) -> None:
     _apply_import_placement(objects, placement_mode, root_objects)
     if select_imported:
         _select_imported_objects(objects)
     _focus_imported_objects(objects, focus_mode, scene_was_empty, collection, focus_camera)
-    if set_viewport_shading:
-        _set_viewport_material_preview()
+    if set_viewport_shading and scene_was_empty:
+        _set_viewport_material_preview(clean_viewport_overlays)
     _fit_timeline_to_new_actions(existing_actions)
 
 
@@ -1627,7 +1634,7 @@ def _temporary_selection(objects: list[bpy.types.Object]) -> _SelectionState:
     return selection
 
 
-def _set_viewport_material_preview() -> None:
+def _set_viewport_material_preview(clean_overlays: bool = False) -> None:
     for window in getattr(bpy.context.window_manager, "windows", []):
         for area in window.screen.areas:
             if area.type != "VIEW_3D":
@@ -1638,6 +1645,8 @@ def _set_viewport_material_preview() -> None:
                 try:
                     space.shading.color_type = "MATERIAL"
                     space.shading.type = "MATERIAL"
+                    if not clean_overlays:
+                        continue
                     overlay = getattr(space, "overlay", None)
                     if overlay:
                         if hasattr(overlay, "show_wireframes"):
@@ -2166,6 +2175,7 @@ class _ProgressiveImportJob:
         select_imported: bool,
         shading_mode: str,
         set_viewport_shading: bool,
+        clean_viewport_overlays: bool,
         existing_actions: set[bpy.types.Action] | None,
         stream: object | None = None,
         prefer_grouped: bool = False,
@@ -2182,6 +2192,7 @@ class _ProgressiveImportJob:
         self.select_imported = select_imported
         self.shading_mode = shading_mode
         self.set_viewport_shading = set_viewport_shading
+        self.clean_viewport_overlays = clean_viewport_overlays
         self.existing_actions = existing_actions
         self.stream = stream
         self.prefer_grouped = prefer_grouped
@@ -2491,6 +2502,7 @@ class _ProgressiveImportJob:
             self.focus_camera,
             self.select_imported,
             self.set_viewport_shading,
+            self.clean_viewport_overlays,
             self.existing_actions,
         )
         finished_at = time.perf_counter()
@@ -3337,6 +3349,10 @@ def _apply_shading(
     apply_custom_normals: bool = True,
     smooth_already: bool = False,
 ) -> bool:
+    mode = str(mode or "AUTO").upper()
+    if mode == "AS_IS":
+        return True
+
     if mode == "FLAT":
         _set_mesh_smooth(mesh, False)
         return True

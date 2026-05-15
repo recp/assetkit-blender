@@ -63,6 +63,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         description="How mesh shading is set after import",
         items=(
             ("AUTO", "Auto", "Use authored normal data when available"),
+            ("AS_IS", "As Is", "Leave Blender mesh shading untouched"),
             ("FLAT", "Flat", "Use flat face shading"),
             ("SMOOTH", "Smooth", "Use smooth shading"),
         ),
@@ -156,6 +157,11 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         description="Switch 3D viewports to material preview after import",
         default=True,
     )
+    clean_viewport_overlays: bpy.props.BoolProperty(
+        name="Clean Viewport Overlays",
+        description="Hide wireframe and relationship overlays after importing into an empty scene",
+        default=True,
+    )
     fit_timeline: bpy.props.BoolProperty(
         name="Fit Timeline",
         description="Fit the timeline to the imported animation range",
@@ -196,6 +202,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                     self.select_imported_objects,
                     self.mesh_shading,
                     self.set_viewport_shading,
+                    self.clean_viewport_overlays,
                     self.fit_timeline,
                 )
                 self.report({"INFO"}, "AssetKit import scheduled")
@@ -215,6 +222,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                     select_imported=self.select_imported_objects,
                     shading_mode=self.mesh_shading,
                     set_viewport_shading=self.set_viewport_shading,
+                    clean_viewport_overlays=self.clean_viewport_overlays,
                     fit_timeline=self.fit_timeline,
                 )
             except AssetKitError as exc:
@@ -248,6 +256,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                     self.select_imported_objects,
                     self.mesh_shading,
                     self.set_viewport_shading,
+                    self.clean_viewport_overlays,
                     self.fit_timeline,
                 )
                 self.report({"INFO"}, "AssetKit progressive import scheduled")
@@ -266,6 +275,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 select_imported=self.select_imported_objects,
                 shading_mode=self.mesh_shading,
                 set_viewport_shading=self.set_viewport_shading,
+                clean_viewport_overlays=self.clean_viewport_overlays,
                 fit_timeline=self.fit_timeline,
             )
             self.report({"INFO"}, "AssetKit progressive import started")
@@ -284,6 +294,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 self.select_imported_objects,
                 self.mesh_shading,
                 self.set_viewport_shading,
+                self.clean_viewport_overlays,
                 self.fit_timeline,
             )
             self.report({"INFO"}, "AssetKit import scheduled")
@@ -302,6 +313,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 select_imported=self.select_imported_objects,
                 shading_mode=self.mesh_shading,
                 set_viewport_shading=self.set_viewport_shading,
+                clean_viewport_overlays=self.clean_viewport_overlays,
                 fit_timeline=self.fit_timeline,
             )
         except AssetKitError as exc:
@@ -360,6 +372,9 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         view_checks.use_property_split = False
         view_checks.prop(self, "select_imported_objects")
         view_checks.prop(self, "set_viewport_shading")
+        clean_row = view_checks.row()
+        clean_row.enabled = self.set_viewport_shading
+        clean_row.prop(self, "clean_viewport_overlays")
         view_checks.prop(self, "fit_timeline")
 
     def _load_options(self) -> dict:
@@ -404,6 +419,7 @@ def _schedule_auto_import(
     select_imported: bool,
     shading_mode: str,
     set_viewport_shading: bool,
+    clean_viewport_overlays: bool,
     fit_timeline: bool,
 ) -> None:
     def run_import() -> None:
@@ -423,6 +439,7 @@ def _schedule_auto_import(
                 select_imported=select_imported,
                 shading_mode=shading_mode,
                 set_viewport_shading=set_viewport_shading,
+                clean_viewport_overlays=clean_viewport_overlays,
                 fit_timeline=fit_timeline,
             )
         except (AssetKitError, OSError) as exc:
@@ -450,6 +467,7 @@ def _schedule_progressive_import(
     select_imported: bool,
     shading_mode: str,
     set_viewport_shading: bool,
+    clean_viewport_overlays: bool,
     fit_timeline: bool,
 ) -> None:
     def run_import() -> None:
@@ -469,6 +487,7 @@ def _schedule_progressive_import(
                 select_imported=select_imported,
                 shading_mode=shading_mode,
                 set_viewport_shading=set_viewport_shading,
+                clean_viewport_overlays=clean_viewport_overlays,
                 fit_timeline=fit_timeline,
             )
         except (AssetKitError, OSError) as exc:
@@ -495,6 +514,7 @@ def _schedule_blocking_import(
     select_imported: bool,
     shading_mode: str,
     set_viewport_shading: bool,
+    clean_viewport_overlays: bool,
     fit_timeline: bool,
 ) -> None:
     def run_import() -> None:
@@ -513,6 +533,7 @@ def _schedule_blocking_import(
                 select_imported=select_imported,
                 shading_mode=shading_mode,
                 set_viewport_shading=set_viewport_shading,
+                clean_viewport_overlays=clean_viewport_overlays,
                 fit_timeline=fit_timeline,
             )
         except (AssetKitError, OSError) as exc:
