@@ -93,6 +93,7 @@ AkInput._fields_ = [
     ("semanticRaw", ctypes.c_char_p),
     ("next", ctypes.POINTER(AkInput)),
     ("accessor", ctypes.POINTER(AkAccessor)),
+    ("reserved", ctypes.c_void_p),
     ("index", ctypes.c_uint32),
     ("isIndexed", ctypes.c_bool),
     ("semantic", ctypes.c_int32),
