@@ -16,6 +16,7 @@ from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Matrix, Quaternion, Vector
 
 from .assetkit import (
+    AK_FILE_TYPE_STL,
     AK_PRIMITIVE_LINES,
     AK_PRIMITIVE_POINTS,
     AK_PRIMITIVE_TRIANGLES,
@@ -652,6 +653,17 @@ def _defer_custom_normals(load_options: dict | None, shading_mode: str) -> bool:
         return value
     mode = str(value or "AUTO").upper()
     return mode not in {"0", "FALSE", "IMMEDIATE", "NO", "OFF"}
+
+
+def _effective_shading_mode(data: MeshPrimitiveData, shading_mode: str) -> str:
+    mode = str(shading_mode or "AUTO").upper()
+    if (
+        mode == "AUTO"
+        and int(getattr(data, "file_type", 0) or 0) == AK_FILE_TYPE_STL
+        and int(getattr(data, "primitive_type", 0) or 0) == AK_PRIMITIVE_TRIANGLES
+    ):
+        return "FLAT"
+    return mode
 
 
 def _scene_info_from_loaded(loaded: object | None) -> dict:
@@ -2590,6 +2602,8 @@ def _create_mesh_object(
     object_material_slot: bool = False,
     node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
+    effective_shading = _effective_shading_mode(data, shading_mode)
+
     if data.vertices_f32 and data.indices_u32:
         return _create_mesh_object_bulk(
             data,
@@ -2603,7 +2617,7 @@ def _create_mesh_object(
             apply_animation=apply_animation,
             apply_skin_animation=apply_skin_animation,
             deferred_skin_animations=deferred_skin_animations,
-            shading_mode=shading_mode,
+            shading_mode=effective_shading,
             defer_custom_normals=defer_custom_normals,
             collection=collection,
             object_material_slot=object_material_slot,
@@ -2621,7 +2635,7 @@ def _create_mesh_object(
 
     normals = data.normals[: len(mesh.loops)] if data.normals else None
     if not (defer_custom_normals and _queue_deferred_custom_normals(mesh, normals, None, data)):
-        _apply_shading(mesh, shading_mode, normals)
+        _apply_shading(mesh, effective_shading, normals)
     return _finish_mesh_object(
         mesh,
         data,

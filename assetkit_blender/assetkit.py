@@ -11,6 +11,7 @@ from typing import Iterable, Iterator, Optional
 
 AK_OK = 0
 AK_FILE_TYPE_AUTO = 0
+AK_FILE_TYPE_STL = 4
 AK_GEOMETRY_MESH = 1
 AK_PRIMITIVE_LINES = 1
 AK_PRIMITIVE_TRIANGLES = 3
