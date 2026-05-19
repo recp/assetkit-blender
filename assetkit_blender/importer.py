@@ -1372,7 +1372,9 @@ def _create_grouped_mesh_object_bulk(
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
-    if shading_mode != "SMOOTH" and not normals and vertex_normals is None:
+    if str(shading_mode or "AUTO").upper() == "FLAT":
+        shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
+    elif shading_mode != "SMOOTH" and not normals and vertex_normals is None:
         shading_done = True
     else:
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
@@ -2797,7 +2799,9 @@ def _create_mesh_object_bulk(
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
-    if shading_mode != "SMOOTH" and not normals and vertex_normals is None:
+    if str(shading_mode or "AUTO").upper() == "FLAT":
+        shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
+    elif shading_mode != "SMOOTH" and not normals and vertex_normals is None:
         shading_done = True
     else:
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
