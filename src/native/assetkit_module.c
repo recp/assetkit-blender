@@ -949,7 +949,7 @@ akb_load_options_default(AkbLoadOptions *options) {
   options->cvt_line_loop = 1;
   options->cvt_line_strip = 1;
   options->use_mmap = 1;
-  options->build_triangle_edges = 1;
+  options->build_triangle_edges = 0;
   options->geometry_keys = 1;
 }
 
