@@ -51,8 +51,13 @@ class AkOneWayIterBase(ctypes.Structure):
     _fields_ = [("next", ctypes.c_void_p)]
 
 
-class AkUIntArray(ctypes.Structure):
-    _fields_ = [("count", ctypes.c_size_t)]
+class AkIndexArray(ctypes.Structure):
+    _fields_ = [
+        ("count", ctypes.c_size_t),
+        ("max", ctypes.c_uint32),
+        ("componentType", ctypes.c_int32),
+        ("reserved", ctypes.c_uint32),
+    ]
 
 
 class AkBuffer(ctypes.Structure):
@@ -115,7 +120,8 @@ AkMeshPrimitive._fields_ = [
     ("material", ctypes.c_void_p),
     ("input", ctypes.POINTER(AkInput)),
     ("pos", ctypes.POINTER(AkInput)),
-    ("indices", ctypes.POINTER(AkUIntArray)),
+    ("indices", ctypes.POINTER(AkIndexArray)),
+    ("indexAccessor", ctypes.c_void_p),
     ("extra", ctypes.c_void_p),
     ("udata", ctypes.c_void_p),
     ("type", ctypes.c_int32),
@@ -527,7 +533,7 @@ class AssetKit:
             return MeshPrimitiveData("", [], [], [], [], [])
 
         positions = self._accessor_tuples(pos_input.contents.accessor, 3)
-        raw_indices = self._indices(prim.indices)
+        raw_indices = self._primitive_indices(prim)
         if raw_indices:
             stride = max(1, int(prim.indexStride or 1))
             pos_offset = int(pos_input.contents.offset or 0)
@@ -641,16 +647,59 @@ class AssetKit:
                 values.append(float(ctypes.cast(addr, ctypes.POINTER(c_type)).contents.value))
         return values
 
+    def _primitive_indices(self, prim: AkMeshPrimitive) -> list[int]:
+        if prim.indices:
+            return self._index_data(prim.indices)
+        if prim.indexAccessor:
+            return self._accessor_indices(ctypes.cast(prim.indexAccessor, ctypes.POINTER(AkAccessor)))
+        return []
+
     @staticmethod
-    def _indices(indices: ctypes.POINTER(AkUIntArray)) -> list[int]:
+    def _index_data(indices: ctypes.POINTER(AkIndexArray)) -> list[int]:
         if not indices:
             return []
-        count = int(indices.contents.count)
+        item = indices.contents
+        count = int(item.count)
         if count <= 0:
             return []
-        data_addr = ctypes.addressof(indices.contents) + ctypes.sizeof(ctypes.c_size_t)
-        array_type = ctypes.c_uint32 * count
-        return list(ctypes.cast(data_addr, ctypes.POINTER(array_type)).contents)
+        type_map = {
+            AKT_UBYTE: ctypes.c_uint8,
+            AKT_USHORT: ctypes.c_uint16,
+            AKT_UINT: ctypes.c_uint32,
+        }
+        c_type = type_map.get(int(item.componentType))
+        if c_type is None:
+            return []
+        data_addr = ctypes.addressof(item) + AkIndexArray.reserved.offset + ctypes.sizeof(ctypes.c_uint32)
+        array_type = c_type * count
+        return [int(v) for v in ctypes.cast(data_addr, ctypes.POINTER(array_type)).contents]
+
+    @staticmethod
+    def _accessor_indices(accessor: ctypes.POINTER(AkAccessor)) -> list[int]:
+        if not accessor:
+            return []
+        acc = accessor.contents
+        if not acc.buffer or not acc.buffer.contents.data or acc.count <= 0:
+            return []
+        type_map = {
+            AKT_UBYTE: ctypes.c_uint8,
+            AKT_USHORT: ctypes.c_uint16,
+            AKT_UINT: ctypes.c_uint32,
+        }
+        c_type = type_map.get(int(acc.componentType))
+        if c_type is None:
+            return []
+        count = int(acc.count)
+        stride = int(acc.byteStride or acc.bytesPerComponent or ctypes.sizeof(c_type))
+        base = int(acc.buffer.contents.data) + int(acc.byteOffset)
+        if stride == ctypes.sizeof(c_type):
+            array_type = c_type * count
+            return [int(v) for v in ctypes.cast(base, ctypes.POINTER(array_type)).contents]
+        out: list[int] = []
+        for row in range(count):
+            addr = base + row * stride
+            out.append(int(ctypes.cast(addr, ctypes.POINTER(c_type)).contents.value))
+        return out
 
 
 def resolve_library_path(configured_path: str | os.PathLike[str] | None = None) -> Path:

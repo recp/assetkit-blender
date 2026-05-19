@@ -433,6 +433,14 @@ typedef struct AkbInputScan {
   uint32_t point_attr_count;
 } AkbInputScan;
 
+typedef struct AkbIndexView {
+  const void *data;
+  size_t      count;
+  size_t      item_stride;
+  AkTypeId    component_type;
+  uint8_t     borrowable_u32;
+} AkbIndexView;
+
 typedef struct AkbPrimitiveList {
   AkbPrimitive *items;
   size_t        count;
@@ -2794,13 +2802,178 @@ akb_extract_material_variants(AkDoc *doc, AkMeshPrimitive *prim, AkbPrimitive *o
   return 1;
 }
 
+static int
+akb_index_view_init(AkMeshPrimitive *prim, AkbIndexView *view) {
+  AkAccessor *acc;
+  AkIndexArray *indices;
+  size_t item_size;
+  size_t stride;
+  const uint8_t *data;
+
+  if (!view)
+    return 0;
+
+  memset(view, 0, sizeof(*view));
+  if (!prim)
+    return 0;
+
+  indices = prim->indices;
+  if (indices && indices->count) {
+    item_size = ak_indexComponentSize(indices->componentType);
+    if (!item_size)
+      return 0;
+
+    view->data = indices->items;
+    view->count = indices->count;
+    view->item_stride = item_size;
+    view->component_type = indices->componentType;
+    view->borrowable_u32 = indices->componentType == AKT_UINT;
+    return 1;
+  }
+
+  acc = prim->indexAccessor;
+  if (!acc || !acc->buffer || !acc->buffer->data || acc->count == 0)
+    return 0;
+
+  item_size = ak_indexComponentSize(acc->componentType);
+  if (!item_size)
+    return 0;
+
+  stride = acc->byteStride ? acc->byteStride : acc->bytesPerComponent;
+  if (stride < item_size)
+    return 0;
+  if (acc->byteOffset > acc->buffer->length
+      || (size_t)acc->count > (SIZE_MAX - item_size) / stride
+      || acc->byteOffset + ((size_t)acc->count - 1) * stride + item_size
+         > acc->buffer->length)
+    return 0;
+
+  data = (const uint8_t *)acc->buffer->data + acc->byteOffset;
+  view->data = data;
+  view->count = acc->count;
+  view->item_stride = stride;
+  view->component_type = acc->componentType;
+  view->borrowable_u32 = acc->componentType == AKT_UINT
+                         && stride == sizeof(uint32_t)
+                         && ((uintptr_t)data % sizeof(uint32_t)) == 0;
+  return 1;
+}
+
 static const uint32_t *
-akb_indices_data(AkUIntArray *indices, size_t *count_out) {
-  *count_out = 0;
-  if (!indices || indices->count == 0)
+akb_index_view_u32_ptr(const AkbIndexView *view) {
+  if (!view
+      || !view->data
+      || !view->borrowable_u32
+      || view->component_type != AKT_UINT
+      || view->item_stride != sizeof(uint32_t))
     return NULL;
-  *count_out = indices->count;
-  return indices->items;
+
+  return (const uint32_t *)view->data;
+}
+
+static inline uint32_t
+akb_index_view_get(const AkbIndexView *view, size_t index) {
+  const uint8_t *ptr;
+  uint16_t u16;
+  uint32_t u32;
+
+  if (!view || !view->data || index >= view->count)
+    return 0;
+
+  ptr = (const uint8_t *)view->data + index * view->item_stride;
+  switch (view->component_type) {
+    case AKT_UBYTE:
+      return *ptr;
+    case AKT_USHORT:
+      memcpy(&u16, ptr, sizeof(u16));
+      return u16;
+    case AKT_UINT:
+      memcpy(&u32, ptr, sizeof(u32));
+      return u32;
+    default:
+      return 0;
+  }
+}
+
+static int
+akb_index_view_copy_u32(const AkbIndexView *view,
+                        uint32_t *dst,
+                        uint32_t loop_count,
+                        uint32_t index_stride,
+                        uint32_t index_offset,
+                        uint32_t addend) {
+  const uint8_t *src8;
+  const uint16_t *src16;
+  const uint32_t *src32;
+  size_t src_index;
+  size_t i;
+  uint16_t u16;
+  uint32_t u32;
+
+  if (!view || !view->data || !dst || index_stride == 0 || index_offset >= index_stride)
+    return 0;
+
+  if ((size_t)loop_count > (SIZE_MAX - index_offset) / index_stride)
+    return 0;
+  if ((size_t)(loop_count ? loop_count - 1 : 0) * index_stride + index_offset
+      >= view->count)
+    return 0;
+
+  if (view->component_type == AKT_UBYTE && view->item_stride == sizeof(uint8_t)) {
+    src8 = (const uint8_t *)view->data + index_offset;
+    for (i = 0; i < loop_count; i++)
+      dst[i] = (uint32_t)src8[i * index_stride] + addend;
+    return 1;
+  }
+
+  if (view->component_type == AKT_USHORT
+      && view->item_stride == sizeof(uint16_t)
+      && ((uintptr_t)view->data % sizeof(uint16_t)) == 0) {
+    src16 = (const uint16_t *)view->data + index_offset;
+    for (i = 0; i < loop_count; i++)
+      dst[i] = (uint32_t)src16[i * index_stride] + addend;
+    return 1;
+  }
+
+  if (view->component_type == AKT_UINT
+      && view->item_stride == sizeof(uint32_t)
+      && ((uintptr_t)view->data % sizeof(uint32_t)) == 0) {
+    src32 = (const uint32_t *)view->data + index_offset;
+    for (i = 0; i < loop_count; i++)
+      dst[i] = src32[i * index_stride] + addend;
+    return 1;
+  }
+
+  switch (view->component_type) {
+    case AKT_UBYTE:
+      for (i = 0; i < loop_count; i++) {
+        src_index = i * index_stride + index_offset;
+        dst[i] = (uint32_t)*((const uint8_t *)view->data
+                             + src_index * view->item_stride)
+                 + addend;
+      }
+      return 1;
+    case AKT_USHORT:
+      for (i = 0; i < loop_count; i++) {
+        src_index = i * index_stride + index_offset;
+        memcpy(&u16,
+               (const uint8_t *)view->data + src_index * view->item_stride,
+               sizeof(u16));
+        dst[i] = (uint32_t)u16 + addend;
+      }
+      return 1;
+    case AKT_UINT:
+      for (i = 0; i < loop_count; i++) {
+        src_index = i * index_stride + index_offset;
+        memcpy(&u32,
+               (const uint8_t *)view->data + src_index * view->item_stride,
+               sizeof(u32));
+        dst[i] = u32 + addend;
+      }
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 static float *
@@ -3021,8 +3194,7 @@ static float *
 akb_loop_attribute_copy(AkbArena *arena,
                         AkMeshPrimitive *prim,
                         AkInput *input,
-                        const uint32_t *raw_indices,
-                        size_t raw_count,
+                        const AkbIndexView *index_view,
                         const uint32_t *vertex_indices,
                         uint32_t loop_count,
                         uint32_t width,
@@ -3088,8 +3260,8 @@ akb_loop_attribute_copy(AkbArena *arena,
 #define AKB_LOOP_ATTR_INDEX(LOOP_INDEX)                                  \
   do {                                                                   \
     src_index = (size_t)(LOOP_INDEX) * stride + offset;                  \
-    idx = raw_indices && src_index < raw_count                           \
-          ? raw_indices[src_index]                                       \
+    idx = index_view && src_index < index_view->count                    \
+          ? akb_index_view_get(index_view, src_index)                    \
           : vertex_indices[LOOP_INDEX];                                  \
   } while (0)
 
@@ -3291,8 +3463,7 @@ static int
 akb_extract_loop_float_attrs(AkbArena *arena,
                              AkbPrimitive *out,
                              AkMeshPrimitive *prim,
-                             const uint32_t *raw_indices,
-                             size_t raw_count,
+                             const AkbIndexView *index_view,
                              const uint32_t *vertex_indices,
                              uint32_t loop_count,
                              AkInputSemantic semantic_a,
@@ -3353,8 +3524,7 @@ akb_extract_loop_float_attrs(AkbArena *arena,
     attrs[count].values = akb_loop_attribute_copy(arena,
                                                   prim,
                                                   input,
-                                                  raw_indices,
-                                                  raw_count,
+                                                  index_view,
                                                   vertex_indices,
                                                   loop_count,
                                                   width,
@@ -3391,8 +3561,7 @@ static int
 akb_extract_one_loop_float_attr(AkbArena *arena,
                                 AkMeshPrimitive *prim,
                                 AkInput *input,
-                                const uint32_t *raw_indices,
-                                size_t raw_count,
+                                const AkbIndexView *index_view,
                                 const uint32_t *vertex_indices,
                                 uint32_t loop_count,
                                 uint32_t width,
@@ -3429,8 +3598,7 @@ akb_extract_one_loop_float_attr(AkbArena *arena,
   attrs[0].values = akb_loop_attribute_copy(arena,
                                             prim,
                                             input,
-                                            raw_indices,
-                                            raw_count,
+                                            index_view,
                                             vertex_indices,
                                             loop_count,
                                             width,
@@ -6663,13 +6831,13 @@ akb_extract_simple_mesh_group(AkbArena *arena,
   AkMeshPrimitive *prim;
   AkInput *pos_input;
   const float *positions;
-  const uint32_t *raw_indices;
-  size_t raw_count;
+  AkbIndexView index_view;
   size_t total_vertex_count = 0;
   size_t total_loop_count = 0;
   size_t total_face_count = 0;
   size_t vertex_offset = 0;
   size_t loop_offset = 0;
+  size_t raw_loop_count;
   uint32_t pos_count;
   uint32_t loop_count;
   uint32_t stride;
@@ -6710,9 +6878,15 @@ akb_extract_simple_mesh_group(AkbArena *arena,
     if (!positions || pos_count == 0)
       return 1;
 
-    raw_indices = akb_indices_data(prim->indices, &raw_count);
     stride = prim->indexStride ? prim->indexStride : 1;
-    loop_count = raw_indices ? (uint32_t)(raw_count / stride) : pos_count;
+    if (akb_index_view_init(prim, &index_view)) {
+      raw_loop_count = index_view.count / stride;
+      if (raw_loop_count > UINT32_MAX)
+        return 1;
+      loop_count = (uint32_t)raw_loop_count;
+    } else {
+      loop_count = pos_count;
+    }
     loop_count = (loop_count / 3) * 3;
     if (!loop_count)
       continue;
@@ -6771,10 +6945,18 @@ akb_extract_simple_mesh_group(AkbArena *arena,
   for (prim = mesh->primitive; prim; prim = prim->next) {
     pos_input = akb_primitive_position_input(prim);
     positions = akb_accessor_float_borrow(pos_input->accessor, 3, &pos_count);
-    raw_indices = akb_indices_data(prim->indices, &raw_count);
     stride = prim->indexStride ? prim->indexStride : 1;
     pos_offset = pos_input->offset;
-    loop_count = raw_indices ? (uint32_t)(raw_count / stride) : pos_count;
+    if (akb_index_view_init(prim, &index_view)) {
+      raw_loop_count = index_view.count / stride;
+      if (raw_loop_count > UINT32_MAX) {
+        akb_primitive_free(&out);
+        return 0;
+      }
+      loop_count = (uint32_t)raw_loop_count;
+    } else {
+      loop_count = pos_count;
+    }
     loop_count = (loop_count / 3) * 3;
     if (!loop_count)
       continue;
@@ -6783,10 +6965,16 @@ akb_extract_simple_mesh_group(AkbArena *arena,
            positions,
            (size_t)pos_count * 3 * sizeof(float));
 
-    if (raw_indices) {
-      for (i = 0; i < loop_count; i++)
-        out.indices[loop_offset + i] = raw_indices[(size_t)i * stride + pos_offset]
-                                       + (uint32_t)vertex_offset;
+    if (akb_index_view_init(prim, &index_view)) {
+      if (!akb_index_view_copy_u32(&index_view,
+                                   out.indices + loop_offset,
+                                   loop_count,
+                                   stride,
+                                   pos_offset,
+                                   (uint32_t)vertex_offset)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
     } else {
       for (i = 0; i < loop_count; i++)
         out.indices[loop_offset + i] = (uint32_t)(vertex_offset + i);
@@ -6825,14 +7013,17 @@ akb_extract_primitive(AkbArena *arena,
   AkbPrimitive out = {0};
   AkInput *pos_input, *normal_input, *tangent_input;
   AkbInputScan input_scan;
-  const uint32_t *raw_indices = NULL;
-  size_t raw_count = 0;
+  AkbIndexView index_view = {0};
+  const AkbIndexView *attr_index_view;
+  const uint32_t *borrowed_indices;
+  size_t raw_loop_count;
   uint32_t pos_count = 0;
   uint32_t stride, pos_offset;
   uint32_t i;
   uint32_t index_width;
   int ok;
   int fast_extract;
+  int has_index_view;
   const char *base_name;
   AkBindMaterial *bind_material;
   uint8_t arena_normals;
@@ -6924,14 +7115,19 @@ akb_extract_primitive(AkbArena *arena,
   }
   out.vertex_count = pos_count;
 
-  raw_indices = akb_indices_data(prim->indices, &raw_count);
-
-  if (raw_indices) {
+  has_index_view = akb_index_view_init(prim, &index_view);
+  if (has_index_view) {
     stride = prim->indexStride ? prim->indexStride : 1;
     pos_offset = pos_input->offset;
-    out.loop_count = (uint32_t)(raw_count / stride);
-    if (stride == 1 && pos_offset == 0) {
-      out.indices = (uint32_t *)raw_indices;
+    raw_loop_count = index_view.count / stride;
+    if (raw_loop_count > UINT32_MAX) {
+      akb_primitive_free(&out);
+      return 0;
+    }
+    out.loop_count = (uint32_t)raw_loop_count;
+    borrowed_indices = akb_index_view_u32_ptr(&index_view);
+    if (borrowed_indices && stride == 1 && pos_offset == 0) {
+      out.indices = (uint32_t *)borrowed_indices;
       out.borrowed_indices = 1;
       out.zero_copy_flags |= 2;
       akb_primitive_retain_doc(&out, doc_owner);
@@ -6945,8 +7141,15 @@ akb_extract_primitive(AkbArena *arena,
         return 0;
       }
 
-      for (i = 0; i < out.loop_count; i++)
-        out.indices[i] = raw_indices[(size_t)i * stride + pos_offset];
+      if (!akb_index_view_copy_u32(&index_view,
+                                   out.indices,
+                                   out.loop_count,
+                                   stride,
+                                   pos_offset,
+                                   0)) {
+        akb_primitive_free(&out);
+        return 0;
+      }
     }
   } else {
     out.loop_count = out.vertex_count;
@@ -6967,6 +7170,10 @@ akb_extract_primitive(AkbArena *arena,
   out.face_count = out.primitive_type == AKB_PRIMITIVE_TRIANGLES
                    ? out.loop_count / index_width
                    : 0;
+  attr_index_view = has_index_view
+                    && (prim->indexStride ? prim->indexStride : 1) > 1
+                    ? &index_view
+                    : NULL;
   if (out.face_count
       && (out.primitive_type != AKB_PRIMITIVE_TRIANGLES || index_width != 3)) {
     out.loop_meta = (int32_t *)akb_owned_alloc(arena,
@@ -7014,8 +7221,7 @@ akb_extract_primitive(AkbArena *arena,
       out.normals = akb_loop_attribute_copy(arena,
                                             prim,
                                             normal_input,
-                                            raw_indices,
-                                            raw_count,
+                                            attr_index_view,
                                             out.indices,
                                             out.loop_count,
                                             3,
@@ -7030,8 +7236,7 @@ akb_extract_primitive(AkbArena *arena,
       if (!akb_extract_one_loop_float_attr(arena,
                                            prim,
                                            input_scan.uv,
-                                           raw_indices,
-                                           raw_count,
+                                           attr_index_view,
                                            out.indices,
                                            out.loop_count,
                                            2,
@@ -7048,8 +7253,7 @@ akb_extract_primitive(AkbArena *arena,
       if (!akb_extract_loop_float_attrs(arena,
                                         &out,
                                         prim,
-                                        raw_indices,
-                                        raw_count,
+                                        attr_index_view,
                                         out.indices,
                                         out.loop_count,
                                         AK_INPUT_TEXCOORD,
@@ -7076,8 +7280,7 @@ akb_extract_primitive(AkbArena *arena,
       if (!akb_extract_one_loop_float_attr(arena,
                                            prim,
                                            input_scan.color,
-                                           raw_indices,
-                                           raw_count,
+                                           attr_index_view,
                                            out.indices,
                                            out.loop_count,
                                            4,
@@ -7094,8 +7297,7 @@ akb_extract_primitive(AkbArena *arena,
       if (!akb_extract_loop_float_attrs(arena,
                                         &out,
                                         prim,
-                                        raw_indices,
-                                        raw_count,
+                                        attr_index_view,
                                         out.indices,
                                         out.loop_count,
                                         AK_INPUT_COLOR,
@@ -7124,8 +7326,7 @@ akb_extract_primitive(AkbArena *arena,
       out.tangents = akb_loop_attribute_copy(arena,
                                              prim,
                                              tangent_input,
-                                             raw_indices,
-                                             raw_count,
+                                             attr_index_view,
                                              out.indices,
                                              out.loop_count,
                                              4,
