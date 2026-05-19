@@ -58,6 +58,11 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         description="Ask AssetKit to generate missing normals before Blender creates the mesh",
         default=False,
     )
+    stl_position_dedup: bpy.props.BoolProperty(
+        name="Deduplicate STL Vertices",
+        description="Reduce STL vertex memory by sharing identical positions; import can be slower on large triangle soups",
+        default=False,
+    )
     mesh_shading: bpy.props.EnumProperty(
         name="Shading",
         description="How mesh shading is set after import",
@@ -345,6 +350,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         mesh_box.label(text="Mesh")
         mesh_box.prop(self, "triangulate")
         mesh_box.prop(self, "generate_normals")
+        mesh_box.prop(self, "stl_position_dedup")
         mesh_box.prop(self, "convert_triangle_strip")
         mesh_box.prop(self, "convert_triangle_fan")
         mesh_box.separator()
@@ -384,6 +390,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             "scene_index": self.scene_index,
             "triangulate": self.triangulate,
             "generate_normals": self.generate_normals,
+            "stl_position_dedup": self.stl_position_dedup,
             "convert_triangle_strip": self.convert_triangle_strip,
             "convert_triangle_fan": self.convert_triangle_fan,
             "import_lines": self.import_lines,
