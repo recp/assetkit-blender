@@ -1013,6 +1013,10 @@ akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
   if (value)
     options->use_mmap = PyObject_IsTrue(value) ? 1 : 0;
 
+  value = PyDict_GetItemString(dict, "build_triangle_edges");
+  if (value)
+    options->build_triangle_edges = PyObject_IsTrue(value) ? 1 : 0;
+
   return !PyErr_Occurred();
 }
 
@@ -1719,9 +1723,6 @@ akb_primitive_geometry_key(const AkbPrimitive *prim, int content_key) {
   hash = akb_geometry_key_mix_buffer(hash, prim->vertices, length, content_key);
   length = (size_t)prim->loop_count * sizeof(uint32_t);
   hash = akb_geometry_key_mix_buffer(hash, prim->indices, length, content_key);
-  length = (size_t)prim->face_count * sizeof(int32_t);
-  hash = akb_geometry_key_mix_buffer(hash, prim->loop_starts, length, content_key);
-  hash = akb_geometry_key_mix_buffer(hash, prim->loop_totals, length, content_key);
   hash = akb_fnv1a64_mix_u64(hash, prim->has_normals);
   length = prim->has_normals ? (size_t)prim->loop_count * 3 * sizeof(float) : 0;
   hash = akb_geometry_key_mix_buffer(hash, prim->normals, length, content_key);
@@ -1858,28 +1859,37 @@ akb_hash_capacity_for(size_t count) {
 }
 
 static uint32_t
-akb_stl_float_hash_bits(float value) {
+akb_stl_float_bits(float value) {
   uint32_t bits;
 
-  if (value == 0.0f)
-    return 0;
   memcpy(&bits, &value, sizeof(bits));
   return bits;
 }
 
-static uint64_t
-akb_stl_position_hash(const float *pos) {
-  uint64_t hash = UINT64_C(1469598103934665603);
+static uint32_t
+akb_stl_rotl32(uint32_t value, unsigned shift) {
+  return (value << shift) | (value >> (32u - shift));
+}
 
-  hash = akb_fnv1a64_mix_u64(hash, akb_stl_float_hash_bits(pos[0]));
-  hash = akb_fnv1a64_mix_u64(hash, akb_stl_float_hash_bits(pos[1]));
-  hash = akb_fnv1a64_mix_u64(hash, akb_stl_float_hash_bits(pos[2]));
-  return hash;
+static uint32_t
+akb_stl_hash3_u32(uint32_t a, uint32_t b, uint32_t c) {
+  uint32_t value;
+
+  value = a ^ akb_stl_rotl32(b, 11u) ^ akb_stl_rotl32(c, 22u);
+  value ^= value >> 16;
+  return value;
+}
+
+static uint32_t
+akb_stl_position_hash(const float *pos) {
+  return akb_stl_hash3_u32(akb_stl_float_bits(pos[0]),
+                           akb_stl_float_bits(pos[1]),
+                           akb_stl_float_bits(pos[2]));
 }
 
 static int
 akb_stl_position_equal(const float *a, const float *b) {
-  return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+  return memcmp(a, b, sizeof(float) * 3) == 0;
 }
 
 static int
@@ -1889,7 +1899,7 @@ akb_stl_position_intern(float *vertices,
                         uint32_t *count,
                         const float *pos,
                         uint32_t *index_out) {
-  uint64_t hash;
+  uint32_t hash;
   size_t mask, slot;
   uint32_t packed, index;
 
@@ -1938,14 +1948,9 @@ akb_stl_sort_triangle(uint32_t key[3]) {
   }
 }
 
-static uint64_t
+static uint32_t
 akb_stl_triangle_hash(const uint32_t key[3]) {
-  uint64_t hash = UINT64_C(1469598103934665603);
-
-  hash = akb_fnv1a64_mix_u64(hash, key[0]);
-  hash = akb_fnv1a64_mix_u64(hash, key[1]);
-  hash = akb_fnv1a64_mix_u64(hash, key[2]);
-  return hash;
+  return akb_stl_hash3_u32(key[0], key[1], key[2]);
 }
 
 static int
@@ -1961,7 +1966,7 @@ akb_stl_triangle_seen(uint32_t *table,
                       size_t table_cap,
                       uint32_t *count,
                       const uint32_t key[3]) {
-  uint64_t hash;
+  uint32_t hash;
   size_t mask, slot;
   uint32_t packed, index;
 
@@ -2047,6 +2052,34 @@ akb_stl_drop_vertex_normals(AkbPrimitive *prim) {
 }
 
 static int
+akb_stl_needs_loop_remap(const AkbPrimitive *prim) {
+  return prim
+         && (prim->normals
+             || prim->tangents
+             || prim->uv_set_count
+             || prim->color_set_count);
+}
+
+static int
+akb_stl_already_position_indexed(const AkbPrimitive *prim) {
+  return prim
+         && prim->file_type == AK_FILE_TYPE_STL
+         && prim->primitive_type == AKB_PRIMITIVE_TRIANGLES
+         && prim->vertices
+         && prim->indices
+         && prim->vertex_count
+         && prim->loop_count
+         && prim->face_count
+         && prim->loop_count == prim->face_count * 3
+         && prim->vertex_count < prim->loop_count
+         && !prim->normals
+         && !prim->vertex_normals
+         && !prim->tangents
+         && !prim->uv_set_count
+         && !prim->color_set_count;
+}
+
+static int
 akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
   float *vertices;
   uint32_t *indices;
@@ -2058,6 +2091,9 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
   uint32_t old_vertex_count, old_loop_count, old_face_count;
   uint32_t vertex_count, loop_count, triangle_count;
   uint32_t face_index, corner;
+  int need_loop_remap;
+  int profile;
+  double started_at, alloc_at, scan_at, compact_at;
 
   if (!prim
       || prim->file_type != AK_FILE_TYPE_STL
@@ -2070,6 +2106,9 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
       || prim->loop_count != prim->face_count * 3)
     return 1;
 
+  if (akb_stl_already_position_indexed(prim))
+    return 1;
+
   old_vertex_count = prim->vertex_count;
   old_loop_count = prim->loop_count;
   old_face_count = prim->face_count;
@@ -2078,18 +2117,23 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
   if (!vertex_table_cap || !triangle_table_cap)
     return 1;
 
+  need_loop_remap = akb_stl_needs_loop_remap(prim);
+  profile = akb_profile_enabled();
+  started_at = profile ? akb_now_ms() : 0.0;
   vertices = (float *)malloc((size_t)old_vertex_count * 3 * sizeof(*vertices));
   indices = (uint32_t *)malloc((size_t)old_loop_count * sizeof(*indices));
   vertex_table = (uint32_t *)calloc(vertex_table_cap, sizeof(*vertex_table));
   triangle_table = (uint32_t *)calloc(triangle_table_cap, sizeof(*triangle_table));
   triangle_keys = (uint32_t *)malloc((size_t)old_face_count * 3 * sizeof(*triangle_keys));
-  loop_remap = (uint32_t *)malloc((size_t)old_loop_count * sizeof(*loop_remap));
+  loop_remap = need_loop_remap
+                 ? (uint32_t *)malloc((size_t)old_loop_count * sizeof(*loop_remap))
+                 : NULL;
   if (!vertices
       || !indices
       || !vertex_table
       || !triangle_table
       || !triangle_keys
-      || !loop_remap) {
+      || (need_loop_remap && !loop_remap)) {
     free(vertices);
     free(indices);
     free(vertex_table);
@@ -2098,6 +2142,7 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
     free(loop_remap);
     return 1;
   }
+  alloc_at = profile ? akb_now_ms() : 0.0;
 
   vertex_count = 0;
   loop_count = 0;
@@ -2156,10 +2201,12 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
 
     for (corner = 0; corner < 3; corner++) {
       indices[loop_count] = new_indices[corner];
-      loop_remap[loop_count] = face_index * 3 + corner;
+      if (loop_remap)
+        loop_remap[loop_count] = face_index * 3 + corner;
       loop_count++;
     }
   }
+  scan_at = profile ? akb_now_ms() : 0.0;
 
   free(vertex_table);
   free(triangle_table);
@@ -2172,7 +2219,7 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
     return 1;
   }
 
-  if (loop_count != old_loop_count) {
+  if (loop_remap && loop_count != old_loop_count) {
     if (!akb_stl_compact_loop_float(&prim->normals,
                                     &prim->borrowed_normals,
                                     loop_remap,
@@ -2201,6 +2248,7 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
     if (prim->color_set_count)
       prim->colors = prim->color_sets[0].values;
   }
+  compact_at = profile ? akb_now_ms() : 0.0;
 
   free(loop_remap);
 
@@ -2220,6 +2268,20 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
   prim->arena_indices = 0;
   prim->zero_copy_flags &= (uint8_t)~3u;
   akb_stl_drop_vertex_normals(prim);
+  if (profile) {
+    akb_profile_log("stl_position_dedup old_vertices=%u old_faces=%u old_loops=%u vertices=%u faces=%u loops=%u alloc=%.3fms scan=%.3fms compact=%.3fms total=%.3fms loop_remap=%d",
+                    old_vertex_count,
+                    old_face_count,
+                    old_loop_count,
+                    vertex_count,
+                    prim->face_count,
+                    loop_count,
+                    alloc_at - started_at,
+                    scan_at - alloc_at,
+                    compact_at - scan_at,
+                    akb_now_ms() - started_at,
+                    need_loop_remap);
+  }
   return 1;
 }
 
@@ -7578,10 +7640,14 @@ akb_extract_primitive(AkbArena *arena,
                     && (prim->indexStride ? prim->indexStride : 1) > 1
                     ? &index_view
                     : NULL;
-  if (out.face_count
-      && (out.primitive_type != AKB_PRIMITIVE_TRIANGLES || index_width != 3)) {
+  if (out.face_count) {
+    size_t loop_meta_count;
+
+    loop_meta_count = out.primitive_type == AKB_PRIMITIVE_TRIANGLES && index_width == 3
+                        ? (size_t)out.face_count
+                        : (size_t)out.face_count * 2u;
     out.loop_meta = (int32_t *)akb_owned_alloc(arena,
-                                                (size_t)out.face_count * 2 * sizeof(int32_t),
+                                                loop_meta_count * sizeof(int32_t),
                                                 sizeof(int32_t),
                                                 &out.arena_loop_meta);
     if (!out.loop_meta) {
@@ -7589,13 +7655,15 @@ akb_extract_primitive(AkbArena *arena,
       return 0;
     }
     out.loop_starts = out.loop_meta;
-    out.loop_totals = out.loop_meta + out.face_count;
+    if (loop_meta_count > out.face_count)
+      out.loop_totals = out.loop_meta + out.face_count;
   }
 
-  if (out.loop_meta) {
+  if (out.loop_starts) {
     for (i = 0; i < out.face_count; i++) {
       out.loop_starts[i] = (int32_t)(i * index_width);
-      out.loop_totals[i] = (int32_t)index_width;
+      if (out.loop_totals)
+        out.loop_totals[i] = (int32_t)index_width;
     }
   }
 
