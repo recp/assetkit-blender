@@ -871,9 +871,29 @@ akb_coord_matrix(AkbCoordContext *coord) {
   }
 }
 
+static AkCoordSys *
+akb_blender_source_coord(AkDoc *doc) {
+  AkFileType ftype;
+
+  if (!doc)
+    return AK_YUP;
+
+  ftype = doc->inf ? doc->inf->ftype : AK_FILE_TYPE_AUTO;
+  switch (ftype) {
+    case AK_FILE_TYPE_WAVEFRONT:
+    case AK_FILE_TYPE_STL:
+    case AK_FILE_TYPE_PLY:
+      return AK_ZUP;
+    default:
+      break;
+  }
+
+  return doc->coordSys ? doc->coordSys : AK_YUP;
+}
+
 static void
 akb_coord_ctx_init(AkbCoordContext *coord, AkDoc *doc, const AkbLoadOptions *options) {
-  coord->source = doc && doc->coordSys ? doc->coordSys : AK_YUP;
+  coord->source = akb_blender_source_coord(doc);
   coord->target = options->target_coord ? options->target_coord : AK_ZUP;
   coord->convert = coord->source != coord->target
                    && !ak_coordOrientationIsEq(coord->source, coord->target);
