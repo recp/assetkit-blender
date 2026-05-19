@@ -11,9 +11,11 @@ from typing import Iterable, Iterator, Optional
 
 AK_OK = 0
 AK_FILE_TYPE_AUTO = 0
+AK_FILE_TYPE_WAVEFRONT = 3
 AK_FILE_TYPE_STL = 4
 AK_GEOMETRY_MESH = 1
 AK_PRIMITIVE_LINES = 1
+AK_PRIMITIVE_POLYGONS = 2
 AK_PRIMITIVE_TRIANGLES = 3
 AK_PRIMITIVE_POINTS = 4
 AK_INPUT_NORMAL = 13
@@ -308,6 +310,8 @@ class MeshPrimitiveData:
     material_variants: list[dict] | None = None
     morph_anim_channels: list[object] | None = None
     material_anim_channels: list[object] | None = None
+    smooth_shading: bool = False
+    sharp_faces_u8: object = b""
     object_name: str = ""
     matrix_f32: object = b""
     coord_matrix_f32: object = b""
@@ -939,6 +943,32 @@ def native_fill_i32(dst: object, byte_offset: int, value: int, count: int) -> in
         return None
 
 
+def native_fill_triangle_loop_offsets_ptr(address: int, face_count: int) -> int | None:
+    if address <= 0 or face_count <= 0:
+        return None
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        return int(_assetkit_blender.fill_triangle_loop_offsets_ptr(int(address), int(face_count)))
+    except Exception:
+        return None
+
+
+def native_fill_u8_ptr(address: int, value: int, count: int) -> int | None:
+    if address <= 0 or count <= 0 or value < 0 or value > 255:
+        return None
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        return int(_assetkit_blender.fill_u8_ptr(int(address), int(value), int(count)))
+    except Exception:
+        return None
+
+
 def native_skin_group_assignments(
     joints: object,
     weights: object,
@@ -1228,9 +1258,10 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     _S_METALLIC,
     _S_ROUGHNESS,
     _S_DOUBLE_SIDED,
-) = range(35)
+    _S_SMOOTH_SHADING,
+) = range(36)
 _S_LEGACY_FIELD_COUNT = _S_GEOMETRY_KEY + 1
-_S_FIELD_COUNT = _S_DOUBLE_SIDED + 1
+_S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
 
 (
     _M_OWNER,
@@ -1364,7 +1395,8 @@ _S_FIELD_COUNT = _S_DOUBLE_SIDED + 1
     _M_GEOMETRY_KEY,
     _M_EDGE_COUNT,
     _M_EDGES_U32,
-) = range(131)
+    _M_SMOOTH_SHADING,
+) = range(132)
 
 _M_FIELD_NAMES = (
     "_owner",
@@ -1498,6 +1530,7 @@ _M_FIELD_NAMES = (
     "geometry_key",
     "edge_count",
     "edges_u32",
+    "smooth_shading",
 )
 
 
@@ -1573,6 +1606,8 @@ def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
             data.roughness = float(item[_S_ROUGHNESS] if item[_S_ROUGHNESS] is not None else 1.0)
         if count > _S_DOUBLE_SIDED:
             data.double_sided = bool(item[_S_DOUBLE_SIDED])
+        if count > _S_SMOOTH_SHADING:
+            data.smooth_shading = bool(item[_S_SMOOTH_SHADING])
         data.simple_native = True
         data._native_owner = item[_S_OWNER]
         return data
@@ -1615,6 +1650,7 @@ def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
     data.primitive_index = int(get("primitive_index") or 0)
     data.zero_copy_flags = int(get("zero_copy_flags") or 0)
     data.geometry_key = int(get("geometry_key") or 0)
+    data.smooth_shading = bool(get("smooth_shading"))
     data.simple_native = True
     data._native_owner = get("_owner")
     return data
@@ -1855,6 +1891,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         data.primitive_index = int(get(_M_PRIMITIVE_INDEX) or 0)
         data.zero_copy_flags = int(get(_M_ZERO_COPY_FLAGS) or 0)
         data.geometry_key = int(get(_M_GEOMETRY_KEY) or 0)
+        data.smooth_shading = bool(get(_M_SMOOTH_SHADING))
         data.base_color_texture = get(_M_BASE_COLOR_TEXTURE) or ""
         data.metallic_roughness_texture = get(_M_METALLIC_ROUGHNESS_TEXTURE) or ""
         data.occlusion_texture = get(_M_OCCLUSION_TEXTURE) or ""

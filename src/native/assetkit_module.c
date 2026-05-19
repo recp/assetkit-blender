@@ -40,6 +40,7 @@ typedef struct FListItem FListItem;
 
 #define AKB_GEOMETRY_MESH AK_GEOMETRY_MESH
 #define AKB_PRIMITIVE_LINES AK_PRIMITIVE_LINES
+#define AKB_PRIMITIVE_POLYGONS AK_PRIMITIVE_POLYGONS
 #define AKB_PRIMITIVE_TRIANGLES AK_PRIMITIVE_TRIANGLES
 #define AKB_PRIMITIVE_POINTS AK_PRIMITIVE_POINTS
 #define AKB_INPUT_NORMAL 13
@@ -108,6 +109,7 @@ typedef struct FListItem FListItem;
 #define AKB_EDGE_BUILD_FACE_LIMIT 256
 #define AKB_LARGE_SCENE_PRIMITIVE_THRESHOLD 1024
 #define AKB_GEOMETRY_CONTENT_KEY_BYTE_LIMIT (64u * 1024u)
+#define AKB_WOBJ_PRIM_FLAG_SMOOTH 1u
 #define AKB_MAT4(value) (*(mat4 *)(void *)(value))
 #define AKB_VEC3(value) (*(vec3 *)(void *)(value))
 #define AKB_VEC4(value) (*(vec4 *)(void *)(value))
@@ -396,6 +398,7 @@ typedef struct AkbPrimitive {
   uint8_t  has_tangents;
   uint8_t  has_skin;
   uint8_t  has_sheen;
+  uint8_t  smooth_shading;
   uint8_t  double_sided;
   uint8_t  alpha_mode;
   uint8_t  transparent_opaque;
@@ -627,6 +630,7 @@ typedef enum AkbPySimplePrimitiveField {
   AKB_PY_SIMPLE_METALLIC,
   AKB_PY_SIMPLE_ROUGHNESS,
   AKB_PY_SIMPLE_DOUBLE_SIDED,
+  AKB_PY_SIMPLE_SMOOTH_SHADING,
   AKB_PY_SIMPLE_FIELD_COUNT
 } AkbPySimplePrimitiveField;
 
@@ -785,6 +789,7 @@ typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_GEOMETRY_KEY,
   AKB_PY_PRIM_EDGE_COUNT,
   AKB_PY_PRIM_EDGES_U32,
+  AKB_PY_PRIM_SMOOTH_SHADING,
   AKB_PY_PRIM_FIELD_COUNT
 } AkbPyPrimitiveField;
 
@@ -1696,7 +1701,8 @@ akb_primitive_geometry_key(const AkbPrimitive *prim, int content_key) {
   size_t length;
 
   if (!prim
-      || prim->primitive_type != AKB_PRIMITIVE_TRIANGLES
+      || (prim->primitive_type != AKB_PRIMITIVE_TRIANGLES
+          && prim->primitive_type != AKB_PRIMITIVE_POLYGONS)
       || !prim->vertices
       || !prim->indices
       || prim->loop_count != prim->face_count * 3
@@ -2285,6 +2291,163 @@ akb_optimize_stl_triangle_mesh(AkbPrimitive *prim) {
   return 1;
 }
 
+static int
+akb_optimize_obj_position_mesh(AkbPrimitive *prim) {
+  float *vertices;
+  float *loop_normals;
+  uint32_t *indices;
+  uint32_t *vertex_table;
+  size_t vertex_table_cap;
+  uint32_t old_vertex_count, old_loop_count;
+  uint32_t vertex_count;
+  uint32_t loop_index;
+  int make_loop_normals;
+  int profile;
+  double started_at, alloc_at, scan_at;
+
+  if (!prim
+      || prim->file_type != AK_FILE_TYPE_WAVEFRONT
+      || (prim->primitive_type != AKB_PRIMITIVE_TRIANGLES
+          && prim->primitive_type != AKB_PRIMITIVE_POLYGONS)
+      || !prim->vertices
+      || !prim->indices
+      || !prim->vertex_count
+      || !prim->loop_count
+      || !prim->face_count
+      || prim->point_attr_count
+      || prim->has_skin
+      || prim->morph_target_count)
+    return 1;
+
+  old_vertex_count = prim->vertex_count;
+  old_loop_count = prim->loop_count;
+  vertex_table_cap = akb_hash_capacity_for(old_loop_count);
+  if (!vertex_table_cap)
+    return 1;
+
+  make_loop_normals = prim->has_vertex_normals
+                      && prim->vertex_normals
+                      && !prim->has_normals;
+  profile = akb_profile_enabled();
+  started_at = profile ? akb_now_ms() : 0.0;
+
+  vertices = (float *)malloc((size_t)old_vertex_count * 3 * sizeof(*vertices));
+  indices = (uint32_t *)malloc((size_t)old_loop_count * sizeof(*indices));
+  vertex_table = (uint32_t *)calloc(vertex_table_cap, sizeof(*vertex_table));
+  loop_normals = make_loop_normals
+                   ? (float *)malloc((size_t)old_loop_count * 3 * sizeof(*loop_normals))
+                   : NULL;
+  if (!vertices
+      || !indices
+      || !vertex_table
+      || (make_loop_normals && !loop_normals)) {
+    free(vertices);
+    free(indices);
+    free(vertex_table);
+    free(loop_normals);
+    return 1;
+  }
+  alloc_at = profile ? akb_now_ms() : 0.0;
+
+  vertex_count = 0;
+  for (loop_index = 0; loop_index < old_loop_count; loop_index++) {
+    uint32_t src_index;
+    const float *pos;
+    uint32_t new_index;
+
+    src_index = prim->indices[loop_index];
+    if (src_index >= old_vertex_count) {
+      free(vertices);
+      free(indices);
+      free(vertex_table);
+      free(loop_normals);
+      return 1;
+    }
+
+    pos = prim->vertices + (size_t)src_index * 3;
+    if (!akb_stl_position_intern(vertices,
+                                 vertex_table,
+                                 vertex_table_cap,
+                                 &vertex_count,
+                                 pos,
+                                 &new_index)) {
+      free(vertices);
+      free(indices);
+      free(vertex_table);
+      free(loop_normals);
+      return 1;
+    }
+    indices[loop_index] = new_index;
+
+    if (loop_normals) {
+      memcpy(loop_normals + (size_t)loop_index * 3,
+             prim->vertex_normals + (size_t)src_index * 3,
+             sizeof(*loop_normals) * 3);
+    }
+  }
+  scan_at = profile ? akb_now_ms() : 0.0;
+
+  free(vertex_table);
+  if (vertex_count >= old_vertex_count) {
+    free(vertices);
+    free(indices);
+    if (loop_normals) {
+      if (prim->normals && !prim->borrowed_normals)
+        free(prim->normals);
+      prim->normals = loop_normals;
+      prim->has_normals = 1;
+      prim->borrowed_normals = 0;
+      akb_stl_drop_vertex_normals(prim);
+      if (profile) {
+        akb_profile_log("obj_loop_normals vertices=%u faces=%u loops=%u total=%.3fms",
+                        old_vertex_count,
+                        prim->face_count,
+                        prim->loop_count,
+                        akb_now_ms() - started_at);
+      }
+    } else {
+      free(loop_normals);
+    }
+    return 1;
+  }
+
+  if (!prim->borrowed_vertices && !prim->arena_vertices)
+    free(prim->vertices);
+  if (!prim->borrowed_indices && !prim->arena_indices)
+    free(prim->indices);
+
+  prim->vertices = vertices;
+  prim->indices = indices;
+  prim->vertex_count = vertex_count;
+  prim->borrowed_vertices = 0;
+  prim->borrowed_indices = 0;
+  prim->arena_vertices = 0;
+  prim->arena_indices = 0;
+  prim->zero_copy_flags &= (uint8_t)~3u;
+
+  if (loop_normals) {
+    if (prim->normals && !prim->borrowed_normals)
+      free(prim->normals);
+    prim->normals = loop_normals;
+    prim->has_normals = 1;
+    prim->borrowed_normals = 0;
+    akb_stl_drop_vertex_normals(prim);
+  }
+
+  if (profile) {
+    akb_profile_log("obj_position_dedup old_vertices=%u vertices=%u faces=%u loops=%u alloc=%.3fms scan=%.3fms total=%.3fms loop_normals=%d",
+                    old_vertex_count,
+                    vertex_count,
+                    prim->face_count,
+                    prim->loop_count,
+                    alloc_at - started_at,
+                    scan_at - alloc_at,
+                    akb_now_ms() - started_at,
+                    make_loop_normals);
+  }
+  return 1;
+}
+
 static void
 akb_finalize_primitive_buffers(AkbArena *arena,
                                AkbPrimitive *prim,
@@ -2293,6 +2456,7 @@ akb_finalize_primitive_buffers(AkbArena *arena,
     return;
 
   akb_optimize_stl_triangle_mesh(prim);
+  akb_optimize_obj_position_mesh(prim);
 
   if (!options || options->build_triangle_edges)
     akb_build_triangle_edges(arena, prim);
@@ -3870,6 +4034,9 @@ akb_input_matches(AkInput *input,
              || (raw_b && akb_raw_semantic_is(input, raw_b)));
 }
 
+static int
+akb_raw_semantic_starts_with(AkInput *input, const char *prefix);
+
 static void
 akb_fill_missing_components(float *values,
                             uint32_t loop_count,
@@ -3884,6 +4051,98 @@ akb_fill_missing_components(float *values,
   for (i = 0; i < loop_count; i++) {
     for (j = source_width; j < width; j++)
       values[(size_t)i * width + j] = default_value;
+  }
+}
+
+static float
+akb_unit_clamp(float value) {
+  if (value < 0.0f)
+    return 0.0f;
+  if (value > 1.0f)
+    return 1.0f;
+  return value;
+}
+
+static float
+akb_color_normalize_factor(AkAccessor *acc) {
+  AkTypeId source_type;
+
+  if (!acc || acc->normalized || acc->originallyNormalized)
+    return 1.0f;
+
+  source_type = acc->originalComponentType
+                  ? acc->originalComponentType
+                  : acc->componentType;
+  switch (source_type) {
+    case AKT_UBYTE:
+      return 1.0f / 255.0f;
+    case AKT_BYTE:
+      return 1.0f / 127.0f;
+    case AKT_USHORT:
+      return 1.0f / 65535.0f;
+    case AKT_SHORT:
+      return 1.0f / 32767.0f;
+    case AKT_UINT:
+      return 1.0f / 4294967295.0f;
+    case AKT_INT:
+      return 1.0f / 2147483647.0f;
+    default:
+      return 1.0f;
+  }
+}
+
+static int
+akb_color_values_need_normalization(const float *values,
+                                    uint32_t loop_count,
+                                    uint32_t width,
+                                    uint32_t source_width) {
+  uint32_t comps, i, j;
+
+  if (!values || !loop_count || !width)
+    return 0;
+
+  comps = source_width ? source_width : width;
+  if (comps > width)
+    comps = width;
+  if (!comps)
+    return 0;
+
+  for (i = 0; i < loop_count; i++) {
+    for (j = 0; j < comps; j++) {
+      float value = values[(size_t)i * width + j];
+      if (!isfinite(value) || value < 0.0f || value > 1.0f)
+        return 1;
+    }
+  }
+
+  return 0;
+}
+
+static void
+akb_normalize_color_values(float *values,
+                           uint32_t loop_count,
+                           uint32_t width,
+                           uint32_t source_width,
+                           AkAccessor *acc) {
+  float factor;
+  uint32_t comps, i, j;
+
+  if (!values || !loop_count || !width)
+    return;
+
+  factor = akb_color_normalize_factor(acc);
+  if (factor == 1.0f)
+    return;
+
+  comps = source_width ? source_width : width;
+  if (comps > width)
+    comps = width;
+  if (!comps || !akb_color_values_need_normalization(values, loop_count, width, comps))
+    return;
+
+  for (i = 0; i < loop_count; i++) {
+    for (j = 0; j < comps; j++)
+      values[(size_t)i * width + j] = akb_unit_clamp(values[(size_t)i * width + j] * factor);
   }
 }
 
@@ -4008,6 +4267,12 @@ akb_extract_loop_float_attrs(AkbArena *arena,
                                 width,
                                 input->accessor->componentCount,
                                 missing_default);
+    if (input->semantic == AK_INPUT_COLOR || akb_raw_semantic_starts_with(input, "COLOR"))
+      akb_normalize_color_values(attrs[count].values,
+                                 loop_count,
+                                 width,
+                                 input->accessor->componentCount,
+                                 input->accessor);
     akb_loop_attr_name(&attrs[count], name_prefix, count);
     count++;
   }
@@ -4085,6 +4350,12 @@ akb_extract_one_loop_float_attr(AkbArena *arena,
                               width,
                               input->accessor->componentCount,
                               missing_default);
+  if (input->semantic == AK_INPUT_COLOR || akb_raw_semantic_starts_with(input, "COLOR"))
+    akb_normalize_color_values(attrs[0].values,
+                               loop_count,
+                               width,
+                               input->accessor->componentCount,
+                               input->accessor);
   akb_loop_attr_name(attrs, name_prefix, 0);
 
   *attrs_out = attrs;
@@ -7176,6 +7447,7 @@ akb_primitive_supported(AkMeshPrimitive *prim, const AkbLoadOptions *options) {
 
   switch (prim->type) {
     case AKB_PRIMITIVE_TRIANGLES:
+    case AKB_PRIMITIVE_POLYGONS:
     case AKB_PRIMITIVE_POINTS:
       return 1;
     case AKB_PRIMITIVE_LINES:
@@ -7211,6 +7483,8 @@ akb_primitive_index_width(AkMeshPrimitive *prim) {
              || ((AkTriangles *)prim)->mode == AK_TRIANGLES
              ? 3
              : 0;
+    case AKB_PRIMITIVE_POLYGONS:
+      return ((AkPolygon *)prim)->vcount ? 1 : 0;
     case AKB_PRIMITIVE_LINES:
       return ((AkLines *)prim)->mode == 0
              || ((AkLines *)prim)->mode == AK_LINES
@@ -7232,6 +7506,18 @@ akb_primitive_position_input(AkMeshPrimitive *prim) {
                                         AK_INPUT_POSITION,
                                         "POSITION",
                                         NULL);
+}
+
+static int
+akb_doc_is_wavefront(const AkDoc *doc) {
+  return doc && doc->inf && doc->inf->ftype == AK_FILE_TYPE_WAVEFRONT;
+}
+
+static int
+akb_wavefront_primitive_smooth(const AkDoc *doc, const AkMeshPrimitive *prim) {
+  return akb_doc_is_wavefront(doc)
+         && prim
+         && (prim->reserved1 & AKB_WOBJ_PRIM_FLAG_SMOOTH);
 }
 
 static int
@@ -7311,13 +7597,22 @@ akb_extract_simple_mesh_group(AkbArena *arena,
   uint32_t prim_count = 0;
   uint32_t i;
   const char *base_name;
+  int wavefront;
+  int smooth_shading;
+  int smooth_shading_set;
 
   if (handled)
     *handled = 0;
   if (!handled || !list || !mesh || !geom)
     return 0;
 
+  wavefront = akb_doc_is_wavefront(doc);
+  smooth_shading = 0;
+  smooth_shading_set = 0;
+
   for (prim = mesh->primitive; prim; prim = prim->next) {
+    int prim_smooth;
+
     if (!akb_primitive_supported(prim, options))
       return 1;
     if (prim->type != AKB_PRIMITIVE_TRIANGLES
@@ -7343,6 +7638,16 @@ akb_extract_simple_mesh_group(AkbArena *arena,
     positions = akb_accessor_float_borrow(pos_input->accessor, 3, &pos_count);
     if (!positions || pos_count == 0)
       return 1;
+
+    if (wavefront) {
+      prim_smooth = akb_wavefront_primitive_smooth(doc, prim);
+      if (!smooth_shading_set) {
+        smooth_shading = prim_smooth;
+        smooth_shading_set = 1;
+      } else if (smooth_shading != prim_smooth) {
+        return 1;
+      }
+    }
 
     stride = prim->indexStride ? prim->indexStride : 1;
     if (akb_index_view_init(prim, &index_view)) {
@@ -7382,6 +7687,7 @@ akb_extract_simple_mesh_group(AkbArena *arena,
   out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
   out.primitive_type = AKB_PRIMITIVE_TRIANGLES;
   out.primitive_mode = AK_TRIANGLES;
+  out.smooth_shading = (uint8_t)(wavefront && smooth_shading);
   out.vertex_count = (uint32_t)total_vertex_count;
   out.loop_count = (uint32_t)total_loop_count;
   out.face_count = (uint32_t)total_face_count;
@@ -7520,6 +7826,7 @@ akb_extract_primitive(AkbArena *arena,
   out.file_type = doc && doc->inf ? (uint32_t)doc->inf->ftype : 0;
   out.primitive_type = (uint32_t)prim->type;
   out.primitive_mode = akb_primitive_mode(prim);
+  out.smooth_shading = (uint8_t)akb_wavefront_primitive_smooth(doc, prim);
   flip_uv_v = akb_blender_flip_uv_v(doc);
   if (!fast_extract) {
     out.primitive_extra = ak_extra(prim);
@@ -7633,9 +7940,14 @@ akb_extract_primitive(AkbArena *arena,
   }
 
   out.loop_count = (out.loop_count / index_width) * index_width;
-  out.face_count = out.primitive_type == AKB_PRIMITIVE_TRIANGLES
-                   ? out.loop_count / index_width
-                   : 0;
+  if (out.primitive_type == AKB_PRIMITIVE_TRIANGLES) {
+    out.face_count = out.loop_count / index_width;
+  } else if (out.primitive_type == AKB_PRIMITIVE_POLYGONS
+             && ((AkPolygon *)prim)->vcount) {
+    out.face_count = (uint32_t)((AkPolygon *)prim)->vcount->count;
+  } else {
+    out.face_count = 0;
+  }
   attr_index_view = has_index_view
                     && (prim->indexStride ? prim->indexStride : 1) > 1
                     ? &index_view
@@ -7660,10 +7972,32 @@ akb_extract_primitive(AkbArena *arena,
   }
 
   if (out.loop_starts) {
-    for (i = 0; i < out.face_count; i++) {
-      out.loop_starts[i] = (int32_t)(i * index_width);
-      if (out.loop_totals)
-        out.loop_totals[i] = (int32_t)index_width;
+    if (out.primitive_type == AKB_PRIMITIVE_POLYGONS
+        && ((AkPolygon *)prim)->vcount
+        && out.loop_totals) {
+      AkUInt *vcount_items;
+      uint32_t loop_start;
+
+      vcount_items = ((AkPolygon *)prim)->vcount->items;
+      loop_start = 0;
+      for (i = 0; i < out.face_count; i++) {
+        AkUInt face_loop_count;
+
+        face_loop_count = vcount_items[i];
+        if (loop_start >= out.loop_count)
+          face_loop_count = 0;
+        else if ((uint64_t)loop_start + face_loop_count > out.loop_count)
+          face_loop_count = out.loop_count - loop_start;
+        out.loop_starts[i] = (int32_t)loop_start;
+        out.loop_totals[i] = (int32_t)face_loop_count;
+        loop_start += (uint32_t)face_loop_count;
+      }
+    } else {
+      for (i = 0; i < out.face_count; i++) {
+        out.loop_starts[i] = (int32_t)(i * index_width);
+        if (out.loop_totals)
+          out.loop_totals[i] = (int32_t)index_width;
+      }
     }
   }
 
@@ -7674,7 +8008,9 @@ akb_extract_primitive(AkbArena *arena,
     return 0;
   }
 
-  if (!fast_extract && out.primitive_type == AKB_PRIMITIVE_TRIANGLES) {
+  if (!fast_extract
+      && (out.primitive_type == AKB_PRIMITIVE_TRIANGLES
+          || out.primitive_type == AKB_PRIMITIVE_POLYGONS)) {
     akb_scan_inputs(prim, out.primitive_type, &input_scan);
     if (input_scan.point_attr_count
         && !akb_extract_point_float_attrs(&out, prim, doc_owner)) {
@@ -8299,6 +8635,9 @@ akb_extract_node(AkbArena *arena,
   AkNode *child;
   AkNode *inst_node;
   AkGeometry *geom;
+  AkInstanceGeometry *geometry_inst;
+  AkInstanceGeometry *next_geometry;
+  AkInstanceGeometry *saved_geometry;
   AkInstanceBase *inst;
   AkbAnimation *animation;
   AkbAnimation *morph_animation;
@@ -8319,45 +8658,54 @@ akb_extract_node(AkbArena *arena,
     return 0;
 
   if (node->geometry) {
-    animation = akb_animation_retain(nodes->items[node_index].animation);
-    morph_animation = NULL;
-    ok = 1;
-    if (node->geometry->morpher
-        && ((anim_index && anim_index->count)
-            || (!anim_index && doc && doc->lib.animations))) {
-      morph_animation = akb_morph_animation_new(doc,
-                                                doc_owner,
-                                                anim_index,
-                                                node->geometry->morpher,
-                                                coord,
-                                                &ok);
-    }
-    if (!ok) {
-      akb_animation_release(animation);
-      akb_animation_release(morph_animation);
-      return 0;
-    }
+    saved_geometry = node->geometry;
+    for (geometry_inst = saved_geometry; geometry_inst; geometry_inst = next_geometry) {
+      next_geometry = (AkInstanceGeometry *)geometry_inst->base.next;
+      node->geometry = geometry_inst;
 
-    geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
-    if (!akb_extract_mesh(arena,
-                          list,
-                          nodes,
-                          doc,
-                          doc_owner,
-                          anim_index,
-                          reuse_cache,
-                          animation,
-                          morph_animation,
-                          node,
-                          node_index,
-                          geom,
-                          options)) {
+      animation = akb_animation_retain(nodes->items[node_index].animation);
+      morph_animation = NULL;
+      ok = 1;
+      if (geometry_inst->morpher
+          && ((anim_index && anim_index->count)
+              || (!anim_index && doc && doc->lib.animations))) {
+        morph_animation = akb_morph_animation_new(doc,
+                                                  doc_owner,
+                                                  anim_index,
+                                                  geometry_inst->morpher,
+                                                  coord,
+                                                  &ok);
+      }
+      if (!ok) {
+        node->geometry = saved_geometry;
+        akb_animation_release(animation);
+        akb_animation_release(morph_animation);
+        return 0;
+      }
+
+      geom = (AkGeometry *)ak_instanceObject(&geometry_inst->base);
+      if (!akb_extract_mesh(arena,
+                            list,
+                            nodes,
+                            doc,
+                            doc_owner,
+                            anim_index,
+                            reuse_cache,
+                            animation,
+                            morph_animation,
+                            node,
+                            node_index,
+                            geom,
+                            options)) {
+        node->geometry = saved_geometry;
+        akb_animation_release(animation);
+        akb_animation_release(morph_animation);
+        return 0;
+      }
       akb_animation_release(animation);
       akb_animation_release(morph_animation);
-      return 0;
     }
-    akb_animation_release(animation);
-    akb_animation_release(morph_animation);
+    node->geometry = saved_geometry;
   }
 
   for (child = node->chld; child; child = child->next) {
@@ -8441,6 +8789,7 @@ akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate 
   AkNode *child;
   AkNode *inst_node;
   AkInstanceBase *inst;
+  AkInstanceGeometry *geometry_inst;
   AkGeometry *geom;
 
   if (!node || !estimate)
@@ -8448,8 +8797,12 @@ akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate 
 
   estimate->nodes++;
   if (node->geometry) {
-    geom = (AkGeometry *)ak_instanceObject(&node->geometry->base);
-    estimate->primitives += akb_count_geometry_primitives(geom, options);
+    for (geometry_inst = node->geometry;
+         geometry_inst;
+         geometry_inst = (AkInstanceGeometry *)geometry_inst->base.next) {
+      geom = (AkGeometry *)ak_instanceObject(&geometry_inst->base);
+      estimate->primitives += akb_count_geometry_primitives(geom, options);
+    }
   }
 
   for (child = node->chld; child; child = child->next)
@@ -9510,6 +9863,7 @@ akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_METALLIC, PyFloat_FromDouble(prim->metallic));
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_ROUGHNESS, PyFloat_FromDouble(prim->roughness));
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_DOUBLE_SIDED, PyBool_FromLong(prim->double_sided));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_SMOOTH_SHADING, PyBool_FromLong(prim->smooth_shading));
 
 #undef AKB_SIMPLE_SET
 
@@ -9972,6 +10326,7 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ(AKB_PY_PRIM_EDGES_U32,
               akb_memoryview_or_empty(prim->edges,
                                       (size_t)prim->edge_count * 2 * sizeof(uint32_t)));
+  AKB_SET_OBJ(AKB_PY_PRIM_SMOOTH_SHADING, PyBool_FromLong(prim->smooth_shading));
 
 #undef AKB_SET_OBJ
 
@@ -11255,6 +11610,66 @@ akb_fill_i32(PyObject *self, PyObject *args) {
 }
 
 static PyObject *
+akb_fill_triangle_loop_offsets_ptr(PyObject *self, PyObject *args) {
+  unsigned long long address;
+  Py_ssize_t face_count_py;
+  int32_t *out;
+  size_t face_count;
+  size_t i;
+
+  (void)self;
+
+  if (!PyArg_ParseTuple(args, "Kn", &address, &face_count_py))
+    return NULL;
+  if (address == 0 || face_count_py < 0) {
+    PyErr_SetString(PyExc_ValueError, "address and face count must be non-negative");
+    return NULL;
+  }
+
+  face_count = (size_t)face_count_py;
+  if (face_count > (size_t)INT32_MAX / 3u) {
+    PyErr_SetString(PyExc_OverflowError, "triangle loop offsets exceed int32 range");
+    return NULL;
+  }
+
+  out = (int32_t *)(uintptr_t)address;
+  Py_BEGIN_ALLOW_THREADS
+  for (i = 0; i <= face_count; i++)
+    out[i] = (int32_t)(i * 3u);
+  Py_END_ALLOW_THREADS
+
+  return PyLong_FromSize_t((face_count + 1u) * sizeof(int32_t));
+}
+
+static PyObject *
+akb_fill_u8_ptr(PyObject *self, PyObject *args) {
+  unsigned long long address;
+  Py_ssize_t count_py;
+  size_t count;
+  int value;
+
+  (void)self;
+
+  if (!PyArg_ParseTuple(args, "Kin", &address, &value, &count_py))
+    return NULL;
+  if (address == 0 || count_py < 0) {
+    PyErr_SetString(PyExc_ValueError, "address and count must be non-negative");
+    return NULL;
+  }
+  if (value < 0 || value > 255) {
+    PyErr_SetString(PyExc_ValueError, "fill value must fit in uint8");
+    return NULL;
+  }
+
+  count = (size_t)count_py;
+  Py_BEGIN_ALLOW_THREADS
+  memset((void *)(uintptr_t)address, value, count);
+  Py_END_ALLOW_THREADS
+
+  return PyLong_FromSize_t(count);
+}
+
+static PyObject *
 akb_skin_group_assignments(PyObject *self, PyObject *args) {
   PyObject *joints_obj;
   PyObject *weights_obj;
@@ -11475,6 +11890,8 @@ static PyMethodDef akb_methods[] = {
   {"offset_i32", akb_offset_i32, METH_VARARGS, "Build an int32 buffer with a constant offset added to each element."},
   {"write_offset_i32", akb_write_offset_i32, METH_VARARGS, "Write an int32 buffer with a constant offset into a writable destination buffer."},
   {"fill_i32", akb_fill_i32, METH_VARARGS, "Fill a writable destination buffer with one int32 value."},
+  {"fill_triangle_loop_offsets_ptr", akb_fill_triangle_loop_offsets_ptr, METH_VARARGS, "Fill Blender Mesh face offsets for a triangle-only mesh from a raw int32 pointer."},
+  {"fill_u8_ptr", akb_fill_u8_ptr, METH_VARARGS, "Fill a raw uint8 pointer with one byte value."},
   {"skin_group_assignments", akb_skin_group_assignments, METH_VARARGS, "Build rigid skin vertex-group assignment buffers."},
   {NULL, NULL, 0, NULL}
 };

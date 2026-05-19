@@ -16,8 +16,10 @@ from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Matrix, Quaternion, Vector
 
 from .assetkit import (
+    AK_FILE_TYPE_WAVEFRONT,
     AK_FILE_TYPE_STL,
     AK_PRIMITIVE_LINES,
+    AK_PRIMITIVE_POLYGONS,
     AK_PRIMITIVE_POINTS,
     AK_PRIMITIVE_TRIANGLES,
     AssetKit,
@@ -32,6 +34,8 @@ from .assetkit import (
     native_animation_coords,
     native_load_meshes,
     native_fill_i32,
+    native_fill_triangle_loop_offsets_ptr,
+    native_fill_u8_ptr,
     native_offset_i32,
     native_open_scene_stream,
     native_skin_group_assignments,
@@ -666,6 +670,39 @@ def _effective_shading_mode(data: MeshPrimitiveData, shading_mode: str) -> str:
     return mode
 
 
+def _uses_wavefront_smoothing(data: MeshPrimitiveData) -> bool:
+    return (
+        int(getattr(data, "file_type", 0) or 0) == AK_FILE_TYPE_WAVEFRONT
+        and int(getattr(data, "primitive_type", 0) or 0) in (AK_PRIMITIVE_TRIANGLES, AK_PRIMITIVE_POLYGONS)
+    )
+
+
+def _group_wavefront_sharp_faces(primitives: list[MeshPrimitiveData], face_count: int) -> bytearray | bytes:
+    if not primitives or face_count <= 0:
+        return b""
+    if not all(_uses_wavefront_smoothing(primitive) for primitive in primitives):
+        return b""
+    if any(primitive.normals_f32 or primitive.vertex_normals_f32 for primitive in primitives):
+        return b""
+
+    smooth_seen = any(bool(getattr(primitive, "smooth_shading", False)) for primitive in primitives)
+    flat_seen = any(not bool(getattr(primitive, "smooth_shading", False)) for primitive in primitives)
+    if not (smooth_seen and flat_seen):
+        return b""
+
+    sharp_faces = bytearray(face_count)
+    face_offset = 0
+    for primitive in primitives:
+        count = int(primitive.face_count)
+        if count <= 0:
+            continue
+        sharp_faces[face_offset: face_offset + count] = (
+            b"\x00" if bool(getattr(primitive, "smooth_shading", False)) else b"\x01"
+        ) * count
+        face_offset += count
+    return sharp_faces
+
+
 def _scene_info_from_loaded(loaded: object | None) -> dict:
     if not loaded:
         return {}
@@ -1106,6 +1143,7 @@ def _create_grouped_mesh_object(
     color_sets = _group_loop_float_attrs(primitives, "color_sets")
     has_materials = any(_has_material_data(primitive) for primitive in primitives)
     material_indices = bytearray(total_face_count * 4) if has_materials else b""
+    sharp_faces = _group_wavefront_sharp_faces(primitives, total_face_count)
     attr_ms = (time.perf_counter() - attr_started_at) * 1000.0 if profile_detail else 0.0
 
     assemble_started_at = time.perf_counter() if profile_detail else 0.0
@@ -1200,6 +1238,7 @@ def _create_grouped_mesh_object(
         skin_joints_u16=skin_joints or b"",
         skin_weights_f32=skin_weights or b"",
         skin_vertex_count=total_vertex_count if first.has_skin else 0,
+        sharp_faces_u8=sharp_faces,
     )
     replace_ms = (time.perf_counter() - replace_started_at) * 1000.0 if profile_detail else 0.0
 
@@ -1324,9 +1363,9 @@ def _create_grouped_mesh_object_bulk(
 
     _set_mesh_positions(mesh, vertices)
     _set_mesh_loop_vertex_indices(mesh, indices)
-    mesh.polygons.foreach_set("loop_start", loop_starts)
+    _set_mesh_loop_starts(mesh, loop_starts, int(data.loop_count), int(data.face_count))
     if loop_totals is not None and int(data.loop_count) != int(data.face_count) * 3:
-        mesh.polygons.foreach_set("loop_total", loop_totals)
+        mesh.polygons.foreach_set("loop_total", _rna_i32_values(loop_totals))
     _set_mesh_material_indices(mesh, material_indices)
     if profile_detail:
         now = time.perf_counter()
@@ -1374,6 +1413,8 @@ def _create_grouped_mesh_object_bulk(
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
     if str(shading_mode or "AUTO").upper() == "FLAT":
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
+    elif _apply_wavefront_smoothing(mesh, data, shading_mode, normals, vertex_normals):
+        shading_done = True
     elif shading_mode != "SMOOTH" and not normals and vertex_normals is None:
         shading_done = True
     else:
@@ -1496,7 +1537,7 @@ def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiv
 
 
 def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
-    if int(primitive.primitive_type) != AK_PRIMITIVE_TRIANGLES:
+    if int(primitive.primitive_type) not in (AK_PRIMITIVE_TRIANGLES, AK_PRIMITIVE_POLYGONS):
         return None
     if not primitive.mesh_key or not primitive.vertices_f32 or not primitive.indices_u32:
         return None
@@ -1511,9 +1552,11 @@ def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
 
     uv_sig = _loop_attr_signature(primitive.uv_sets)
     color_sig = _loop_attr_signature(primitive.color_sets)
+    mesh_key = 0 if int(getattr(primitive, "file_type", 0) or 0) == AK_FILE_TYPE_WAVEFRONT else int(primitive.mesh_key)
+
     return (
         int(primitive.node_index),
-        int(primitive.mesh_key),
+        mesh_key,
         int(primitive.primitive_mode),
         bool(primitive.has_skin),
         int(primitive.skin_root_node_index),
@@ -1562,6 +1605,7 @@ def _mesh_data_reuse_key(primitive: MeshPrimitiveData, shading_mode: str) -> tup
         bool(primitive.normals_f32),
         bool(primitive.vertex_normals_f32),
         bool(primitive.tangents_f32),
+        bool(primitive.smooth_shading) if _uses_wavefront_smoothing(primitive) else False,
         _loop_attr_signature(primitive.uv_sets),
         _loop_attr_signature(primitive.color_sets),
         str(shading_mode or "AUTO").upper(),
@@ -2636,7 +2680,9 @@ def _create_mesh_object(
             uv_layer.data[loop_index].uv = (uv[0], 1.0 - uv[1])
 
     normals = data.normals[: len(mesh.loops)] if data.normals else None
-    if not (defer_custom_normals and _queue_deferred_custom_normals(mesh, normals, None, data)):
+    if _apply_wavefront_smoothing(mesh, data, effective_shading, normals, None):
+        pass
+    elif not (defer_custom_normals and _queue_deferred_custom_normals(mesh, normals, None, data)):
         _apply_shading(mesh, effective_shading, normals)
     return _finish_mesh_object(
         mesh,
@@ -2752,9 +2798,9 @@ def _create_mesh_object_bulk(
     _set_mesh_loop_vertex_indices(mesh, indices)
     if edges is not None:
         _set_mesh_edges(mesh, edges)
-    mesh.polygons.foreach_set("loop_start", loop_starts)
+    _set_mesh_loop_starts(mesh, loop_starts, int(data.loop_count), int(data.face_count))
     if loop_totals is not None and int(data.loop_count) != int(data.face_count) * 3:
-        mesh.polygons.foreach_set("loop_total", loop_totals)
+        mesh.polygons.foreach_set("loop_total", _rna_i32_values(loop_totals))
     _apply_point_attributes(mesh, data)
     lap_detail("topology")
 
@@ -2801,6 +2847,8 @@ def _create_mesh_object_bulk(
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
     if str(shading_mode or "AUTO").upper() == "FLAT":
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
+    elif _apply_wavefront_smoothing(mesh, data, shading_mode, normals, vertex_normals):
+        shading_done = True
     elif shading_mode != "SMOOTH" and not normals and vertex_normals is None:
         shading_done = True
     else:
@@ -3285,6 +3333,65 @@ def _set_mesh_edges(mesh: bpy.types.Mesh, indices: memoryview) -> None:
     mesh.edges.foreach_set("vertices", indices)
 
 
+def _set_mesh_loop_starts(
+    mesh: bpy.types.Mesh,
+    loop_starts: object,
+    loop_count: int,
+    face_count: int,
+) -> None:
+    if loop_count == face_count * 3 and _set_triangle_mesh_loop_starts(mesh, face_count):
+        return
+    mesh.polygons.foreach_set("loop_start", _rna_i32_values(loop_starts))
+
+
+def _set_triangle_mesh_loop_starts(mesh: bpy.types.Mesh, face_count: int) -> bool:
+    if face_count <= 0:
+        return False
+    try:
+        address = int(mesh.polygons[0].as_pointer())
+    except Exception:
+        return False
+    if not address:
+        return False
+    if face_count > 1:
+        try:
+            if int(mesh.polygons[1].as_pointer()) - address != 4:
+                return False
+        except Exception:
+            return False
+    if native_fill_triangle_loop_offsets_ptr(address, face_count) is None:
+        return False
+    try:
+        return (
+            mesh.polygons[0].loop_start == 0
+            and mesh.polygons[0].loop_total == 3
+            and mesh.polygons[face_count - 1].loop_start == (face_count - 1) * 3
+            and mesh.polygons[face_count - 1].loop_total == 3
+        )
+    except Exception:
+        return False
+
+
+def _rna_i32_values(values: object) -> object:
+    if isinstance(values, array):
+        return values
+    if not isinstance(values, memoryview):
+        view = _buffer_view(values, "i")
+        if view is None:
+            return values
+        values = view
+    if (
+        isinstance(values, memoryview)
+        and values.ndim == 1
+        and values.format == "i"
+        and len(values) > _TRI_LOOP_START_CACHE_LIMIT
+    ):
+        array_values = array("i")
+        array_values.frombytes(values.cast("B"))
+        return array_values
+    return values
+
+
 def _set_uv_layer_values(uv_layer: bpy.types.MeshUVLoopLayer, values: memoryview) -> None:
     uv_attr = getattr(uv_layer, "uv", None)
     if uv_attr is not None:
@@ -3299,7 +3406,7 @@ def _set_uv_layer_values(uv_layer: bpy.types.MeshUVLoopLayer, values: memoryview
 def _set_mesh_material_indices(mesh: bpy.types.Mesh, material_indices: object) -> None:
     if not material_indices:
         return
-    values = _buffer_view(material_indices, "i") or material_indices
+    values = _rna_i32_values(material_indices)
     attr = _mesh_attribute_ensure(mesh, "material_index", "INT", "FACE")
     if attr is not None:
         try:
@@ -3402,15 +3509,71 @@ def _apply_shading(
         return False
 
 
+def _apply_wavefront_smoothing(
+    mesh: bpy.types.Mesh,
+    data: MeshPrimitiveData,
+    mode: str,
+    normals: object | None,
+    vertex_normals: object | None,
+) -> bool:
+    if str(mode or "AUTO").upper() != "AUTO":
+        return False
+    if normals or vertex_normals is not None or not _uses_wavefront_smoothing(data):
+        return False
+
+    if data.sharp_faces_u8:
+        return _set_mesh_sharp_faces(mesh, data.sharp_faces_u8)
+    if bool(getattr(data, "smooth_shading", False)):
+        _set_mesh_smooth(mesh, True)
+    return True
+
+
+def _set_mesh_sharp_faces(mesh: bpy.types.Mesh, sharp_faces: object) -> bool:
+    if not mesh.polygons:
+        return True
+
+    count = len(mesh.polygons)
+    values = _buffer_view(sharp_faces, "B")
+    if values is None or len(values) < count:
+        return False
+    values = values[:count]
+
+    attr = _mesh_attribute_ensure(mesh, "sharp_face", "BOOLEAN", "FACE")
+    if attr is not None:
+        try:
+            attr.data.foreach_set("value", values)
+            return True
+        except Exception:
+            try:
+                copied = array("b")
+                copied.frombytes(values.cast("B"))
+                attr.data.foreach_set("value", copied)
+                return True
+            except Exception:
+                pass
+
+    try:
+        mesh.polygons.foreach_set("use_smooth", array("b", (0 if value else 1 for value in values)))
+    except Exception:
+        for index, poly in enumerate(mesh.polygons):
+            poly.use_smooth = not bool(values[index])
+    return True
+
+
 def _set_mesh_smooth(mesh: bpy.types.Mesh, smooth: bool) -> None:
     if not mesh.polygons:
         return
 
     count = len(mesh.polygons)
+    if smooth and _mesh_already_smooth_by_default(mesh):
+        return
+
     sharp = 0 if smooth else 1
-    values = _bool_array(sharp, count)
     attr = _mesh_attribute_ensure(mesh, "sharp_face", "BOOLEAN", "FACE")
     if attr is not None:
+        if _fill_bool_attribute_fast(attr, bool(sharp), count):
+            return
+        values = _bool_array(sharp, count)
         try:
             attr.data.foreach_set("value", values)
             return
@@ -3423,6 +3586,29 @@ def _set_mesh_smooth(mesh: bpy.types.Mesh, smooth: bool) -> None:
     except Exception:
         for poly in mesh.polygons:
             poly.use_smooth = smooth
+
+
+def _mesh_already_smooth_by_default(mesh: bpy.types.Mesh) -> bool:
+    try:
+        if mesh.attributes.get("sharp_face") is not None:
+            return False
+        return bool(mesh.polygons[0].use_smooth)
+    except Exception:
+        return False
+
+
+def _fill_bool_attribute_fast(attr: object, value: bool, count: int) -> bool:
+    if count <= 0:
+        return True
+    try:
+        address = int(attr.data[0].as_pointer())
+        if count > 1 and int(attr.data[1].as_pointer()) - address != 1:
+            return False
+        if native_fill_u8_ptr(address, 1 if value else 0, count) is None:
+            return False
+        return bool(attr.data[0].value) == value and bool(attr.data[count - 1].value) == value
+    except Exception:
+        return False
 
 
 def _bool_array(value: int, count: int) -> array:
