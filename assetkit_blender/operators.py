@@ -58,10 +58,15 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         description="Ask AssetKit to generate missing normals before Blender creates the mesh",
         default=False,
     )
-    stl_position_dedup: bpy.props.BoolProperty(
-        name="Deduplicate STL Vertices",
-        description="Reduce STL vertex memory by sharing identical positions; import can be slower on large triangle soups",
-        default=False,
+    stl_position_dedup: bpy.props.EnumProperty(
+        name="STL Vertex Dedup",
+        description="Reduce STL vertex memory by sharing exact positions",
+        items=(
+            ("AUTO", "Auto", "Deduplicate exact STL positions for Auto and Flat shading"),
+            ("OFF", "Off", "Keep STL triangle-soup vertices as authored"),
+            ("ON", "On", "Always deduplicate exact STL positions"),
+        ),
+        default="AUTO",
     )
     mesh_shading: bpy.props.EnumProperty(
         name="Shading",

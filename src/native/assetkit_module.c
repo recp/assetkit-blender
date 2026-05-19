@@ -916,6 +916,29 @@ akb_conversion_from_name(const char *name) {
   return AKB_COORD_TRANSFORM;
 }
 
+static uint8_t
+akb_stl_position_dedup_from_py(PyObject *value) {
+  const char *mode;
+
+  if (!value || value == Py_None)
+    return 0;
+
+  if (PyUnicode_Check(value)) {
+    mode = PyUnicode_AsUTF8(value);
+    if (!mode)
+      return 0;
+    if (strcmp(mode, "ON") == 0
+        || strcmp(mode, "TRUE") == 0
+        || strcmp(mode, "YES") == 0
+        || strcmp(mode, "1") == 0
+        || strcmp(mode, "AUTO") == 0)
+      return 1;
+    return 0;
+  }
+
+  return PyObject_IsTrue(value) ? 1 : 0;
+}
+
 static void
 akb_load_options_default(AkbLoadOptions *options) {
   memset(options, 0, sizeof(*options));
@@ -996,7 +1019,7 @@ akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
 
   value = PyDict_GetItemString(dict, "stl_position_dedup");
   if (value)
-    options->stl_position_dedup = PyObject_IsTrue(value) ? 1 : 0;
+    options->stl_position_dedup = akb_stl_position_dedup_from_py(value);
 
   return !PyErr_Occurred();
 }

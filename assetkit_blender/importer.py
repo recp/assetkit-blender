@@ -281,6 +281,7 @@ def import_assetkit_file(
 ) -> list[bpy.types.Object]:
     _reset_action_cache()
     _reset_material_profile()
+    load_options = _load_options_for_shading(load_options, shading_mode)
     existing_actions = _snapshot_actions(fit_timeline)
     texture_load_mode = _texture_load_mode(load_options)
     profile_detail = _PROFILE_MATERIAL_STATS is not None
@@ -377,6 +378,7 @@ def import_assetkit_file_progressive(
 ) -> "_ProgressiveImportJob":
     _reset_action_cache()
     _reset_material_profile()
+    load_options = _load_options_for_shading(load_options, shading_mode)
     job = _ProgressiveImportJob(
         filepath,
         library_path,
@@ -416,6 +418,7 @@ def import_assetkit_file_auto(
 ) -> list[bpy.types.Object] | "_ProgressiveImportJob":
     _reset_action_cache()
     _reset_material_profile()
+    load_options = _load_options_for_shading(load_options, shading_mode)
     active_collection = collection or bpy.context.collection
     job = _ProgressiveImportJob(
         filepath,
@@ -642,6 +645,34 @@ def _texture_load_mode(load_options: dict | None) -> str:
     if mode == "DEFERRED":
         return "DEFERRED"
     return "IMMEDIATE"
+
+
+def _option_mode(value: object, default: str = "AUTO") -> str:
+    if isinstance(value, bool):
+        return "ON" if value else "OFF"
+    mode = str(value or default).upper()
+    if mode in {"1", "TRUE", "YES"}:
+        return "ON"
+    if mode in {"0", "FALSE", "NO"}:
+        return "OFF"
+    return mode
+
+
+def _stl_position_dedup_enabled(load_options: dict | None, shading_mode: str) -> bool:
+    mode = _option_mode((load_options or {}).get("stl_position_dedup"), "AUTO")
+    if mode in {"ON", "TRUE", "YES"}:
+        return True
+    if mode in {"OFF", "FALSE", "NO"}:
+        return False
+
+    shading = str(shading_mode or "AUTO").upper()
+    return shading in {"AUTO", "FLAT"}
+
+
+def _load_options_for_shading(load_options: dict | None, shading_mode: str) -> dict:
+    normalized = dict(load_options or {})
+    normalized["stl_position_dedup"] = _stl_position_dedup_enabled(load_options, shading_mode)
+    return normalized
 
 
 def _defer_custom_normals(load_options: dict | None, shading_mode: str) -> bool:
