@@ -521,7 +521,6 @@ typedef struct AkbLoadOptions {
   uint8_t     build_triangle_edges;
   uint8_t     geometry_keys;
   uint8_t     geometry_content_keys;
-  uint8_t     stl_position_dedup;
 } AkbLoadOptions;
 
 typedef struct AkbSavedOptions {
@@ -936,28 +935,6 @@ akb_conversion_from_name(const char *name) {
   return AKB_COORD_TRANSFORM;
 }
 
-static uint8_t
-akb_stl_position_dedup_from_py(PyObject *value) {
-  const char *mode;
-
-  if (!value || value == Py_None)
-    return 0;
-
-  if (PyUnicode_Check(value)) {
-    mode = PyUnicode_AsUTF8(value);
-    if (!mode)
-      return 0;
-    if (strcmp(mode, "ON") == 0
-        || strcmp(mode, "TRUE") == 0
-        || strcmp(mode, "YES") == 0
-        || strcmp(mode, "1") == 0)
-      return 1;
-    return 0;
-  }
-
-  return PyObject_IsTrue(value) ? 1 : 0;
-}
-
 static void
 akb_load_options_default(AkbLoadOptions *options) {
   memset(options, 0, sizeof(*options));
@@ -1035,10 +1012,6 @@ akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
   value = PyDict_GetItemString(dict, "use_mmap");
   if (value)
     options->use_mmap = PyObject_IsTrue(value) ? 1 : 0;
-
-  value = PyDict_GetItemString(dict, "stl_position_dedup");
-  if (value)
-    options->stl_position_dedup = akb_stl_position_dedup_from_py(value);
 
   return !PyErr_Occurred();
 }
@@ -1866,281 +1839,6 @@ akb_build_triangle_edges(AkbArena *arena, AkbPrimitive *prim) {
   }
 
   prim->edge_count = (uint32_t)out_index;
-}
-
-typedef struct AkbPositionDedup {
-  float    *vertices;
-  uint32_t *indices;
-  uint32_t *table;
-  size_t    table_cap;
-  uint32_t  count;
-} AkbPositionDedup;
-
-static uint64_t
-akb_position_hash3(const float *pos);
-
-static int
-akb_position_dedup_hash_cap(size_t count, size_t *cap_out) {
-  size_t cap;
-  size_t target;
-
-  if (!cap_out || count >= UINT32_MAX || count > SIZE_MAX / 3u)
-    return 0;
-
-  target = count < 8 ? 16 : count + count / 2u + 1u;
-  cap = 16;
-  while (cap < target) {
-    if (cap > SIZE_MAX / 2u)
-      return 0;
-    cap *= 2u;
-  }
-
-  *cap_out = cap;
-  return 1;
-}
-
-static void
-akb_position_dedup_free(AkbPositionDedup *dedup) {
-  if (!dedup)
-    return;
-
-  free(dedup->vertices);
-  free(dedup->indices);
-  free(dedup->table);
-  memset(dedup, 0, sizeof(*dedup));
-}
-
-static int
-akb_position_dedup_init(AkbPositionDedup *dedup,
-                        size_t max_count,
-                        int with_indices) {
-  size_t table_cap;
-
-  if (!dedup || max_count == 0 || max_count >= UINT32_MAX)
-    return 0;
-  if (!akb_position_dedup_hash_cap(max_count, &table_cap))
-    return 0;
-  if (max_count > SIZE_MAX / (sizeof(float) * 3u))
-    return 0;
-
-  memset(dedup, 0, sizeof(*dedup));
-  dedup->vertices = (float *)malloc(max_count * sizeof(float) * 3u);
-  dedup->indices = with_indices
-                   ? (uint32_t *)malloc(max_count * sizeof(*dedup->indices))
-                   : NULL;
-  dedup->table = (uint32_t *)calloc(table_cap, sizeof(*dedup->table));
-  dedup->table_cap = table_cap;
-
-  if (!dedup->vertices
-      || (with_indices && !dedup->indices)
-      || !dedup->table) {
-    akb_position_dedup_free(dedup);
-    return 0;
-  }
-
-  return 1;
-}
-
-static uint64_t
-akb_position_hash3(const float *pos) {
-  uint32_t bits[3];
-  uint64_t hash;
-
-  memcpy(bits, pos, sizeof(bits));
-  hash = UINT64_C(1469598103934665603);
-  hash ^= bits[0];
-  hash *= UINT64_C(1099511628211);
-  hash ^= bits[1];
-  hash *= UINT64_C(1099511628211);
-  hash ^= bits[2];
-  hash *= UINT64_C(1099511628211);
-
-  return hash;
-}
-
-static int
-akb_position_dedup_intern(AkbPositionDedup *dedup,
-                          const float *pos,
-                          uint32_t *index_out) {
-  size_t mask;
-  size_t slot;
-  uint64_t hash;
-
-  if (!dedup || !pos || !index_out || dedup->count >= UINT32_MAX)
-    return 0;
-
-  hash = akb_position_hash3(pos);
-  mask = dedup->table_cap - 1u;
-  slot = (size_t)hash & mask;
-  for (;;) {
-    uint32_t packed;
-    uint32_t index;
-
-    packed = dedup->table[slot];
-    if (packed == 0) {
-      index = dedup->count++;
-      memcpy(dedup->vertices + (size_t)index * 3u,
-             pos,
-             sizeof(float) * 3u);
-      dedup->table[slot] = index + 1u;
-      *index_out = index;
-      return 1;
-    }
-
-    index = packed - 1u;
-    if (memcmp(dedup->vertices + (size_t)index * 3u,
-               pos,
-               sizeof(float) * 3u) == 0) {
-      *index_out = index;
-      return 1;
-    }
-
-    slot = (slot + 1u) & mask;
-  }
-}
-
-static int
-akb_stl_position_dedup_sample_useful(const AkbPrimitive *prim) {
-  AkbPositionDedup sample;
-  size_t sample_count;
-  size_t i;
-  uint32_t unused;
-  int useful;
-
-  if (!prim
-      || !prim->vertices
-      || !prim->indices
-      || !prim->loop_count
-      || !prim->vertex_count)
-    return 0;
-
-  sample_count = prim->loop_count < 65536u ? prim->loop_count : 65536u;
-  if (!akb_position_dedup_init(&sample, sample_count, 0))
-    return 0;
-
-  useful = 1;
-  for (i = 0; i < sample_count; i++) {
-    uint32_t old_index;
-
-    old_index = prim->indices[i];
-    if (old_index >= prim->vertex_count
-        || !akb_position_dedup_intern(&sample,
-                                      prim->vertices + (size_t)old_index * 3u,
-                                      &unused)) {
-      useful = 0;
-      break;
-    }
-  }
-
-  if (useful
-      && (uint64_t)sample.count * 100ull > (uint64_t)sample_count * 95ull)
-    useful = 0;
-
-  akb_position_dedup_free(&sample);
-  return useful;
-}
-
-static void
-akb_release_primitive_vertices(AkbPrimitive *prim) {
-  if (!prim)
-    return;
-  if (!prim->borrowed_vertices && !prim->arena_vertices)
-    free(prim->vertices);
-  prim->vertices = NULL;
-  prim->borrowed_vertices = 0;
-  prim->arena_vertices = 0;
-  prim->zero_copy_flags &= (uint8_t)~1u;
-}
-
-static void
-akb_release_primitive_indices(AkbPrimitive *prim) {
-  if (!prim)
-    return;
-  if (!prim->borrowed_indices && !prim->arena_indices)
-    free(prim->indices);
-  prim->indices = NULL;
-  prim->borrowed_indices = 0;
-  prim->arena_indices = 0;
-  prim->zero_copy_flags &= (uint8_t)~2u;
-}
-
-static void
-akb_drop_primitive_vertex_normals(AkbPrimitive *prim) {
-  if (!prim)
-    return;
-  if (!prim->borrowed_vertex_normals)
-    free(prim->vertex_normals);
-  prim->vertex_normals = NULL;
-  prim->borrowed_vertex_normals = 0;
-  prim->has_vertex_normals = 0;
-  prim->zero_copy_flags &= (uint8_t)~4u;
-}
-
-static void
-akb_dedup_stl_positions(AkbPrimitive *prim) {
-  AkbPositionDedup dedup;
-  float *compact_vertices;
-  size_t i;
-
-  if (!prim
-      || prim->file_type != AK_FILE_TYPE_STL
-      || prim->primitive_type != AKB_PRIMITIVE_TRIANGLES
-      || prim->point_attr_count
-      || prim->morph_target_count
-      || prim->morph_preset_count
-      || prim->has_skin
-      || prim->has_gsplat
-      || !prim->vertices
-      || !prim->indices
-      || prim->loop_count < 6u
-      || prim->vertex_count < 4u
-      || !akb_stl_position_dedup_sample_useful(prim))
-    return;
-
-  if (!akb_position_dedup_init(&dedup, prim->loop_count, 1))
-    return;
-
-  for (i = 0; i < prim->loop_count; i++) {
-    uint32_t old_index;
-    uint32_t new_index;
-
-    old_index = prim->indices[i];
-    if (old_index >= prim->vertex_count
-        || !akb_position_dedup_intern(&dedup,
-                                      prim->vertices + (size_t)old_index * 3u,
-                                      &new_index)) {
-      akb_position_dedup_free(&dedup);
-      return;
-    }
-    dedup.indices[i] = new_index;
-  }
-
-  if ((uint64_t)dedup.count * 100ull > (uint64_t)prim->vertex_count * 95ull) {
-    akb_position_dedup_free(&dedup);
-    return;
-  }
-
-  compact_vertices = (float *)realloc(dedup.vertices,
-                                      (size_t)dedup.count
-                                      * 3u
-                                      * sizeof(*dedup.vertices));
-  if (compact_vertices)
-    dedup.vertices = compact_vertices;
-
-  akb_release_primitive_vertices(prim);
-  akb_release_primitive_indices(prim);
-  akb_drop_primitive_vertex_normals(prim);
-
-  prim->vertices = dedup.vertices;
-  prim->indices = dedup.indices;
-  prim->vertex_count = dedup.count;
-  prim->borrowed_vertices = 0;
-  prim->borrowed_indices = 0;
-  prim->arena_vertices = 0;
-  prim->arena_indices = 0;
-  dedup.vertices = NULL;
-  dedup.indices = NULL;
-  akb_position_dedup_free(&dedup);
 }
 
 static void
@@ -7533,29 +7231,25 @@ akb_extract_primitive(AkbArena *arena,
     }
 
     normal_input = input_scan.normal;
-    if (out.file_type != AK_FILE_TYPE_STL
-        || !options
-        || !options->stl_position_dedup) {
-      akb_try_extract_vertex_normals(&out,
-                                     normal_input,
-                                     pos_input,
-                                     doc_owner,
-                                     node);
-      if (!out.has_vertex_normals) {
-        arena_normals = 0;
-        out.normals = akb_loop_attribute_copy(arena,
-                                              prim,
-                                              normal_input,
-                                              attr_index_view,
-                                              out.indices,
-                                              out.loop_count,
-                                              3,
-                                              0,
-                                              &out.has_normals,
-                                              &arena_normals);
-        if (arena_normals)
-          out.borrowed_normals = 1;
-      }
+    akb_try_extract_vertex_normals(&out,
+                                   normal_input,
+                                   pos_input,
+                                   doc_owner,
+                                   node);
+    if (!out.has_vertex_normals) {
+      arena_normals = 0;
+      out.normals = akb_loop_attribute_copy(arena,
+                                            prim,
+                                            normal_input,
+                                            attr_index_view,
+                                            out.indices,
+                                            out.loop_count,
+                                            3,
+                                            0,
+                                            &out.has_normals,
+                                            &arena_normals);
+      if (arena_normals)
+        out.borrowed_normals = 1;
     }
 
     if (input_scan.uv_count == 1) {
@@ -7700,9 +7394,6 @@ akb_extract_primitive(AkbArena *arena,
       }
     }
   }
-
-  if (options && options->stl_position_dedup)
-    akb_dedup_stl_positions(&out);
 
   base_name = akb_name(mesh->name, akb_name(geom->name, "AssetKitMesh"));
   if (mesh->primitiveCount > 1)
