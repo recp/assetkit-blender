@@ -950,8 +950,7 @@ akb_stl_position_dedup_from_py(PyObject *value) {
     if (strcmp(mode, "ON") == 0
         || strcmp(mode, "TRUE") == 0
         || strcmp(mode, "YES") == 0
-        || strcmp(mode, "1") == 0
-        || strcmp(mode, "AUTO") == 0)
+        || strcmp(mode, "1") == 0)
       return 1;
     return 0;
   }

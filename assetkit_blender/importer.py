@@ -659,7 +659,7 @@ def _option_mode(value: object, default: str = "AUTO") -> str:
 
 
 def _stl_position_dedup_enabled(load_options: dict | None, shading_mode: str) -> bool:
-    mode = _option_mode((load_options or {}).get("stl_position_dedup"), "AUTO")
+    mode = _option_mode((load_options or {}).get("stl_position_dedup"), "OFF")
     if mode in {"ON", "TRUE", "YES"}:
         return True
     if mode in {"OFF", "FALSE", "NO"}:

@@ -64,9 +64,9 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         items=(
             ("AUTO", "Auto", "Deduplicate exact STL positions for Auto and Flat shading"),
             ("OFF", "Off", "Keep STL triangle-soup vertices as authored"),
-            ("ON", "On", "Always deduplicate exact STL positions"),
+            ("ON", "On", "Deduplicate exact STL positions for lower memory use"),
         ),
-        default="AUTO",
+        default="OFF",
     )
     mesh_shading: bpy.props.EnumProperty(
         name="Shading",
