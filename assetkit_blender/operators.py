@@ -14,7 +14,7 @@ from .importer import import_assetkit_file, import_assetkit_file_auto, import_as
 
 _DEFERRED_BLOCKING_DELAY = 0.016
 _DEFERRED_ASYNC_DELAY = 0.016
-_DEFERRED_FAST_BLOCKING_DELAY = 0.0
+_DEFERRED_FAST_BLOCKING_DELAY = 0.001
 
 
 class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
