@@ -15,6 +15,8 @@ from .importer import import_assetkit_file, import_assetkit_file_auto, import_as
 _DEFERRED_BLOCKING_DELAY = 0.016
 _DEFERRED_ASYNC_DELAY = 0.016
 _DEFERRED_FAST_BLOCKING_DELAY = 0.001
+_FAST_BLOCKING_EXTENSIONS = {".obj", ".ply", ".stl"}
+_FAST_BLOCKING_MAX_BYTES = 8 * 1024 * 1024
 
 
 class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
@@ -459,7 +461,12 @@ def _should_defer_async_import(context) -> bool:
 
 
 def _auto_should_import_blocking(filepath: str) -> bool:
-    return os.path.splitext(filepath or "")[1].lower() in {".obj", ".ply", ".stl"}
+    if os.path.splitext(filepath or "")[1].lower() not in _FAST_BLOCKING_EXTENSIONS:
+        return False
+    try:
+        return os.path.getsize(filepath) <= _FAST_BLOCKING_MAX_BYTES
+    except OSError:
+        return True
 
 
 def _schedule_auto_import(
