@@ -3631,12 +3631,15 @@ akb_accessor_float_borrow(AkAccessor *acc, uint32_t width, uint32_t *count_out) 
 }
 
 static float *
-akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
+akb_accessor_float_copy_with_default(AkAccessor *acc,
+                                     uint32_t width,
+                                     float missing_default,
+                                     uint32_t *count_out) {
   float *out;
   float *tmp;
   size_t total;
   size_t written;
-  uint32_t comp_count, i, j;
+  uint32_t comp_count, copy_count, i, j;
 
   *count_out = 0;
   if (!acc || acc->count == 0)
@@ -3644,9 +3647,41 @@ akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
 
   comp_count = acc->componentCount ? acc->componentCount : width;
   total = (size_t)acc->count * width;
-  out = (float *)calloc(total, sizeof(float));
+  out = (float *)malloc(total * sizeof(float));
   if (!out)
     return NULL;
+
+  if (acc->buffer
+      && acc->buffer->data
+      && acc->componentType == AKT_FLOAT
+      && !acc->normalized
+      && acc->bytesPerComponent == sizeof(float)
+      && acc->fillByteSize >= (size_t)comp_count * sizeof(float)) {
+    size_t stride;
+    size_t copy_bytes;
+    char *src;
+
+    copy_count = comp_count < width ? comp_count : width;
+    copy_bytes = (size_t)copy_count * sizeof(float);
+    stride = acc->byteStride ? acc->byteStride : acc->fillByteSize;
+    if (copy_bytes > 0
+        && stride >= (size_t)comp_count * sizeof(float)
+        && acc->byteOffset + (size_t)(acc->count - 1) * stride + copy_bytes
+           <= acc->buffer->length) {
+      src = (char *)acc->buffer->data + acc->byteOffset;
+      if (copy_count == width && stride == copy_bytes) {
+        memcpy(out, src, total * sizeof(float));
+      } else {
+        for (i = 0; i < acc->count; i++) {
+          memcpy(out + (size_t)i * width, src + (size_t)i * stride, copy_bytes);
+          for (j = copy_count; j < width; j++)
+            out[(size_t)i * width + j] = missing_default;
+        }
+      }
+      *count_out = acc->count;
+      return out;
+    }
+  }
 
   if (comp_count == width) {
     written = ak_accessorAsFloat(acc, out, total);
@@ -3658,7 +3693,7 @@ akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
     return out;
   }
 
-  tmp = (float *)calloc((size_t)acc->count * comp_count, sizeof(float));
+  tmp = (float *)malloc((size_t)acc->count * comp_count * sizeof(float));
   if (!tmp) {
     free(out);
     return NULL;
@@ -3671,16 +3706,23 @@ akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
     return NULL;
   }
 
+  copy_count = comp_count < width ? comp_count : width;
   for (i = 0; i < acc->count; i++) {
-    for (j = 0; j < width; j++) {
-      if (j < comp_count)
-        out[(size_t)i * width + j] = tmp[(size_t)i * comp_count + j];
-    }
+    memcpy(out + (size_t)i * width,
+           tmp + (size_t)i * comp_count,
+           (size_t)copy_count * sizeof(float));
+    for (j = copy_count; j < width; j++)
+      out[(size_t)i * width + j] = missing_default;
   }
 
   free(tmp);
   *count_out = acc->count;
   return out;
+}
+
+static float *
+akb_accessor_float_copy(AkAccessor *acc, uint32_t width, uint32_t *count_out) {
+  return akb_accessor_float_copy_with_default(acc, width, 0.0f, count_out);
 }
 
 static float *
@@ -4502,8 +4544,10 @@ akb_extract_point_float_attrs(AkbPrimitive *out,
   AkbLoopFloatAttribute *attrs;
   AkInput *input;
   float *values;
+  float missing_default;
   uint32_t max_count, count, value_count, width;
   uint8_t borrowed;
+  uint8_t is_color;
 
   if (!out || !prim || !out->vertex_count)
     return 1;
@@ -4531,11 +4575,17 @@ akb_extract_point_float_attrs(AkbPrimitive *out,
       continue;
 
     borrowed = 0;
+    is_color = input->semantic == AK_INPUT_COLOR
+               || akb_raw_semantic_starts_with(input, "COLOR");
+    missing_default = is_color ? 1.0f : 0.0f;
     values = akb_accessor_float_borrow(input->accessor, width, &value_count);
     if (values) {
       borrowed = 1;
     } else {
-      values = akb_accessor_float_copy(input->accessor, width, &value_count);
+      values = akb_accessor_float_copy_with_default(input->accessor,
+                                                    width,
+                                                    missing_default,
+                                                    &value_count);
       borrowed = 0;
     }
 
@@ -4548,14 +4598,12 @@ akb_extract_point_float_attrs(AkbPrimitive *out,
     attrs[count].values = values;
     attrs[count].width = width;
     attrs[count].borrowed = borrowed;
-    akb_fill_missing_components(attrs[count].values,
-                                out->vertex_count,
-                                width,
-                                input->accessor->componentCount,
-                                input->semantic == AK_INPUT_COLOR
-                                || akb_raw_semantic_starts_with(input, "COLOR")
-                                ? 1.0f
-                                : 0.0f);
+    if (borrowed)
+      akb_fill_missing_components(attrs[count].values,
+                                  out->vertex_count,
+                                  width,
+                                  input->accessor->componentCount,
+                                  missing_default);
     akb_point_attr_name(&attrs[count], input, count);
     if (borrowed)
       akb_primitive_retain_doc(out, doc_owner);
