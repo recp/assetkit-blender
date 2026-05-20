@@ -55,7 +55,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     triangulate: bpy.props.BoolProperty(
         name="Triangulate",
         description="Convert polygonal mesh primitives to triangles",
-        default=True,
+        default=False,
     )
     generate_normals: bpy.props.BoolProperty(
         name="Generate Normals",

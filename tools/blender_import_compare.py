@@ -51,13 +51,13 @@ NATIVE_OPTIONS = {
     "import_lines": True,
     "convert_line_loop": True,
     "convert_line_strip": True,
-    "triangulate": True,
+    "triangulate": False,
 }
 
 IMPORT_OPTIONS = {
     "coordinate_system": "Z_UP",
     "coordinate_conversion": "DEFAULT",
-    "triangulate": True,
+    "triangulate": False,
     "generate_normals": False,
     "texture_loading": "DEFERRED",
 }
@@ -156,8 +156,41 @@ def blender_stats() -> MeshStats:
     return stats
 
 
-def assetkit_native_stats(path: str) -> MeshStats:
-    result = native_load_meshes(path, NATIVE_OPTIONS)
+def i32_buffer_values(buffer: object) -> memoryview | None:
+    if not buffer:
+        return None
+    try:
+        view = memoryview(buffer)
+    except TypeError:
+        return None
+    if view.format == "i" and view.itemsize == 4:
+        return view
+    try:
+        if view.itemsize != 1:
+            view = view.cast("B")
+        return view.cast("i")
+    except (TypeError, ValueError):
+        return None
+
+
+def mesh_tri_loop_count(mesh: object, face_count: int, loop_count: int) -> int:
+    if face_count <= 0:
+        return 0
+    loop_totals = i32_buffer_values(getattr(mesh, "loop_totals_i32", b""))
+    if loop_totals is not None and len(loop_totals) >= face_count:
+        total = 0
+        for index in range(face_count):
+            loop_total = int(loop_totals[index])
+            if loop_total >= 3:
+                total += (loop_total - 2) * 3
+        return total
+    return loop_count
+
+
+def assetkit_native_stats(path: str, triangulate: bool = False) -> MeshStats:
+    options = dict(NATIVE_OPTIONS)
+    options["triangulate"] = bool(triangulate)
+    result = native_load_meshes(path, options)
     meshes = list(result.meshes if result else [])
     stats = MeshStats(meshes=len(meshes), objects=len(meshes))
     for mesh in meshes:
@@ -172,7 +205,7 @@ def assetkit_native_stats(path: str) -> MeshStats:
         stats.faces += face_count
         stats.loops += loop_count
         if face_count > 0:
-            stats.tri_loops += loop_count
+            stats.tri_loops += mesh_tri_loop_count(mesh, face_count, loop_count)
         elif primitive_type == AK_PRIMITIVE_LINES:
             stats.loose_edges += edge_count or loop_count // 2
         elif primitive_type == AK_PRIMITIVE_POINTS:
@@ -191,10 +224,12 @@ def import_blender_builtin(path: str, fmt: str) -> None:
         raise ValueError(f"Unsupported format {fmt!r}")
 
 
-def import_assetkit(path: str) -> None:
+def import_assetkit(path: str, triangulate: bool = False) -> None:
+    options = dict(IMPORT_OPTIONS)
+    options["triangulate"] = bool(triangulate)
     import_assetkit_file(
         path,
-        load_options=IMPORT_OPTIONS,
+        load_options=options,
         collection=bpy.context.collection,
         focus_mode="NEVER",
         placement_mode="AS_AUTHORED",
@@ -224,7 +259,7 @@ def equivalent(fmt: str, assetkit: MeshStats, blender: MeshStats) -> tuple[bool,
     return True, "ok"
 
 
-def run_semantic(paths: Iterable[str], fail_on_diff: bool, allow_known_diffs: bool) -> int:
+def run_semantic(paths: Iterable[str], fail_on_diff: bool, allow_known_diffs: bool, triangulate: bool) -> int:
     total = 0
     diff = 0
     known_diff = 0
@@ -234,7 +269,7 @@ def run_semantic(paths: Iterable[str], fail_on_diff: bool, allow_known_diffs: bo
         total += 1
         basename = os.path.basename(path)
         try:
-            assetkit = assetkit_native_stats(path)
+            assetkit = assetkit_native_stats(path, triangulate=triangulate)
             assetkit_error = ""
         except Exception as exc:  # noqa: BLE001 - diagnostic tool
             assetkit = MeshStats()
@@ -280,11 +315,11 @@ def run_semantic(paths: Iterable[str], fail_on_diff: bool, allow_known_diffs: bo
     return 1 if fail_on_diff and diff else 0
 
 
-def time_import(path: str, importer: str) -> tuple[float, MeshStats]:
+def time_import(path: str, importer: str, triangulate: bool) -> tuple[float, MeshStats]:
     purge_scene()
     started = time.perf_counter()
     if importer == "assetkit":
-        import_assetkit(path)
+        import_assetkit(path, triangulate=triangulate)
     else:
         import_blender_builtin(path, infer_format(path))
     elapsed = (time.perf_counter() - started) * 1000.0
@@ -293,13 +328,13 @@ def time_import(path: str, importer: str) -> tuple[float, MeshStats]:
     return elapsed, stats
 
 
-def run_bench(paths: Iterable[str], runs: int, warmup: int) -> None:
+def run_bench(paths: Iterable[str], runs: int, warmup: int, triangulate: bool) -> None:
     for path in paths:
         for importer in ("assetkit", "builtin"):
             samples: list[float] = []
             last_stats = MeshStats()
             for run_index in range(runs):
-                elapsed, last_stats = time_import(path, importer)
+                elapsed, last_stats = time_import(path, importer, triangulate=triangulate)
                 samples.append(elapsed)
                 print(
                     f"BENCH RUN importer={importer} file={os.path.basename(path)!r} "
@@ -325,6 +360,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bench", action="store_true", help="Run full Blender import benchmark")
     parser.add_argument("--runs", type=int, default=5, help="Benchmark samples per importer")
     parser.add_argument("--warmup", type=int, default=1, help="Samples to drop from benchmark summary")
+    parser.add_argument("--triangulate", action="store_true", help="Triangulate AssetKit imports before comparison")
     parser.add_argument("--fail-on-diff", action="store_true", help="Exit non-zero if semantic diffs are found")
     parser.add_argument(
         "--allow-known-diffs",
@@ -348,9 +384,9 @@ def main(argv: list[str]) -> int:
 
     status = 0
     if args.semantic:
-        status = max(status, run_semantic(paths, args.fail_on_diff, args.allow_known_diffs))
+        status = max(status, run_semantic(paths, args.fail_on_diff, args.allow_known_diffs, args.triangulate))
     if args.bench:
-        run_bench(paths, max(1, args.runs), max(0, args.warmup))
+        run_bench(paths, max(1, args.runs), max(0, args.warmup), args.triangulate)
     return status
 
 

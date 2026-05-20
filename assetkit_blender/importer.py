@@ -125,7 +125,7 @@ _DEFERRED_TEXTURE_WAITERS: dict[tuple[str, str], list[object]] = {}
 _DEFERRED_TEXTURE_KEYS: deque[tuple[str, str]] = deque()
 _DEFERRED_TEXTURE_TIMER_ACTIVE = False
 _DEFERRED_TEXTURE_TIME_BUDGET = 0.006
-_DEFERRED_MATERIAL_NODE_TASKS: deque[tuple[object, str, TextureRefData | None, tuple[float, float, float, float], float, float, bool]] = deque()
+_DEFERRED_MATERIAL_NODE_TASKS: deque[tuple[object, ...]] = deque()
 _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE = False
 _DEFERRED_MATERIAL_NODE_TIME_BUDGET = 0.006
 _DEFERRED_MATERIAL_SLOT_TASKS: deque["_DeferredMaterialSpec"] = deque()
@@ -241,6 +241,17 @@ class _DeferredMaterialSpec:
         "metallic",
         "roughness",
         "double_sided",
+        "legacy",
+        "normal_path",
+        "normal_tex_info",
+        "normal_scale",
+        "specular",
+        "has_specular_tint",
+        "specular_color",
+        "has_emission",
+        "emissive_color",
+        "emissive_strength",
+        "ior",
         "slots",
     )
 
@@ -255,6 +266,18 @@ class _DeferredMaterialSpec:
         metallic: float,
         roughness: float,
         double_sided: bool,
+        *,
+        legacy: bool = False,
+        normal_path: str = "",
+        normal_tex_info: TextureRefData | None = None,
+        normal_scale: float = 1.0,
+        specular: float = 0.5,
+        has_specular_tint: bool = False,
+        specular_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        has_emission: bool = False,
+        emissive_color: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        emissive_strength: float = 0.0,
+        ior: float = 1.5,
     ) -> None:
         self.name = name
         self.cache = cache
@@ -265,6 +288,17 @@ class _DeferredMaterialSpec:
         self.metallic = metallic
         self.roughness = roughness
         self.double_sided = double_sided
+        self.legacy = legacy
+        self.normal_path = normal_path
+        self.normal_tex_info = normal_tex_info
+        self.normal_scale = normal_scale
+        self.specular = specular
+        self.has_specular_tint = has_specular_tint
+        self.specular_color = specular_color
+        self.has_emission = has_emission
+        self.emissive_color = emissive_color
+        self.emissive_strength = emissive_strength
+        self.ior = ior
         self.slots: list[tuple[object, object | None, int, bool]] = []
 
 
@@ -3129,21 +3163,34 @@ def _try_defer_material_assignment(
     if _ACTIVE_TEXTURE_LOAD_MODE != "DEFERRED":
         return False
 
-    fast_key = _fast_simple_native_base_color_texture_key(data)
-    if fast_key is None:
-        fast_key = _fast_base_color_texture_visual_key(data, "")
-    if fast_key is not None:
+    legacy_deferred = False
+    if _has_material_data(data):
+        color_attr = _color_attribute_name(data)
+        base_color = _material_base_color(data)
+        if _can_use_legacy_texture_fast_material(data, color_attr):
+            legacy_deferred = True
+            cache_key = _material_cache_key(data)
+        else:
+            fast_key = _fast_simple_native_base_color_texture_key(data)
+            if fast_key is None:
+                fast_key = _fast_base_color_texture_visual_key(data, "")
+            if fast_key is not None:
+                cache_key = fast_key
+                color_attr = ""
+                base_color = data.base_color
+            elif _can_use_base_color_texture_fast_material(data, color_attr, base_color):
+                cache_key = _material_cache_key(data)
+            else:
+                return False
+    else:
+        fast_key = _fast_simple_native_base_color_texture_key(data)
+        if fast_key is None:
+            fast_key = _fast_base_color_texture_visual_key(data, "")
+        if fast_key is None:
+            return False
         cache_key = fast_key
         color_attr = ""
         base_color = data.base_color
-    else:
-        if not _has_material_data(data):
-            return False
-        color_attr = _color_attribute_name(data)
-        base_color = _material_base_color(data)
-        if not _can_use_base_color_texture_fast_material(data, color_attr, base_color):
-            return False
-        cache_key = _material_cache_key(data)
 
     cached = material_cache.get(cache_key) if material_cache is not None else None
     if isinstance(cached, _DeferredMaterialSpec):
@@ -3158,17 +3205,41 @@ def _try_defer_material_assignment(
         material_name = data.material_name or f"{data.name}_Material"
         if data.material_name and color_attr:
             material_name = f"{material_name}_{color_attr}"
-        spec = _DeferredMaterialSpec(
-            material_name,
-            material_cache,
-            cache_key,
-            data.base_color_texture,
-            _texture_info(data, "base_color"),
-            base_color,
-            float(data.metallic),
-            float(data.roughness),
-            _is_double_sided_material(data),
-        )
+        if legacy_deferred:
+            spec = _DeferredMaterialSpec(
+                material_name,
+                material_cache,
+                cache_key,
+                data.base_color_texture,
+                _texture_info(data, "base_color"),
+                base_color,
+                0.0,
+                _legacy_roughness(data.specular_strength),
+                _is_double_sided_material(data),
+                legacy=True,
+                normal_path=data.normal_texture,
+                normal_tex_info=_texture_info(data, "normal"),
+                normal_scale=float(data.normal_scale),
+                specular=_legacy_specular(data),
+                has_specular_tint=_has_specular(data),
+                specular_color=tuple(data.specular_color),
+                has_emission=_has_emission(data),
+                emissive_color=tuple(data.emissive_color),
+                emissive_strength=_emission_strength(data),
+                ior=_material_ior(data),
+            )
+        else:
+            spec = _DeferredMaterialSpec(
+                material_name,
+                material_cache,
+                cache_key,
+                data.base_color_texture,
+                _texture_info(data, "base_color"),
+                base_color,
+                float(data.metallic),
+                float(data.roughness),
+                _is_double_sided_material(data),
+            )
         if material_cache is not None:
             material_cache[cache_key] = spec
         _queue_deferred_material_slot(spec)
@@ -7050,6 +7121,26 @@ def _create_material(
                 )
             return mat
 
+    if _can_use_legacy_texture_fast_material(data, color_attr):
+        if _configure_legacy_texture_fast_material(mat, data, base_color):
+            nodes_ms = lap_ms()
+            if material_cache is not None:
+                material_cache[cache_key] = mat
+            if profile_detail:
+                _record_material_profile(
+                    cache_hit=False,
+                    cache_key_ms=cache_key_ms,
+                    new_ms=new_ms,
+                    simple_ms=0.0,
+                    nodes_ms=nodes_ms,
+                    props_ms=0.0,
+                    settings_ms=0.0,
+                    textures_ms=0.0,
+                    animation_ms=0.0,
+                    total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+                )
+            return mat
+
     if _can_use_base_color_texture_fast_material(data, color_attr, base_color):
         if _configure_base_color_texture_fast_material(mat, data, base_color):
             nodes_ms = lap_ms()
@@ -7463,6 +7554,71 @@ def _can_use_base_color_texture_fast_material(
     return float(data.volume_thickness) <= 0.0 and float(data.dispersion) == 0.0
 
 
+def _can_use_legacy_texture_fast_material(data: MeshPrimitiveData, color_attr: str) -> bool:
+    if color_attr:
+        return False
+    if not _is_legacy_lit_material(data):
+        return False
+    if data.material_anim_channels or data.material_extra or data.effect_extra or data.material_variants:
+        return False
+    if not data.base_color_texture and not data.normal_texture:
+        return False
+    if (
+        data.metallic_roughness_texture
+        or data.occlusion_texture
+        or data.emissive_texture
+        or data.transparent_texture
+        or data.specular_texture
+        or data.specular_color_texture
+        or data.clearcoat_texture
+        or data.clearcoat_roughness_texture
+        or data.clearcoat_normal_texture
+        or data.transmission_texture
+        or data.sheen_color_texture
+        or data.sheen_roughness_texture
+        or data.iridescence_texture
+        or data.iridescence_thickness_texture
+        or data.volume_thickness_texture
+        or data.anisotropy_texture
+        or data.diffuse_transmission_texture
+        or data.diffuse_transmission_color_texture
+    ):
+        return False
+    if (
+        data.alpha_mode
+        or data.transparent_opaque
+        or abs(float(data.opacity) - 1.0) > 1e-6
+        or abs(float(data.transparent_amount) - 1.0) > 1e-6
+        or abs(float(data.occlusion_strength) - 1.0) > 1e-6
+        or abs(float(data.emissive_strength) - 1.0) > 1e-6
+        or abs(float(data.clearcoat)) > 1e-6
+        or abs(float(data.clearcoat_roughness)) > 1e-6
+        or abs(float(data.transmission)) > 1e-6
+        or abs(float(data.sheen_roughness)) > 1e-6
+        or abs(float(data.iridescence)) > 1e-6
+        or abs(float(data.volume_thickness)) > 1e-6
+        or abs(float(data.anisotropy)) > 1e-6
+        or abs(float(data.anisotropy_rotation)) > 1e-6
+        or abs(float(data.diffuse_transmission)) > 1e-6
+        or abs(float(data.dispersion)) > 1e-6
+        or data.has_sheen
+    ):
+        return False
+
+    texture_infos = data.texture_infos or {}
+    if any(role not in {"base_color", "normal"} for role in texture_infos):
+        return False
+    for role in ("base_color", "normal"):
+        tex_info = _texture_info(data, role)
+        if tex_info is None:
+            continue
+        if tex_info.has_transform or _texture_uv_slot(tex_info) != 0:
+            return False
+        if tex_info.texture_extra or tex_info.texref_extra or tex_info.image_extra or tex_info.sampler_extra:
+            return False
+    return True
+
+
 def _can_defer_base_color_texture_material(
     data: MeshPrimitiveData,
     color_attr: str,
@@ -7550,7 +7706,7 @@ def _apply_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
     mat.use_backface_culling = not spec.double_sided
     _set_material_scalar(mat, "metallic", spec.metallic)
     _set_material_scalar(mat, "roughness", spec.roughness)
-    _set_material_scalar(mat, "specular_intensity", 0.5)
+    _set_material_scalar(mat, "specular_intensity", spec.specular if spec.legacy else 0.5)
     try:
         mat["assetkit_deferred_material_nodes"] = True
         mat["assetkit_deferred_base_color_texture"] = spec.path
@@ -7581,15 +7737,35 @@ def _apply_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
         except Exception:
             continue
 
-    _queue_deferred_material_nodes(
-        mat,
-        spec.path,
-        spec.tex_info,
-        spec.base_color,
-        spec.metallic,
-        spec.roughness,
-        spec.double_sided,
-    )
+    if spec.legacy:
+        _queue_deferred_legacy_material_nodes(
+            mat,
+            spec.path,
+            spec.tex_info,
+            spec.normal_path,
+            spec.normal_tex_info,
+            spec.base_color,
+            spec.roughness,
+            spec.specular,
+            spec.has_specular_tint,
+            spec.specular_color,
+            spec.has_emission,
+            spec.emissive_color,
+            spec.emissive_strength,
+            spec.ior,
+            spec.normal_scale,
+            spec.double_sided,
+        )
+    else:
+        _queue_deferred_material_nodes(
+            mat,
+            spec.path,
+            spec.tex_info,
+            spec.base_color,
+            spec.metallic,
+            spec.roughness,
+            spec.double_sided,
+        )
 
 
 def _mesh_ref_alive(mesh: bpy.types.Mesh) -> bool:
@@ -7653,6 +7829,91 @@ def _configure_base_color_texture_fast_material(
     color_output = tex.outputs.get("Color")
     if color_socket and color_output:
         tree.links.new(color_output, color_socket)
+    return True
+
+
+def _new_fast_image_texture_node(tree, path: str, tex_info: TextureRefData | None, colorspace: str):
+    if not path:
+        return None
+    image = _cached_texture_image(path, colorspace) if _should_defer_texture_image(path) else _load_texture_image(path, colorspace)
+    if not image and not _should_defer_texture_image(path):
+        return None
+
+    tex = tree.nodes.new("ShaderNodeTexImage")
+    extension = _texture_extension(tex_info)
+    if extension != _TEXTURE_EXTENSION_DEFAULT:
+        tex.extension = extension
+    interpolation = _texture_interpolation(tex_info)
+    if interpolation != _TEXTURE_INTERPOLATION_DEFAULT:
+        tex.interpolation = interpolation
+    if image:
+        tex.image = image
+    else:
+        _queue_deferred_texture_image(tex, path, colorspace, store_props=False)
+    return tex
+
+
+def _configure_legacy_texture_fast_material(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> bool:
+    mat.diffuse_color = base_color
+    mat.use_nodes = True
+    mat.use_backface_culling = not _is_double_sided_material(data)
+
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if not tree or not bsdf:
+        return False
+
+    bsdf_inputs = bsdf.inputs
+    color_socket = bsdf_inputs.get("Base Color")
+    if color_socket:
+        color_socket.default_value = base_color
+    _set_input(bsdf, "Metallic", 0.0)
+    _set_input(bsdf, "Roughness", _legacy_roughness(data.specular_strength))
+    _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _legacy_specular(data))
+    if _has_emission(data):
+        _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
+        _set_first_input(bsdf, ("Emission Strength",), _emission_strength(data))
+    if _has_specular(data):
+        _set_first_input(bsdf, ("Specular Tint",), (*data.specular_color, 1.0))
+    _set_first_input(bsdf, ("IOR",), _material_ior(data))
+
+    base_info = _texture_info(data, "base_color")
+    base_tex = _new_fast_image_texture_node(
+        tree,
+        data.base_color_texture,
+        base_info,
+        _texture_color_space(base_info, "sRGB"),
+    )
+    if base_tex and color_socket:
+        color_output = base_tex.outputs.get("Color")
+        if color_output:
+            tree.links.new(color_output, color_socket)
+
+    normal_info = _texture_info(data, "normal")
+    normal_tex = _new_fast_image_texture_node(
+        tree,
+        data.normal_texture,
+        normal_info,
+        _texture_color_space(normal_info, "Non-Color"),
+    )
+    normal_socket = bsdf_inputs.get("Normal")
+    if normal_tex and normal_socket:
+        normal_map = tree.nodes.new("ShaderNodeNormalMap")
+        if abs(float(data.normal_scale) - 1.0) > 1e-6:
+            scale = normal_map.inputs.get("Strength")
+            if scale:
+                scale.default_value = data.normal_scale
+        color_output = normal_tex.outputs.get("Color")
+        color_input = normal_map.inputs.get("Color")
+        normal_output = normal_map.outputs.get("Normal")
+        if color_output and color_input:
+            tree.links.new(color_output, color_input)
+        if normal_output:
+            tree.links.new(normal_output, normal_socket)
     return True
 
 
@@ -7761,6 +8022,54 @@ def _queue_deferred_material_nodes(
         bpy.app.timers.register(_deferred_material_node_timer, first_interval=0.001)
 
 
+def _queue_deferred_legacy_material_nodes(
+    mat: bpy.types.Material,
+    base_path: str,
+    base_tex_info: TextureRefData | None,
+    normal_path: str,
+    normal_tex_info: TextureRefData | None,
+    base_color: tuple[float, float, float, float],
+    roughness: float,
+    specular: float,
+    has_specular_tint: bool,
+    specular_color: tuple[float, float, float],
+    has_emission: bool,
+    emissive_color: tuple[float, float, float],
+    emissive_strength: float,
+    ior: float,
+    normal_scale: float,
+    double_sided: bool,
+) -> None:
+    if not base_path and not normal_path:
+        return
+
+    global _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
+    _DEFERRED_MATERIAL_NODE_TASKS.append(
+        (
+            "legacy",
+            mat,
+            base_path,
+            base_tex_info,
+            normal_path,
+            normal_tex_info,
+            base_color,
+            roughness,
+            specular,
+            has_specular_tint,
+            specular_color,
+            has_emission,
+            emissive_color,
+            emissive_strength,
+            ior,
+            normal_scale,
+            double_sided,
+        )
+    )
+    if not _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE:
+        _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE = True
+        bpy.app.timers.register(_deferred_material_node_timer, first_interval=0.001)
+
+
 def _deferred_material_node_timer() -> float | None:
     global _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
     started_at = time.perf_counter()
@@ -7769,10 +8078,13 @@ def _deferred_material_node_timer() -> float | None:
 
     while _DEFERRED_MATERIAL_NODE_TASKS:
         task = _DEFERRED_MATERIAL_NODE_TASKS.popleft()
-        mat = task[0]
+        mat = task[1] if task and task[0] == "legacy" else task[0]
         try:
             if _material_ref_alive(mat):
-                _apply_deferred_base_color_texture_material(*task)
+                if task and task[0] == "legacy":
+                    _apply_deferred_legacy_texture_material(*task[1:])
+                else:
+                    _apply_deferred_base_color_texture_material(*task)
                 processed += 1
         except Exception:
             pass
@@ -7849,6 +8161,83 @@ def _apply_deferred_base_color_texture_material(
     color_output = tex.outputs.get("Color")
     if color_socket and color_output:
         tree.links.new(color_output, color_socket)
+    try:
+        mat["assetkit_deferred_material_nodes"] = False
+    except Exception:
+        pass
+
+
+def _apply_deferred_legacy_texture_material(
+    mat: bpy.types.Material,
+    base_path: str,
+    base_tex_info: TextureRefData | None,
+    normal_path: str,
+    normal_tex_info: TextureRefData | None,
+    base_color: tuple[float, float, float, float],
+    roughness: float,
+    specular: float,
+    has_specular_tint: bool,
+    specular_color: tuple[float, float, float],
+    has_emission: bool,
+    emissive_color: tuple[float, float, float],
+    emissive_strength: float,
+    ior: float,
+    normal_scale: float,
+    double_sided: bool,
+) -> None:
+    mat.diffuse_color = base_color
+    mat.use_nodes = True
+    mat.use_backface_culling = not double_sided
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if not tree or not bsdf:
+        return
+
+    bsdf_inputs = bsdf.inputs
+    color_socket = bsdf_inputs.get("Base Color")
+    if color_socket:
+        color_socket.default_value = base_color
+    _set_input(bsdf, "Metallic", 0.0)
+    _set_input(bsdf, "Roughness", roughness)
+    _set_first_input(bsdf, ("Specular IOR Level", "Specular"), specular)
+    if has_emission:
+        _set_input(bsdf, "Emission Color", (*emissive_color, 1.0))
+        _set_first_input(bsdf, ("Emission Strength",), emissive_strength)
+    if has_specular_tint:
+        _set_first_input(bsdf, ("Specular Tint",), (*specular_color, 1.0))
+    _set_first_input(bsdf, ("IOR",), ior)
+
+    base_tex = _new_fast_image_texture_node(
+        tree,
+        base_path,
+        base_tex_info,
+        _texture_color_space(base_tex_info, "sRGB"),
+    )
+    if base_tex and color_socket:
+        color_output = base_tex.outputs.get("Color")
+        if color_output:
+            tree.links.new(color_output, color_socket)
+
+    normal_tex = _new_fast_image_texture_node(
+        tree,
+        normal_path,
+        normal_tex_info,
+        _texture_color_space(normal_tex_info, "Non-Color"),
+    )
+    normal_socket = bsdf_inputs.get("Normal")
+    if normal_tex and normal_socket:
+        normal_map = tree.nodes.new("ShaderNodeNormalMap")
+        if abs(float(normal_scale) - 1.0) > 1e-6:
+            scale = normal_map.inputs.get("Strength")
+            if scale:
+                scale.default_value = normal_scale
+        color_output = normal_tex.outputs.get("Color")
+        color_input = normal_map.inputs.get("Color")
+        normal_output = normal_map.outputs.get("Normal")
+        if color_output and color_input:
+            tree.links.new(color_output, color_input)
+        if normal_output:
+            tree.links.new(normal_output, normal_socket)
     try:
         mat["assetkit_deferred_material_nodes"] = False
     except Exception:
