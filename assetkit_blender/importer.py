@@ -662,7 +662,7 @@ def _defer_custom_normals(load_options: dict | None, shading_mode: str) -> bool:
 def _effective_shading_mode(data: MeshPrimitiveData, shading_mode: str) -> str:
     mode = str(shading_mode or "AUTO").upper()
     if (
-        mode == "AUTO"
+        mode in {"AUTO", "AS_IS"}
         and int(getattr(data, "file_type", 0) or 0) == AK_FILE_TYPE_STL
         and int(getattr(data, "primitive_type", 0) or 0) == AK_PRIMITIVE_TRIANGLES
     ):
