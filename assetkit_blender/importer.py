@@ -135,12 +135,12 @@ _REQUIRED_NODE_INDICES_AUTO = object()
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_HERMITE = 4
 _INTERPOLATION_STEP = 6
-_AK_MATERIAL_PHONG = 1
-_AK_MATERIAL_BLINN = 2
-_AK_MATERIAL_LAMBERT = 3
-_AK_MATERIAL_CONSTANT = 4
-_AK_MATERIAL_SPECULAR_GLOSSINESS = 6
-_AK_MATERIAL_PBR = 7
+_AK_MATERIAL_TYPE_PHONG = 1
+_AK_MATERIAL_TYPE_BLINN = 2
+_AK_MATERIAL_TYPE_LAMBERT = 3
+_AK_MATERIAL_TYPE_CONSTANT = 4
+_AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS = 6
+_AK_MATERIAL_TYPE_PBR = 7
 _AK_OPAQUE_A_ONE = 1
 _AK_OPAQUE_A_ZERO = 2
 _AK_OPAQUE_RGB_ONE = 3
@@ -241,7 +241,7 @@ class _DeferredMaterialSpec:
         "metallic",
         "roughness",
         "double_sided",
-        "legacy",
+        "classic",
         "normal_path",
         "normal_tex_info",
         "normal_scale",
@@ -267,7 +267,7 @@ class _DeferredMaterialSpec:
         roughness: float,
         double_sided: bool,
         *,
-        legacy: bool = False,
+        classic: bool = False,
         normal_path: str = "",
         normal_tex_info: TextureRefData | None = None,
         normal_scale: float = 1.0,
@@ -288,7 +288,7 @@ class _DeferredMaterialSpec:
         self.metallic = metallic
         self.roughness = roughness
         self.double_sided = double_sided
-        self.legacy = legacy
+        self.classic = classic
         self.normal_path = normal_path
         self.normal_tex_info = normal_tex_info
         self.normal_scale = normal_scale
@@ -3163,12 +3163,12 @@ def _try_defer_material_assignment(
     if _ACTIVE_TEXTURE_LOAD_MODE != "DEFERRED":
         return False
 
-    legacy_deferred = False
+    classic_deferred = False
     if _has_material_data(data):
         color_attr = _color_attribute_name(data)
         base_color = _material_base_color(data)
-        if _can_use_legacy_texture_fast_material(data, color_attr):
-            legacy_deferred = True
+        if _can_use_classic_texture_fast_material(data, color_attr):
+            classic_deferred = True
             cache_key = _material_cache_key(data)
         else:
             fast_key = _fast_simple_native_base_color_texture_key(data)
@@ -3205,7 +3205,7 @@ def _try_defer_material_assignment(
         material_name = data.material_name or f"{data.name}_Material"
         if data.material_name and color_attr:
             material_name = f"{material_name}_{color_attr}"
-        if legacy_deferred:
+        if classic_deferred:
             spec = _DeferredMaterialSpec(
                 material_name,
                 material_cache,
@@ -3214,13 +3214,13 @@ def _try_defer_material_assignment(
                 _texture_info(data, "base_color"),
                 base_color,
                 0.0,
-                _legacy_roughness(data.specular_strength),
+                _classic_roughness(data.specular_strength),
                 _is_double_sided_material(data),
-                legacy=True,
+                classic=True,
                 normal_path=data.normal_texture,
                 normal_tex_info=_texture_info(data, "normal"),
                 normal_scale=float(data.normal_scale),
-                specular=_legacy_specular(data),
+                specular=_classic_specular(data),
                 has_specular_tint=_has_specular(data),
                 specular_color=tuple(data.specular_color),
                 has_emission=_has_emission(data),
@@ -6871,7 +6871,7 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
         "material_key": _raw_int(raw, "material_key", data.material_key),
         "texture_infos": _variant_texture_infos(data.texture_infos, raw.get("texture_infos") or {}),
         "material_extra": raw.get("material_extra"),
-        "effect_extra": raw.get("effect_extra"),
+        "source_extra": raw.get("source_extra"),
     }
 
     for name in _MATERIAL_TEXTURE_FIELDS:
@@ -7102,7 +7102,7 @@ def _create_material(
             nodes_ms = lap_ms()
             _set_assetkit_material_props(mat, data)
             _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
-            _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
+            _set_assetkit_json_prop(mat, "assetkit_material_source_extra_json", data.source_extra)
             props_ms = lap_ms()
             if material_cache is not None:
                 material_cache[cache_key] = mat
@@ -7121,8 +7121,8 @@ def _create_material(
                 )
             return mat
 
-    if _can_use_legacy_texture_fast_material(data, color_attr):
-        if _configure_legacy_texture_fast_material(mat, data, base_color):
+    if _can_use_classic_texture_fast_material(data, color_attr):
+        if _configure_classic_texture_fast_material(mat, data, base_color):
             nodes_ms = lap_ms()
             if material_cache is not None:
                 material_cache[cache_key] = mat
@@ -7192,10 +7192,10 @@ def _create_material(
         color_target, alpha_socket = _configure_unlit_shader(mat, data.alpha_mode)
         color_input = "Color"
     else:
-        if _is_legacy_lit_material(data):
+        if _is_classic_lit_material(data):
             _set_input(bsdf, "Metallic", 0.0)
-            _set_input(bsdf, "Roughness", _legacy_roughness(data.specular_strength))
-            _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _legacy_specular(data))
+            _set_input(bsdf, "Roughness", _classic_roughness(data.specular_strength))
+            _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _classic_specular(data))
         elif _is_specular_glossiness_material(data):
             _set_input(bsdf, "Metallic", 0.0)
             _set_input(bsdf, "Roughness", data.roughness)
@@ -7242,7 +7242,7 @@ def _create_material(
 
     _set_assetkit_material_props(mat, data)
     _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
-    _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
+    _set_assetkit_json_prop(mat, "assetkit_material_source_extra_json", data.source_extra)
     props_ms = lap_ms()
     settings_node = _ensure_gltf_settings_node(mat, data, bsdf)
     settings_ms = lap_ms()
@@ -7277,7 +7277,7 @@ def _create_material(
         if data.transparent_texture and alpha_socket:
             _link_transparent_texture(mat, alpha_socket, data)
         if data.specular_texture:
-            if int(data.material_type) == _AK_MATERIAL_SPECULAR_GLOSSINESS:
+            if int(data.material_type) == _AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS:
                 _link_specular_glossiness_texture(mat, bsdf, data)
             else:
                 _link_factor_texture(
@@ -7484,7 +7484,7 @@ def _can_use_simple_material(data: MeshPrimitiveData, color_attr: str) -> bool:
         return False
     if data.material_anim_channels:
         return False
-    if _is_unlit_material(data) or _is_legacy_lit_material(data) or _is_specular_glossiness_material(data):
+    if _is_unlit_material(data) or _is_classic_lit_material(data) or _is_specular_glossiness_material(data):
         return False
     if any(getattr(data, name) for name in _MATERIAL_TEXTURE_FIELDS):
         return False
@@ -7506,7 +7506,7 @@ def _can_use_scalar_principled_material(data: MeshPrimitiveData, color_attr: str
         return False
     if data.material_anim_channels:
         return False
-    if _is_unlit_material(data) or _is_legacy_lit_material(data) or _is_specular_glossiness_material(data):
+    if _is_unlit_material(data) or _is_classic_lit_material(data) or _is_specular_glossiness_material(data):
         return False
     if any(getattr(data, name) for name in _MATERIAL_TEXTURE_FIELDS):
         return False
@@ -7526,9 +7526,9 @@ def _can_use_base_color_texture_fast_material(
         return False
     if data.material_anim_channels:
         return False
-    if data.material_extra or data.effect_extra or data.material_variants:
+    if data.material_extra or data.source_extra or data.material_variants:
         return False
-    if _is_unlit_material(data) or _is_legacy_lit_material(data) or _is_specular_glossiness_material(data):
+    if _is_unlit_material(data) or _is_classic_lit_material(data) or _is_specular_glossiness_material(data):
         return False
     if any(getattr(data, name) for name in _MATERIAL_TEXTURE_FIELDS if name != "base_color_texture"):
         return False
@@ -7554,12 +7554,12 @@ def _can_use_base_color_texture_fast_material(
     return float(data.volume_thickness) <= 0.0 and float(data.dispersion) == 0.0
 
 
-def _can_use_legacy_texture_fast_material(data: MeshPrimitiveData, color_attr: str) -> bool:
+def _can_use_classic_texture_fast_material(data: MeshPrimitiveData, color_attr: str) -> bool:
     if color_attr:
         return False
-    if not _is_legacy_lit_material(data):
+    if not _is_classic_lit_material(data):
         return False
-    if data.material_anim_channels or data.material_extra or data.effect_extra or data.material_variants:
+    if data.material_anim_channels or data.material_extra or data.source_extra or data.material_variants:
         return False
     if not data.base_color_texture and not data.normal_texture:
         return False
@@ -7706,7 +7706,7 @@ def _apply_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
     mat.use_backface_culling = not spec.double_sided
     _set_material_scalar(mat, "metallic", spec.metallic)
     _set_material_scalar(mat, "roughness", spec.roughness)
-    _set_material_scalar(mat, "specular_intensity", spec.specular if spec.legacy else 0.5)
+    _set_material_scalar(mat, "specular_intensity", spec.specular if spec.classic else 0.5)
     try:
         mat["assetkit_deferred_material_nodes"] = True
         mat["assetkit_deferred_base_color_texture"] = spec.path
@@ -7737,8 +7737,8 @@ def _apply_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
         except Exception:
             continue
 
-    if spec.legacy:
-        _queue_deferred_legacy_material_nodes(
+    if spec.classic:
+        _queue_deferred_classic_material_nodes(
             mat,
             spec.path,
             spec.tex_info,
@@ -7853,7 +7853,7 @@ def _new_fast_image_texture_node(tree, path: str, tex_info: TextureRefData | Non
     return tex
 
 
-def _configure_legacy_texture_fast_material(
+def _configure_classic_texture_fast_material(
     mat: bpy.types.Material,
     data: MeshPrimitiveData,
     base_color: tuple[float, float, float, float],
@@ -7872,8 +7872,8 @@ def _configure_legacy_texture_fast_material(
     if color_socket:
         color_socket.default_value = base_color
     _set_input(bsdf, "Metallic", 0.0)
-    _set_input(bsdf, "Roughness", _legacy_roughness(data.specular_strength))
-    _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _legacy_specular(data))
+    _set_input(bsdf, "Roughness", _classic_roughness(data.specular_strength))
+    _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _classic_specular(data))
     if _has_emission(data):
         _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
         _set_first_input(bsdf, ("Emission Strength",), _emission_strength(data))
@@ -8022,7 +8022,7 @@ def _queue_deferred_material_nodes(
         bpy.app.timers.register(_deferred_material_node_timer, first_interval=0.001)
 
 
-def _queue_deferred_legacy_material_nodes(
+def _queue_deferred_classic_material_nodes(
     mat: bpy.types.Material,
     base_path: str,
     base_tex_info: TextureRefData | None,
@@ -8046,7 +8046,7 @@ def _queue_deferred_legacy_material_nodes(
     global _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
     _DEFERRED_MATERIAL_NODE_TASKS.append(
         (
-            "legacy",
+            "classic",
             mat,
             base_path,
             base_tex_info,
@@ -8078,11 +8078,11 @@ def _deferred_material_node_timer() -> float | None:
 
     while _DEFERRED_MATERIAL_NODE_TASKS:
         task = _DEFERRED_MATERIAL_NODE_TASKS.popleft()
-        mat = task[1] if task and task[0] == "legacy" else task[0]
+        mat = task[1] if task and task[0] == "classic" else task[0]
         try:
             if _material_ref_alive(mat):
-                if task and task[0] == "legacy":
-                    _apply_deferred_legacy_texture_material(*task[1:])
+                if task and task[0] == "classic":
+                    _apply_deferred_classic_texture_material(*task[1:])
                 else:
                     _apply_deferred_base_color_texture_material(*task)
                 processed += 1
@@ -8167,7 +8167,7 @@ def _apply_deferred_base_color_texture_material(
         pass
 
 
-def _apply_deferred_legacy_texture_material(
+def _apply_deferred_classic_texture_material(
     mat: bpy.types.Material,
     base_path: str,
     base_tex_info: TextureRefData | None,
@@ -8254,7 +8254,7 @@ def _configure_simple_material(
     if _has_nondefault_assetkit_material_props(data):
         _set_assetkit_material_props(mat, data)
     _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
-    _set_assetkit_json_prop(mat, "assetkit_effect_extra_json", data.effect_extra)
+    _set_assetkit_json_prop(mat, "assetkit_material_source_extra_json", data.source_extra)
     if not getattr(mat, "use_nodes", False):
         _set_material_scalar(mat, "metallic", data.metallic)
         _set_material_scalar(mat, "roughness", data.roughness)
@@ -8940,36 +8940,36 @@ def _is_default_rgb(values: tuple[float, ...]) -> bool:
 
 
 def _is_unlit_material(data: MeshPrimitiveData) -> bool:
-    return int(data.material_type) == _AK_MATERIAL_CONSTANT
+    return int(data.material_type) == _AK_MATERIAL_TYPE_CONSTANT
 
 
-def _is_legacy_lit_material(data: MeshPrimitiveData) -> bool:
+def _is_classic_lit_material(data: MeshPrimitiveData) -> bool:
     return int(data.material_type) in {
-        _AK_MATERIAL_PHONG,
-        _AK_MATERIAL_BLINN,
-        _AK_MATERIAL_LAMBERT,
+        _AK_MATERIAL_TYPE_PHONG,
+        _AK_MATERIAL_TYPE_BLINN,
+        _AK_MATERIAL_TYPE_LAMBERT,
     }
 
 
 def _is_specular_glossiness_material(data: MeshPrimitiveData) -> bool:
-    return int(data.material_type) == _AK_MATERIAL_SPECULAR_GLOSSINESS
+    return int(data.material_type) == _AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS
 
 
-def _legacy_roughness(shininess: float) -> float:
+def _classic_roughness(shininess: float) -> float:
     value = max(float(shininess), 0.0)
     if value <= 0.0:
         return 1.0
     return max(0.0, min(1.0, math.sqrt(2.0 / (value + 2.0))))
 
 
-def _legacy_specular(data: MeshPrimitiveData) -> float:
-    if int(data.material_type) == _AK_MATERIAL_LAMBERT:
+def _classic_specular(data: MeshPrimitiveData) -> float:
+    if int(data.material_type) == _AK_MATERIAL_TYPE_LAMBERT:
         return 0.0
     return max(0.0, min(1.0, max(float(v) for v in data.specular_color)))
 
 
 def _uses_pbr_specular_level(data: MeshPrimitiveData) -> bool:
-    return not _is_legacy_lit_material(data) and not _is_specular_glossiness_material(data)
+    return not _is_classic_lit_material(data) and not _is_specular_glossiness_material(data)
 
 
 def _pbr_specular_level(data: MeshPrimitiveData) -> float:
@@ -9175,7 +9175,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         data.diffuse_transmission_color_texture,
         _texture_infos_cache_key(data.texture_infos),
         _json_cache_key(data.material_extra),
-        _json_cache_key(data.effect_extra),
+        _json_cache_key(data.source_extra),
     )
 
 
@@ -9183,7 +9183,7 @@ def _preserve_native_material_identity(data: MeshPrimitiveData) -> bool:
     return bool(
         data.material_name
         or data.material_extra
-        or data.effect_extra
+        or data.source_extra
         or data.material_anim_channels
         or data.material_variants
     )
@@ -9223,11 +9223,11 @@ def _fast_base_color_texture_visual_key(data: MeshPrimitiveData, color_attr: str
 
     material_type = int(data.material_type)
     if material_type in {
-        _AK_MATERIAL_PHONG,
-        _AK_MATERIAL_BLINN,
-        _AK_MATERIAL_LAMBERT,
-        _AK_MATERIAL_CONSTANT,
-        _AK_MATERIAL_SPECULAR_GLOSSINESS,
+        _AK_MATERIAL_TYPE_PHONG,
+        _AK_MATERIAL_TYPE_BLINN,
+        _AK_MATERIAL_TYPE_LAMBERT,
+        _AK_MATERIAL_TYPE_CONSTANT,
+        _AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS,
     }:
         return None
     if (

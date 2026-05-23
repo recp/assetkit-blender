@@ -121,6 +121,7 @@ AkMeshPrimitive._fields_ = [
     ("name", ctypes.c_char_p),
     ("bindmaterial", ctypes.c_char_p),
     ("material", ctypes.c_void_p),
+    ("materialBindings", ctypes.c_void_p),
     ("input", ctypes.POINTER(AkInput)),
     ("pos", ctypes.POINTER(AkInput)),
     ("indices", ctypes.POINTER(AkIndexArray)),
@@ -137,6 +138,7 @@ AkMeshPrimitive._fields_ = [
     ("reserved3", ctypes.c_void_p),
     ("variantMappings", ctypes.c_void_p),
     ("variantMappingCount", ctypes.c_uint32),
+    ("materialBindingCount", ctypes.c_uint32),
     ("gsplat", ctypes.c_void_p),
 ]
 
@@ -210,6 +212,14 @@ class AkScene(ctypes.Structure):
     _fields_ = [("visualScene", ctypes.c_void_p), ("extra", ctypes.c_void_p)]
 
 
+class AkMaterialPropertyRegistry(ctypes.Structure):
+    _fields_ = [
+        ("sets", ctypes.c_void_p),
+        ("byId", ctypes.c_void_p),
+        ("count", ctypes.c_uint32),
+    ]
+
+
 class AkDoc(ctypes.Structure):
     _fields_ = [
         ("inf", ctypes.c_void_p),
@@ -223,6 +233,7 @@ class AkDoc(ctypes.Structure):
         ("scene", AkScene),
         ("materialVariants", ctypes.c_void_p),
         ("materialVariantCount", ctypes.c_uint32),
+        ("materialProperties", AkMaterialPropertyRegistry),
     ]
 
 
@@ -336,7 +347,7 @@ class MeshPrimitiveData:
     mesh_extra: object | None = None
     geometry_extra: object | None = None
     material_extra: object | None = None
-    effect_extra: object | None = None
+    source_extra: object | None = None
     skin_vertex_count: int = 0
     skin_joint_count: int = 0
     skin_joint_width: int = 0
@@ -1195,7 +1206,7 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     "mesh_extra",
     "geometry_extra",
     "material_extra",
-    "effect_extra",
+    "source_extra",
     "has_skin",
     "has_gsplat",
     "material_key",
@@ -1352,7 +1363,7 @@ _S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
     _M_MESH_EXTRA,
     _M_GEOMETRY_EXTRA,
     _M_MATERIAL_EXTRA,
-    _M_EFFECT_EXTRA,
+    _M_SOURCE_EXTRA,
     _M_MATERIAL_VARIANT_COUNT,
     _M_MATERIAL_VARIANTS,
     _M_MATRIX_F32,
@@ -1487,7 +1498,7 @@ _M_FIELD_NAMES = (
     "mesh_extra",
     "geometry_extra",
     "material_extra",
-    "effect_extra",
+    "source_extra",
     "material_variant_count",
     "material_variants",
     "matrix_f32",
@@ -1806,7 +1817,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         data.mesh_extra = get(_M_MESH_EXTRA)
         data.geometry_extra = get(_M_GEOMETRY_EXTRA)
         data.material_extra = get(_M_MATERIAL_EXTRA)
-        data.effect_extra = get(_M_EFFECT_EXTRA)
+        data.source_extra = get(_M_SOURCE_EXTRA)
         data.skin_vertex_count = int(get(_M_SKIN_VERTEX_COUNT) or 0)
         data.skin_joint_count = int(get(_M_SKIN_JOINT_COUNT) or 0)
         data.skin_joint_width = int(get(_M_SKIN_JOINT_WIDTH) or 0)
