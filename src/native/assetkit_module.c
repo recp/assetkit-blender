@@ -337,6 +337,7 @@ typedef struct AkbPrimitive {
   float    specular_color[3];
   float    sheen_color[3];
   float    volume_attenuation_color[3];
+  float    volume_scatter_color[3];
   float    diffuse_transmission_color[3];
   float    metallic;
   float    roughness;
@@ -359,6 +360,7 @@ typedef struct AkbPrimitive {
   float    iridescence_thickness_maximum;
   float    volume_thickness;
   float    volume_attenuation_distance;
+  float    volume_scatter_anisotropy;
   float    anisotropy;
   float    anisotropy_rotation;
   float    diffuse_transmission;
@@ -401,7 +403,7 @@ typedef struct AkbPrimitive {
   uint8_t  smooth_shading;
   uint8_t  double_sided;
   uint8_t  alpha_mode;
-  uint8_t  transparent_opaque;
+  uint8_t  transparent_inverted;
   uint8_t  has_node;
   uint8_t  has_coord_matrix;
   uint8_t  has_gsplat;
@@ -673,6 +675,7 @@ typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_SPECULAR_COLOR,
   AKB_PY_PRIM_SHEEN_COLOR,
   AKB_PY_PRIM_VOLUME_ATTENUATION_COLOR,
+  AKB_PY_PRIM_VOLUME_SCATTER_COLOR,
   AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR,
   AKB_PY_PRIM_METALLIC,
   AKB_PY_PRIM_ROUGHNESS,
@@ -695,12 +698,13 @@ typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_IRIDESCENCE_THICKNESS_MAXIMUM,
   AKB_PY_PRIM_VOLUME_THICKNESS,
   AKB_PY_PRIM_VOLUME_ATTENUATION_DISTANCE,
+  AKB_PY_PRIM_VOLUME_SCATTER_ANISOTROPY,
   AKB_PY_PRIM_ANISOTROPY,
   AKB_PY_PRIM_ANISOTROPY_ROTATION,
   AKB_PY_PRIM_DIFFUSE_TRANSMISSION,
   AKB_PY_PRIM_DISPERSION,
   AKB_PY_PRIM_ALPHA_MODE,
-  AKB_PY_PRIM_TRANSPARENT_OPAQUE,
+  AKB_PY_PRIM_TRANSPARENT_INVERTED,
   AKB_PY_PRIM_DOUBLE_SIDED,
   AKB_PY_PRIM_MATERIAL_TYPE,
   AKB_PY_PRIM_FILE_TYPE,
@@ -2706,20 +2710,6 @@ akb_texture_info_for_role(AkbPrimitive *out, const char *role) {
   return &out->texture_infos[i];
 }
 
-static int32_t
-akb_texref_slot(AkTextureRef *texref) {
-  int32_t slot;
-
-  if (!texref)
-    return 0;
-
-  slot = texref->slot;
-  if (texref->transform && texref->transform->slot > -1)
-    slot = texref->transform->slot;
-
-  return slot >= 0 ? slot : 0;
-}
-
 static const char *
 akb_texture_role_color_space(const char *role) {
   if (!role)
@@ -2913,14 +2903,18 @@ akb_material_input_color3(AkMaterialInput *input,
 }
 
 static int
-akb_material_input_is_fast_base_color(AkMaterialInput *input) {
+akb_material_input_is_fast_base_color(AkMeshPrimitive *prim,
+                                      AkInstanceGeometry *instance,
+                                      AkMaterialInput *input) {
   AkTextureRef *texref;
   AkTexture *texture;
   AkImage *image;
 
   if (!input || !(texref = input->texture))
     return 1;
-  if (!texref->texture || texref->transform || texref->slot > 0)
+  if (!texref->texture
+      || texref->transform
+      || ak_materialTextureSlot(prim, instance, texref) > 0)
     return 0;
   if (input->colorSpace == AK_TEXTURE_COLORSPACE_LINEAR)
     return 0;
@@ -2944,6 +2938,8 @@ akb_material_input_is_fast_base_color(AkMaterialInput *input) {
 
 static int
 akb_extract_material_fast_surface(AkDoc *doc,
+                                  AkInstanceGeometry *instance,
+                                  AkMeshPrimitive *prim,
                                   AkMaterialSurface *surface,
                                   AkbPrimitive *out) {
   if (!surface || !out)
@@ -2966,7 +2962,7 @@ akb_extract_material_fast_surface(AkDoc *doc,
     return 0;
   if (surface->roughness && surface->roughness->texture)
     return 0;
-  if (!akb_material_input_is_fast_base_color(surface->baseColor))
+  if (!akb_material_input_is_fast_base_color(prim, instance, surface->baseColor))
     return 0;
 
   out->material_type = (uint32_t)surface->type;
@@ -2978,13 +2974,16 @@ akb_extract_material_fast_surface(AkDoc *doc,
                         sizeof(out->base_color_texture));
   out->metallic = akb_material_input_scalar(surface->metallic, 1.0f);
   out->roughness = akb_material_input_scalar(surface->roughness, 1.0f);
-  out->alpha_mode = out->base_color[3] < 1.0f ? 1 : 0;
-  out->opacity = out->base_color[3];
+  out->alpha_mode = 0;
+  out->opacity = 1.0f;
+  out->base_color[3] = 1.0f;
   return 1;
 }
 
 static void
 akb_copy_texture_info(AkDoc *doc,
+                      AkInstanceGeometry *instance,
+                      AkMeshPrimitive *prim,
                       AkMaterialInput *input,
                       const char *role,
                       char *dest,
@@ -3015,7 +3014,7 @@ akb_copy_texture_info(AkDoc *doc,
                               role,
                               info->channels,
                               sizeof(info->channels));
-  info->slot = akb_texref_slot(texref);
+  info->slot = ak_materialTextureSlot(prim, instance, texref);
 
   if (texref->texcoord)
     snprintf(info->texcoord, sizeof(info->texcoord), "%s", texref->texcoord);
@@ -3108,6 +3107,7 @@ akb_extract_material(AkDoc *doc,
   AkMaterialSheenFeature *sheen;
   AkMaterialIridescenceFeature *iridescence;
   AkMaterialVolumeFeature *volume;
+  AkMaterialSubsurfaceFeature *subsurface;
   AkMaterialAnisotropyFeature *anisotropy;
   AkMaterialDispersionFeature *dispersion;
   AkMaterialDiffuseTransmissionFeature *diffuse_transmission;
@@ -3133,6 +3133,9 @@ akb_extract_material(AkDoc *doc,
   out->volume_attenuation_color[0] = 1.0f;
   out->volume_attenuation_color[1] = 1.0f;
   out->volume_attenuation_color[2] = 1.0f;
+  out->volume_scatter_color[0] = 0.0f;
+  out->volume_scatter_color[1] = 0.0f;
+  out->volume_scatter_color[2] = 0.0f;
   out->diffuse_transmission_color[0] = 1.0f;
   out->diffuse_transmission_color[1] = 1.0f;
   out->diffuse_transmission_color[2] = 1.0f;
@@ -3153,11 +3156,7 @@ akb_extract_material(AkDoc *doc,
   out->volume_attenuation_distance = INFINITY;
 
   memset(&resolved, 0, sizeof(resolved));
-  if (!prim
-      || !ak_materialResolveForPrimitiveInstance(prim,
-                                                instance,
-                                                UINT32_MAX,
-                                                &resolved))
+  if (!prim || !ak_materialResolve(prim, instance, UINT32_MAX, &resolved))
     return;
   mat = resolved.material;
   surface = resolved.surface;
@@ -3179,13 +3178,13 @@ akb_extract_material(AkDoc *doc,
   if (mat)
     out->material_extra = ak_extra(mat);
   out->source_extra = akb_material_source_extra(mat);
-  if (akb_extract_material_fast_surface(doc, surface, out))
+  if (akb_extract_material_fast_surface(doc, instance, prim, surface, out))
     return;
 
   out->material_type = (uint32_t)surface->type;
 
 #define AKB_COPY_TEX(ROLE, TEXREF, DEST) \
-  akb_copy_texture_info(doc, (TEXREF), (ROLE), (DEST), sizeof(DEST), out)
+  akb_copy_texture_info(doc, instance, prim, (TEXREF), (ROLE), (DEST), sizeof(DEST), out)
 
   out->double_sided = (surface->flags & AK_MATERIAL_FLAG_DOUBLE_SIDED) ? 1 : 0;
   out->alpha_cutoff = surface->alphaCutoff;
@@ -3322,6 +3321,13 @@ akb_extract_material(AkDoc *doc,
     AKB_COPY_TEX("volume_thickness", volume->thickness, out->volume_thickness_texture);
   }
 
+  subsurface = (void*)ak_materialFeature(surface, AK_MATERIAL_FEATURE_SUBSURFACE);
+  if (subsurface) {
+    if (subsurface->color)
+      akb_material_input_color3(subsurface->color, 0.0f, 0.0f, 0.0f, out->volume_scatter_color);
+    out->volume_scatter_anisotropy = subsurface->anisotropy;
+  }
+
   anisotropy = (void*)ak_materialFeature(surface, AK_MATERIAL_FEATURE_ANISOTROPY);
   if (anisotropy) {
     out->anisotropy = akb_material_input_scalar(anisotropy->strength, 0.0f);
@@ -3350,7 +3356,12 @@ akb_extract_material(AkDoc *doc,
   if (dispersion)
     out->dispersion = dispersion->dispersion;
 
-  opacity = out->base_color[3];
+  if ((surface->flags & (AK_MATERIAL_FLAG_ALPHA_BLEND | AK_MATERIAL_FLAG_ALPHA_MASK))
+      || surface->opacity)
+    opacity = out->base_color[3];
+  else
+    opacity = 1.0f;
+
   if (surface->opacity) {
     out->transparent_amount = akb_material_input_scalar(surface->opacity, 1.0f);
     opacity *= out->transparent_amount;
@@ -3358,6 +3369,7 @@ akb_extract_material(AkDoc *doc,
     out->transparent_color[1] = 1.0f;
     out->transparent_color[2] = 1.0f;
     out->transparent_color[3] = out->transparent_amount;
+    out->transparent_inverted = ak_materialInputFlag(surface->opacity, AK_MATERIAL_INPUT_FLAG_INVERTED) ? 1 : 0;
     AKB_COPY_TEX("transparent", surface->opacity, out->transparent_texture);
   }
 
@@ -3408,7 +3420,7 @@ akb_extract_material_variants(AkDoc *doc,
   count = 0;
   for (i = 0; i < doc->materialVariantCount; i++) {
     memset(&resolved, 0, sizeof(resolved));
-    if (!ak_materialResolveForPrimitiveInstance(prim, instance, i, &resolved)
+    if (!ak_materialResolve(prim, instance, i, &resolved)
         || resolved.variantIndex != i
         || !resolved.material)
       continue;
@@ -7082,10 +7094,7 @@ akb_material_animation_new(AkDoc *doc,
     return NULL;
 
   memset(&resolved, 0, sizeof(resolved));
-  if (!ak_materialResolveForPrimitiveInstance(prim,
-                                             instance,
-                                             UINT32_MAX,
-                                             &resolved))
+  if (!ak_materialResolve(prim, instance, UINT32_MAX, &resolved))
     return NULL;
 
   binding_count = akb_material_bindings(resolved.surface, bindings, 64);
@@ -9735,6 +9744,7 @@ akb_primitive_has_default_material_values(const AkbPrimitive *prim) {
          && akb_vec3_eq(prim->specular_color, 1.0f, 1.0f, 1.0f)
          && akb_vec3_eq(prim->sheen_color, 0.0f, 0.0f, 0.0f)
          && akb_vec3_eq(prim->volume_attenuation_color, 1.0f, 1.0f, 1.0f)
+         && akb_vec3_eq(prim->volume_scatter_color, 0.0f, 0.0f, 0.0f)
          && akb_vec3_eq(prim->diffuse_transmission_color, 1.0f, 1.0f, 1.0f)
          && akb_float_eq(prim->alpha_cutoff, 0.5f)
          && akb_float_eq(prim->transparent_amount, 1.0f)
@@ -9755,6 +9765,7 @@ akb_primitive_has_default_material_values(const AkbPrimitive *prim) {
          && akb_float_eq(prim->iridescence_thickness_maximum, 400.0f)
          && akb_float_eq(prim->volume_thickness, 0.0f)
          && akb_float_eq(prim->volume_attenuation_distance, INFINITY)
+         && akb_float_eq(prim->volume_scatter_anisotropy, 0.0f)
          && akb_float_eq(prim->anisotropy, 0.0f)
          && akb_float_eq(prim->anisotropy_rotation, 0.0f)
          && akb_float_eq(prim->diffuse_transmission, 0.0f)
@@ -9810,7 +9821,7 @@ akb_primitive_is_simple_py(const AkbPrimitive *prim) {
          && !prim->has_gsplat
          && !prim->has_sheen
          && !prim->alpha_mode
-         && !prim->transparent_opaque
+         && !prim->transparent_inverted
          && !prim->primitive_extra
          && !prim->mesh_extra
          && !prim->geometry_extra
@@ -10184,6 +10195,8 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
               akb_vec3_or_none(prim->sheen_color, 0.0f, 0.0f, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_ATTENUATION_COLOR,
               akb_vec3_or_none(prim->volume_attenuation_color, 1.0f, 1.0f, 1.0f));
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_SCATTER_COLOR,
+              akb_vec3_or_none(prim->volume_scatter_color, 0.0f, 0.0f, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION_COLOR,
               akb_vec3_or_none(prim->diffuse_transmission_color, 1.0f, 1.0f, 1.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_METALLIC, akb_float_or_none(prim->metallic, 1.0f));
@@ -10210,12 +10223,14 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_THICKNESS, akb_float_or_none(prim->volume_thickness, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_ATTENUATION_DISTANCE,
               akb_float_or_none(prim->volume_attenuation_distance, INFINITY));
+  AKB_SET_OBJ(AKB_PY_PRIM_VOLUME_SCATTER_ANISOTROPY,
+              akb_float_or_none(prim->volume_scatter_anisotropy, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY, akb_float_or_none(prim->anisotropy, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_ANISOTROPY_ROTATION, akb_float_or_none(prim->anisotropy_rotation, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_DIFFUSE_TRANSMISSION, akb_float_or_none(prim->diffuse_transmission, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_DISPERSION, akb_float_or_none(prim->dispersion, 0.0f));
   AKB_SET_OBJ(AKB_PY_PRIM_ALPHA_MODE, PyLong_FromUnsignedLong(prim->alpha_mode));
-  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_OPAQUE, PyLong_FromUnsignedLong(prim->transparent_opaque));
+  AKB_SET_OBJ(AKB_PY_PRIM_TRANSPARENT_INVERTED, PyBool_FromLong(prim->transparent_inverted));
   AKB_SET_OBJ(AKB_PY_PRIM_DOUBLE_SIDED, PyBool_FromLong(prim->double_sided));
   AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_TYPE, PyLong_FromUnsignedLong(prim->material_type));
   AKB_SET_OBJ(AKB_PY_PRIM_FILE_TYPE, PyLong_FromUnsignedLong(prim->file_type));

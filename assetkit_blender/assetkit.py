@@ -362,6 +362,7 @@ class MeshPrimitiveData:
     specular_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     sheen_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
     volume_attenuation_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    volume_scatter_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
     diffuse_transmission_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     metallic: float = 1.0
     roughness: float = 1.0
@@ -384,12 +385,13 @@ class MeshPrimitiveData:
     iridescence_thickness_maximum: float = 400.0
     volume_thickness: float = 0.0
     volume_attenuation_distance: float = float("inf")
+    volume_scatter_anisotropy: float = 0.0
     anisotropy: float = 0.0
     anisotropy_rotation: float = 0.0
     diffuse_transmission: float = 0.0
     dispersion: float = 0.0
     alpha_mode: int = 0
-    transparent_opaque: int = 0
+    transparent_inverted: bool = False
     double_sided: bool = False
     has_sheen: bool = False
     skin_mesh_in_bind_pose: bool = False
@@ -1290,6 +1292,7 @@ _S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
     _M_SPECULAR_COLOR,
     _M_SHEEN_COLOR,
     _M_VOLUME_ATTENUATION_COLOR,
+    _M_VOLUME_SCATTER_COLOR,
     _M_DIFFUSE_TRANSMISSION_COLOR,
     _M_METALLIC,
     _M_ROUGHNESS,
@@ -1312,12 +1315,13 @@ _S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
     _M_IRIDESCENCE_THICKNESS_MAXIMUM,
     _M_VOLUME_THICKNESS,
     _M_VOLUME_ATTENUATION_DISTANCE,
+    _M_VOLUME_SCATTER_ANISOTROPY,
     _M_ANISOTROPY,
     _M_ANISOTROPY_ROTATION,
     _M_DIFFUSE_TRANSMISSION,
     _M_DISPERSION,
     _M_ALPHA_MODE,
-    _M_TRANSPARENT_OPAQUE,
+    _M_TRANSPARENT_INVERTED,
     _M_DOUBLE_SIDED,
     _M_MATERIAL_TYPE,
     _M_FILE_TYPE,
@@ -1407,7 +1411,7 @@ _S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
     _M_EDGE_COUNT,
     _M_EDGES_U32,
     _M_SMOOTH_SHADING,
-) = range(132)
+) = range(134)
 
 _M_FIELD_NAMES = (
     "_owner",
@@ -1425,6 +1429,7 @@ _M_FIELD_NAMES = (
     "specular_color",
     "sheen_color",
     "volume_attenuation_color",
+    "volume_scatter_color",
     "diffuse_transmission_color",
     "metallic",
     "roughness",
@@ -1447,12 +1452,13 @@ _M_FIELD_NAMES = (
     "iridescence_thickness_maximum",
     "volume_thickness",
     "volume_attenuation_distance",
+    "volume_scatter_anisotropy",
     "anisotropy",
     "anisotropy_rotation",
     "diffuse_transmission",
     "dispersion",
     "alpha_mode",
-    "transparent_opaque",
+    "transparent_inverted",
     "double_sided",
     "material_type",
     "file_type",
@@ -1833,6 +1839,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         data.specular_color = tuple(get(_M_SPECULAR_COLOR) or (1.0, 1.0, 1.0))
         data.sheen_color = tuple(get(_M_SHEEN_COLOR) or (0.0, 0.0, 0.0))
         data.volume_attenuation_color = tuple(get(_M_VOLUME_ATTENUATION_COLOR) or (1.0, 1.0, 1.0))
+        data.volume_scatter_color = tuple(get(_M_VOLUME_SCATTER_COLOR) or (0.0, 0.0, 0.0))
         data.diffuse_transmission_color = tuple(get(_M_DIFFUSE_TRANSMISSION_COLOR) or (1.0, 1.0, 1.0))
         metallic = get(_M_METALLIC)
         roughness = get(_M_ROUGHNESS)
@@ -1855,6 +1862,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         iridescence_thickness_maximum = get(_M_IRIDESCENCE_THICKNESS_MAXIMUM)
         volume_thickness = get(_M_VOLUME_THICKNESS)
         volume_attenuation_distance = get(_M_VOLUME_ATTENUATION_DISTANCE)
+        volume_scatter_anisotropy = get(_M_VOLUME_SCATTER_ANISOTROPY)
         anisotropy = get(_M_ANISOTROPY)
         anisotropy_rotation = get(_M_ANISOTROPY_ROTATION)
         diffuse_transmission = get(_M_DIFFUSE_TRANSMISSION)
@@ -1886,12 +1894,15 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         data.volume_attenuation_distance = float(
             volume_attenuation_distance if volume_attenuation_distance is not None else float("inf")
         )
+        data.volume_scatter_anisotropy = float(
+            volume_scatter_anisotropy if volume_scatter_anisotropy is not None else 0.0
+        )
         data.anisotropy = float(anisotropy if anisotropy is not None else 0.0)
         data.anisotropy_rotation = float(anisotropy_rotation if anisotropy_rotation is not None else 0.0)
         data.diffuse_transmission = float(diffuse_transmission if diffuse_transmission is not None else 0.0)
         data.dispersion = float(dispersion if dispersion is not None else 0.0)
         data.alpha_mode = int(get(_M_ALPHA_MODE) or 0)
-        data.transparent_opaque = int(get(_M_TRANSPARENT_OPAQUE) or 0)
+        data.transparent_inverted = bool(get(_M_TRANSPARENT_INVERTED))
         data.double_sided = bool(get(_M_DOUBLE_SIDED))
         data.has_sheen = bool(get(_M_HAS_SHEEN))
         data.skin_mesh_in_bind_pose = bool(get(_M_SKIN_MESH_IN_BIND_POSE))

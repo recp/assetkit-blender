@@ -141,10 +141,6 @@ _AK_MATERIAL_TYPE_LAMBERT = 3
 _AK_MATERIAL_TYPE_CONSTANT = 4
 _AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS = 6
 _AK_MATERIAL_TYPE_PBR = 7
-_AK_OPAQUE_A_ONE = 1
-_AK_OPAQUE_A_ZERO = 2
-_AK_OPAQUE_RGB_ONE = 3
-_AK_OPAQUE_RGB_ZERO = 4
 _GLTF_SETTINGS_GROUP_NAME = "glTF Material Output"
 _GLTF_SETTINGS_SOCKETS = (
     ("Occlusion", 1.0),
@@ -6822,6 +6818,7 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
         "specular_color": tuple(raw.get("specular_color") or data.specular_color),
         "sheen_color": tuple(raw.get("sheen_color") or data.sheen_color),
         "volume_attenuation_color": tuple(raw.get("volume_attenuation_color") or data.volume_attenuation_color),
+        "volume_scatter_color": tuple(raw.get("volume_scatter_color") or data.volume_scatter_color),
         "diffuse_transmission_color": tuple(
             raw.get("diffuse_transmission_color") or data.diffuse_transmission_color
         ),
@@ -6858,12 +6855,17 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
             "volume_attenuation_distance",
             data.volume_attenuation_distance,
         ),
+        "volume_scatter_anisotropy": _raw_float(
+            raw,
+            "volume_scatter_anisotropy",
+            data.volume_scatter_anisotropy,
+        ),
         "anisotropy": _raw_float(raw, "anisotropy", data.anisotropy),
         "anisotropy_rotation": _raw_float(raw, "anisotropy_rotation", data.anisotropy_rotation),
         "diffuse_transmission": _raw_float(raw, "diffuse_transmission", data.diffuse_transmission),
         "dispersion": _raw_float(raw, "dispersion", data.dispersion),
         "alpha_mode": _raw_int(raw, "alpha_mode", data.alpha_mode),
-        "transparent_opaque": _raw_int(raw, "transparent_opaque", data.transparent_opaque),
+        "transparent_inverted": bool(raw.get("transparent_inverted", data.transparent_inverted)),
         "double_sided": bool(raw.get("double_sided", data.double_sided)),
         "has_sheen": bool(raw.get("has_sheen", data.has_sheen)),
         "material_type": _raw_int(raw, "material_type", data.material_type),
@@ -7586,7 +7588,7 @@ def _can_use_classic_texture_fast_material(data: MeshPrimitiveData, color_attr: 
         return False
     if (
         data.alpha_mode
-        or data.transparent_opaque
+        or data.transparent_inverted
         or abs(float(data.opacity) - 1.0) > 1e-6
         or abs(float(data.transparent_amount) - 1.0) > 1e-6
         or abs(float(data.occlusion_strength) - 1.0) > 1e-6
@@ -8302,7 +8304,7 @@ def _has_nondefault_assetkit_material_props(data: MeshPrimitiveData) -> bool:
     return (
         float(data.volume_thickness) > 0.0
         or float(data.dispersion) != 0.0
-        or int(data.transparent_opaque) != 0
+        or bool(data.transparent_inverted)
         or abs(float(data.opacity) - 1.0) > 1.0e-6
         or not _tuple_close(data.transparent_color, (1.0, 1.0, 1.0, 1.0))
     )
@@ -8882,7 +8884,7 @@ def _has_material_data(data: MeshPrimitiveData) -> bool:
         and not data.material_key
         and not data.material_type
         and not data.alpha_mode
-        and not data.transparent_opaque
+        and not data.transparent_inverted
         and not data.texture_infos
         and not data.color_sets
         and not data.base_color_texture
@@ -9020,10 +9022,7 @@ def _set_material_alpha_mode(mat: bpy.types.Material, data: MeshPrimitiveData) -
 def _prefers_hashed_transparency(data: MeshPrimitiveData) -> bool:
     if not data.transparent_texture and not _uses_transparent_as_surface_color(data):
         return False
-    return int(data.transparent_opaque) in {
-        _AK_OPAQUE_A_ZERO,
-        _AK_OPAQUE_RGB_ZERO,
-    }
+    return bool(data.transparent_inverted)
 
 
 def _set_material_enum(mat: bpy.types.Material, attr: str, *values: str) -> bool:
@@ -9148,7 +9147,7 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         round(float(data.diffuse_transmission), 6),
         round(float(data.dispersion), 6),
         int(data.alpha_mode),
-        int(data.transparent_opaque),
+        bool(data.transparent_inverted),
         _is_double_sided_material(data),
         bool(data.has_sheen),
         int(data.material_type),
@@ -9254,7 +9253,7 @@ def _fast_base_color_texture_visual_key(data: MeshPrimitiveData, color_attr: str
         return None
     if (
         data.alpha_mode
-        or data.transparent_opaque
+        or data.transparent_inverted
         or abs(float(data.opacity) - 1.0) > 1e-6
         or abs(float(data.transparent_amount) - 1.0) > 1e-6
         or abs(float(data.normal_scale) - 1.0) > 1e-6
@@ -9453,6 +9452,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_volume_thickness": data.volume_thickness,
         "assetkit_volume_attenuation_color": data.volume_attenuation_color,
         "assetkit_volume_attenuation_distance": data.volume_attenuation_distance,
+        "assetkit_volume_scatter_anisotropy": data.volume_scatter_anisotropy,
         "assetkit_anisotropy": data.anisotropy,
         "assetkit_anisotropy_rotation": data.anisotropy_rotation,
         "assetkit_diffuse_transmission": data.diffuse_transmission,
@@ -9461,7 +9461,7 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_transparent_color": data.transparent_color,
         "assetkit_transparent_amount": data.transparent_amount,
         "assetkit_opacity": data.opacity,
-        "assetkit_transparent_opaque": data.transparent_opaque,
+        "assetkit_transparent_inverted": bool(data.transparent_inverted),
         "assetkit_normal_scale": data.normal_scale,
         "assetkit_occlusion_strength": data.occlusion_strength,
         "assetkit_emissive_strength": data.emissive_strength,
@@ -9531,6 +9531,8 @@ _MATERIAL_PROP_DEFAULTS = {
     "assetkit_volume_thickness": 0.0,
     "assetkit_volume_attenuation_color": (1.0, 1.0, 1.0),
     "assetkit_volume_attenuation_distance": math.inf,
+    "assetkit_volume_scatter_multiscatter_color": (0.0, 0.0, 0.0),
+    "assetkit_volume_scatter_anisotropy": 0.0,
     "assetkit_anisotropy": 0.0,
     "assetkit_anisotropy_rotation": 0.0,
     "assetkit_diffuse_transmission": 0.0,
@@ -9539,7 +9541,7 @@ _MATERIAL_PROP_DEFAULTS = {
     "assetkit_transparent_color": (1.0, 1.0, 1.0, 1.0),
     "assetkit_transparent_amount": 1.0,
     "assetkit_opacity": 1.0,
-    "assetkit_transparent_opaque": 0,
+    "assetkit_transparent_inverted": False,
     "assetkit_normal_scale": 1.0,
     "assetkit_occlusion_strength": 1.0,
     "assetkit_emissive_strength": 1.0,
@@ -10169,8 +10171,13 @@ def _has_volume_scatter(data: MeshPrimitiveData) -> bool:
 
 
 def _volume_scatter_color(data: MeshPrimitiveData) -> tuple[float, float, float] | None:
+    if not _tuple_close(data.volume_scatter_color, (0.0, 0.0, 0.0)):
+        return tuple(max(0.0, min(1.0, float(value))) for value in data.volume_scatter_color)
+
     ext = _material_extra_extension(data, "KHR_materials_volume_scatter")
-    color = _assetkit_extra_float_array(_assetkit_extra_child(ext, "multiscatterColorFactor"), 3)
+    color = _assetkit_extra_float_array(_assetkit_extra_child(ext, "multiscatterColor"), 3)
+    if len(color) != 3:
+        color = _assetkit_extra_float_array(_assetkit_extra_child(ext, "multiscatterColorFactor"), 3)
     if len(color) != 3:
         return None
     return tuple(max(0.0, min(1.0, float(value))) for value in color)
@@ -10205,6 +10212,10 @@ def _link_volume_scatter(mat: bpy.types.Material, data: MeshPrimitiveData) -> No
             density.default_value = min(1.0 / distance, 1.0)
         else:
             density.default_value = max(0.0, min(float(data.volume_thickness), 1.0))
+
+    anisotropy = scatter.inputs.get("Anisotropy")
+    if anisotropy:
+        anisotropy.default_value = max(-1.0, min(1.0, float(data.volume_scatter_anisotropy)))
 
     volume_output = scatter.outputs.get("Volume")
     volume_input = output.inputs.get("Volume")
@@ -10456,14 +10467,13 @@ def _link_transparent_texture(
     if not tex:
         return
 
-    opaque = int(data.transparent_opaque)
     channel = _texture_channel_name(tex_info, "")
     if channel:
         if channel == "Alpha":
             output = tex.outputs.get("Alpha") or _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent Alpha")
         else:
             output = _separate_color_channel(mat, tex.outputs.get("Color"), channel)
-    elif opaque in {_AK_OPAQUE_RGB_ONE, _AK_OPAQUE_RGB_ZERO}:
+    elif set(_texture_channel_letters(tex_info)) >= {"R", "G", "B"}:
         output = _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent RGB")
     else:
         output = tex.outputs.get("Alpha") or _rgb_to_luminance(mat, tex.outputs.get("Color"), "Transparent Alpha")
@@ -10474,7 +10484,7 @@ def _link_transparent_texture(
     if float(data.transparent_amount) != 1.0:
         output = _multiply_value_factor(mat, output, data.transparent_amount, "Transparent Amount")
 
-    if opaque in {_AK_OPAQUE_A_ZERO, _AK_OPAQUE_RGB_ZERO}:
+    if data.transparent_inverted:
         output = _one_minus_value(mat, output, "Transparent Invert")
 
     _replace_socket_link(mat, alpha_socket, output)
