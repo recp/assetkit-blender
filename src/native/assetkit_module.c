@@ -1489,20 +1489,13 @@ static void
 akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord, int include_skin_primitives) {
   size_t i;
 
+  (void)include_skin_primitives;
+
   if (!list || !coord || !coord->convert || coord->conversion != AKB_COORD_TRANSFORM)
     return;
-  if (!list->count)
-    return;
 
-  akb_set_primitive_coord_matrix(&list->items[0], coord);
-  if (!include_skin_primitives)
-    return;
-
-  for (i = 1; i < list->count; i++) {
-    if (!list->items[i].has_skin)
-      continue;
+  for (i = 0; i < list->count; i++)
     akb_set_primitive_coord_matrix(&list->items[i], coord);
-  }
 }
 
 static void

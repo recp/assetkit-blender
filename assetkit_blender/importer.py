@@ -4597,10 +4597,7 @@ def _set_node_visibility(obj: bpy.types.Object, visible: bool) -> None:
 def _hide_helper_object(obj: bpy.types.Object, hide_empty: bool = False) -> None:
     obj["assetkit_helper_object"] = True
     if obj.type == "EMPTY":
-        obj.hide_select = False
-        obj.empty_display_size = max(0.1, min(obj.empty_display_size, 0.35))
-        if hide_empty:
-            _hide_empty_helper_object(obj)
+        _hide_empty_helper_object(obj)
         return
 
     obj.hide_select = True
@@ -9011,7 +9008,7 @@ def _set_material_alpha_mode(mat: bpy.types.Material, data: MeshPrimitiveData) -
         else:
             mat.blend_method = "BLEND"
             _set_material_enum(mat, "surface_render_method", "BLENDED")
-        _set_transparency_overlap(mat, False)
+        _set_transparency_overlap(mat, True)
     elif alpha_mode == 2:
         mat.blend_method = "CLIP"
         _set_material_enum(mat, "surface_render_method", "DITHERED")
