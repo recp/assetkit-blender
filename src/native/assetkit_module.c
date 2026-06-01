@@ -3080,8 +3080,26 @@ akb_node_geometry_instance(AkNode *node) {
 }
 
 static int
-akb_instance_has_material_binding(AkInstanceGeometry *instance) {
-  return instance && instance->reservedMaterialBinding;
+akb_instance_affects_material(AkMeshPrimitive *prim, AkInstanceGeometry *instance) {
+  AkResolvedMaterial with_instance;
+  AkResolvedMaterial without_instance;
+
+  if (!prim || !instance)
+    return 0;
+
+  memset(&with_instance, 0, sizeof(with_instance));
+  memset(&without_instance, 0, sizeof(without_instance));
+
+  if (!ak_materialResolve(prim, instance, UINT32_MAX, &with_instance))
+    return 0;
+  if (!ak_materialResolve(prim, NULL, UINT32_MAX, &without_instance))
+    return with_instance.material || with_instance.surface || with_instance.binding;
+
+  return with_instance.material != without_instance.material
+         || with_instance.surface != without_instance.surface
+         || with_instance.binding != without_instance.binding
+         || with_instance.propertyIndex != without_instance.propertyIndex
+         || with_instance.variantIndex != without_instance.variantIndex;
 }
 
 static void
@@ -3935,7 +3953,7 @@ akb_loop_attribute_copy(AkbArena *arena,
   }
 
   stride = prim->indexStride ? prim->indexStride : 1;
-  offset = input->offset;
+  offset = input->indexOffset;
 
 #define AKB_LOOP_ATTR_INDEX(LOOP_INDEX)                                  \
   do {                                                                   \
@@ -4040,7 +4058,7 @@ akb_try_extract_vertex_normals(AkbPrimitive *out,
       || (node && node->geometry && node->geometry->skinner))
     return;
 
-  if (normal_input->offset != pos_input->offset)
+  if (normal_input->indexOffset != pos_input->indexOffset)
     return;
 
   out->vertex_normals = akb_accessor_float_borrow(normal_input->accessor,
@@ -6550,7 +6568,7 @@ akb_node_camera_bindings(AkNode *node,
     return count;
 
   camera = (AkCamera *)ak_instanceObject(node->camera);
-  if (!camera || !camera->optics || !(projection = camera->optics->tcommon))
+  if (!camera || !camera->optics || !(projection = camera->optics->proj))
     return count;
 
   if (projection->type == AK_PROJECTION_PERSPECTIVE) {
@@ -6626,7 +6644,7 @@ akb_node_light_bindings(AkNode *node,
     return count;
 
   light = (AkLight *)ak_instanceObject(node->light);
-  if (!light || !(base = light->tcommon))
+  if (!light || !(base = light->data))
     return count;
 
   count = akb_anim_binding_push(bindings,
@@ -7407,10 +7425,10 @@ akb_extract_node_camera(AkbSceneNode *out, AkNode *node) {
     return;
 
   camera = (AkCamera *)ak_instanceObject(node->camera);
-  if (!camera || !camera->optics || !camera->optics->tcommon)
+  if (!camera || !camera->optics || !camera->optics->proj)
     return;
 
-  projection = camera->optics->tcommon;
+  projection = camera->optics->proj;
   out->camera_extra = ak_extra(camera);
   out->camera_imager_extra = camera->imager ? ak_extra(camera->imager) : NULL;
   out->camera_type = (uint8_t)projection->type + 1;
@@ -7449,10 +7467,10 @@ akb_extract_node_light(AkbSceneNode *out, AkNode *node) {
     return;
 
   light = (AkLight *)ak_instanceObject(node->light);
-  if (!light || !light->tcommon)
+  if (!light || !light->data)
     return;
 
-  base = light->tcommon;
+  base = light->data;
   out->light_extra = ak_extra(light);
   out->light_type = (uint8_t)base->type;
   snprintf(out->light_name,
@@ -7629,7 +7647,7 @@ akb_primitive_can_use_fast_extract(AkMeshPrimitive *prim,
         || (node->geometry
             && (node->geometry->morpher
                 || node->geometry->skinner
-                || akb_instance_has_material_binding(node->geometry))))
+                || akb_instance_affects_material(prim, node->geometry))))
       return 0;
   }
 
@@ -7794,7 +7812,7 @@ akb_extract_simple_mesh_group(AkbArena *arena,
     pos_input = akb_primitive_position_input(prim);
     positions = akb_accessor_float_borrow(pos_input->accessor, 3, &pos_count);
     stride = prim->indexStride ? prim->indexStride : 1;
-    pos_offset = pos_input->offset;
+    pos_offset = pos_input->indexOffset;
     if (akb_index_view_init(prim, &index_view)) {
       raw_loop_count = index_view.count / stride;
       if (raw_loop_count > UINT32_MAX) {
@@ -7969,7 +7987,7 @@ akb_extract_primitive(AkbArena *arena,
   has_index_view = akb_index_view_init(prim, &index_view);
   if (has_index_view) {
     stride = prim->indexStride ? prim->indexStride : 1;
-    pos_offset = pos_input->offset;
+    pos_offset = pos_input->indexOffset;
     raw_loop_count = index_view.count / stride;
     if (raw_loop_count > UINT32_MAX) {
       akb_primitive_free(&out);
@@ -8458,7 +8476,7 @@ akb_primitive_can_reuse_mesh_data(const AkbAnimationIndex *anim_index,
   if (node->instancing
       || node->geometry->morpher
       || node->geometry->skinner
-      || akb_instance_has_material_binding(node->geometry))
+      || akb_instance_affects_material(prim, node->geometry))
     return 0;
   if (prim->type != AKB_PRIMITIVE_TRIANGLES
       || akb_primitive_index_width(prim) != 3

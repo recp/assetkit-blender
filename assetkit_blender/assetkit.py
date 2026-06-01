@@ -105,7 +105,7 @@ AkInput._fields_ = [
     ("index", ctypes.c_uint32),
     ("isIndexed", ctypes.c_bool),
     ("semantic", ctypes.c_int32),
-    ("offset", ctypes.c_uint32),
+    ("indexOffset", ctypes.c_uint32),
     ("set", ctypes.c_uint32),
 ]
 
@@ -554,7 +554,7 @@ class AssetKit:
         raw_indices = self._primitive_indices(prim)
         if raw_indices:
             stride = max(1, int(prim.indexStride or 1))
-            pos_offset = int(pos_input.contents.offset or 0)
+            pos_offset = int(pos_input.contents.indexOffset or 0)
             vertex_indices = [raw_indices[i + pos_offset] for i in range(0, len(raw_indices), stride)]
         else:
             vertex_indices = list(range(len(positions)))
@@ -628,7 +628,7 @@ class AssetKit:
         loop_count = (len(vertex_indices) // 3) * 3
         if raw_indices:
             stride = max(1, int(prim.indexStride or 1))
-            offset = int(inp.contents.offset or 0)
+            offset = int(inp.contents.indexOffset or 0)
             attr_indices = [raw_indices[i + offset] for i in range(0, len(raw_indices), stride)]
         else:
             attr_indices = vertex_indices
