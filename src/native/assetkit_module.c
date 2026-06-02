@@ -3809,7 +3809,7 @@ akb_trs_to_matrix(const float *translation,
 
 static int
 akb_extract_instancing(AkbArena *arena, AkbPrimitive *out, AkNode *node) {
-  AkInstanceAttribs *instancing;
+  AkGpuInstancing *instancing;
   float *translations = NULL;
   float *rotations = NULL;
   float *scales = NULL;
@@ -3818,10 +3818,10 @@ akb_extract_instancing(AkbArena *arena, AkbPrimitive *out, AkNode *node) {
   uint8_t borrowed_rotations = 0;
   uint8_t borrowed_scales = 0;
 
-  if (!node || !node->instancing || node->instancing->count == 0)
+  if (!node || !node->gpuInstancing || node->gpuInstancing->count == 0)
     return 1;
 
-  instancing = node->instancing;
+  instancing = node->gpuInstancing;
   if (instancing->translation) {
     translations = akb_instance_attr_values(instancing->translation,
                                             3,
@@ -7635,7 +7635,7 @@ akb_primitive_can_use_fast_extract(AkMeshPrimitive *prim,
     return 0;
 
   if (node) {
-    if (node->instancing
+    if (node->gpuInstancing
         || (node->geometry
             && (node->geometry->morpher
                 || node->geometry->skinner
@@ -7950,7 +7950,7 @@ akb_extract_primitive(AkbArena *arena,
     }
     out.animation = akb_animation_retain(animation);
     out.morph_animation = akb_animation_retain(morph_animation);
-    if (node && node->instancing && !akb_extract_instancing(arena, &out, node)) {
+    if (node && node->gpuInstancing && !akb_extract_instancing(arena, &out, node)) {
       akb_primitive_free(&out);
       return 0;
     }
@@ -8465,7 +8465,7 @@ akb_primitive_can_reuse_mesh_data(const AkbAnimationIndex *anim_index,
   if ((animation && animation->count)
       || (morph_animation && morph_animation->count))
     return 0;
-  if (node->instancing
+  if (node->gpuInstancing
       || node->geometry->morpher
       || node->geometry->skinner
       || akb_instance_affects_material(prim, node->geometry))
@@ -8733,7 +8733,7 @@ akb_extract_node(AkbArena *arena,
   AkInstanceGeometry *geometry_inst;
   AkInstanceGeometry *next_geometry;
   AkInstanceGeometry *saved_geometry;
-  AkInstanceBase *inst;
+  AkNodeRef *node_ref;
   AkbAnimation *animation;
   AkbAnimation *morph_animation;
   int32_t node_index;
@@ -8808,8 +8808,8 @@ akb_extract_node(AkbArena *arena,
       return 0;
   }
 
-  for (inst = node->node ? &node->node->base : NULL; inst; inst = inst->next) {
-    inst_node = (AkNode *)ak_instanceObject(inst);
+  for (node_ref = node->nodeRefs; node_ref; node_ref = node_ref->next) {
+    inst_node = ak_nodeRefTarget(node_ref);
     if (!inst_node || inst_node == node)
       continue;
     if (!akb_extract_node(arena, list, nodes, doc, doc_owner, inst_node, anim_index, reuse_cache, coord, options, node_index))
@@ -8883,7 +8883,7 @@ static void
 akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate *estimate) {
   AkNode *child;
   AkNode *inst_node;
-  AkInstanceBase *inst;
+  AkNodeRef *node_ref;
   AkInstanceGeometry *geometry_inst;
   AkGeometry *geom;
 
@@ -8903,8 +8903,8 @@ akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate 
   for (child = node->chld; child; child = child->next)
     akb_estimate_node(child, options, estimate);
 
-  for (inst = node->node ? &node->node->base : NULL; inst; inst = inst->next) {
-    inst_node = (AkNode *)ak_instanceObject(inst);
+  for (node_ref = node->nodeRefs; node_ref; node_ref = node_ref->next) {
+    inst_node = ak_nodeRefTarget(node_ref);
     if (!inst_node || inst_node == node)
       continue;
     akb_estimate_node(inst_node, options, estimate);
@@ -8915,22 +8915,12 @@ static AkbSceneEstimate
 akb_estimate_scene(AkDoc *doc, const AkbLoadOptions *options) {
   AkbSceneEstimate estimate = {0};
   AkScene *scene;
-  AkInstanceBase *inst;
-  AkNode *node;
 
   scene = akb_selected_scene(doc, options);
   if (!scene || !scene->node)
     return estimate;
 
-  if (scene->node->node) {
-    for (inst = &scene->node->node->base; inst; inst = inst->next) {
-      node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-      akb_estimate_node(node, options, &estimate);
-    }
-  } else {
-    for (node = scene->node; node; node = node->next)
-      akb_estimate_node(node, options, &estimate);
-  }
+  akb_estimate_node(scene->node, options, &estimate);
 
   return estimate;
 }
@@ -8961,8 +8951,6 @@ akb_extract_scene(AkDoc *doc,
                   size_t *reuse_hits) {
   AkbPrimitiveReuseCache reuse_cache = {0};
   AkScene *scene;
-  AkInstanceBase *inst;
-  AkNode *node;
   int ok = 1;
 
   if (!doc)
@@ -8972,22 +8960,8 @@ akb_extract_scene(AkDoc *doc,
   if (!scene || !scene->node)
     return 1;
 
-  if (scene->node->node) {
-    for (inst = &scene->node->node->base; inst; inst = inst->next) {
-      node = inst->node ? inst->node : (AkNode *)ak_instanceObject(inst);
-      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, &reuse_cache, coord, options, -1)) {
-        ok = 0;
-        break;
-      }
-    }
-  } else {
-    for (node = scene->node; node; node = node->next) {
-      if (!akb_extract_node(arena, list, nodes, doc, doc_owner, node, anim_index, &reuse_cache, coord, options, -1)) {
-        ok = 0;
-        break;
-      }
-    }
-  }
+  if (!akb_extract_node(arena, list, nodes, doc, doc_owner, scene->node, anim_index, &reuse_cache, coord, options, -1))
+    ok = 0;
 
   if (reuse_hits)
     *reuse_hits = reuse_cache.hits;
