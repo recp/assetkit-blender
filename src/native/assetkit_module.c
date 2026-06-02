@@ -2573,7 +2573,7 @@ akb_write_file_once(const char *path, const unsigned char *data, size_t length) 
 
 static int
 akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
-  AkInitFrom *init_from;
+  AkImageSource *source;
   AkBuffer *buff;
   const unsigned char *data;
   const char *tmpdir;
@@ -2587,13 +2587,13 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
   if (!image || !dest || capacity == 0)
     return 0;
 
-  init_from = image->initFrom;
-  if (init_from && init_from->resolvedFullPath) {
-    snprintf(dest, capacity, "%s", init_from->resolvedFullPath);
+  source = image->source;
+  if (source && source->resolvedPath) {
+    snprintf(dest, capacity, "%s", source->resolvedPath);
     return dest[0] != '\0';
   }
 
-  buff = init_from ? init_from->buff : NULL;
+  buff = source ? source->buffer : NULL;
   data = buff ? (const unsigned char *)buff->data : NULL;
   length = buff ? buff->length : 0;
   if (!data || length == 0)
@@ -2612,7 +2612,7 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
   hash = borrowed_slice
            ? akb_embedded_image_cache_hash(doc, image, length)
            : akb_fnv1a64(data, length);
-  ext = akb_embedded_image_extension(data, length, init_from->buffMime);
+  ext = akb_embedded_image_extension(data, length, source->mimeType);
   snprintf(filename,
            sizeof(filename),
            "texture_%016llx.%s",
@@ -2625,15 +2625,15 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
     return 0;
   }
 
-  if (!init_from->resolvedFullPath)
-    init_from->resolvedFullPath = ak_strdup(init_from, dest);
+  if (!source->resolvedPath)
+    source->resolvedPath = ak_strdup(source, dest);
 
   return 1;
 }
 
 static void
 akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
-  AkInitFrom *init_from;
+  AkImageSource *source;
   const char *path;
   char resolved[PATH_MAX];
 
@@ -2644,11 +2644,11 @@ akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
   if (!image)
     return;
 
-  init_from = image->initFrom;
-  if (!init_from)
+  source = image->source;
+  if (!source)
     return;
 
-  path = init_from->resolvedFullPath ? init_from->resolvedFullPath : init_from->ref;
+  path = source->resolvedPath ? source->resolvedPath : source->uri;
   if (!path || !path[0]) {
     akb_copy_embedded_texture_path(doc, image, dest, capacity);
     return;
@@ -9340,7 +9340,7 @@ akb_tree_to_py(const AkTree *tree) {
 
 static PyObject *
 akb_image_to_py(AkDoc *doc, AkImage *image, size_t index) {
-  AkInitFrom *init_from;
+  AkImageSource *source;
   AkImageBase *base;
   PyObject *dict;
   char path[PATH_MAX];
@@ -9349,7 +9349,7 @@ akb_image_to_py(AkDoc *doc, AkImage *image, size_t index) {
   if (!dict)
     return NULL;
 
-  init_from = image ? image->initFrom : NULL;
+  source = image ? image->source : NULL;
   base = image ? image->image : NULL;
   akb_copy_image_path(doc, image, path, sizeof(path));
 
@@ -9363,14 +9363,14 @@ akb_image_to_py(AkDoc *doc, AkImage *image, size_t index) {
   AKB_IMAGE_SET_OBJ("index", PyLong_FromSize_t(index));
   AKB_IMAGE_SET_OBJ("name", akb_unicode_from_cstr(image ? image->name : NULL));
   AKB_IMAGE_SET_OBJ("path", akb_unicode_from_cstr(path));
-  AKB_IMAGE_SET_OBJ("mime_type", akb_unicode_from_cstr(init_from ? init_from->buffMime : NULL));
+  AKB_IMAGE_SET_OBJ("mime_type", akb_unicode_from_cstr(source ? source->mimeType : NULL));
   AKB_IMAGE_SET_OBJ("type", PyLong_FromLong(base ? (long)base->type : 0));
   AKB_IMAGE_SET_OBJ("embedded",
-                    PyBool_FromLong(init_from && init_from->buff && init_from->buff->data));
-  AKB_IMAGE_SET_OBJ("face", PyLong_FromLong(init_from ? (long)init_from->face : 0));
-  AKB_IMAGE_SET_OBJ("mip_index", PyLong_FromUnsignedLong(init_from ? init_from->mipIndex : 0));
-  AKB_IMAGE_SET_OBJ("array_index", PyLong_FromLong(init_from ? (long)init_from->arrayIndex : -1));
-  AKB_IMAGE_SET_OBJ("depth", PyLong_FromUnsignedLong(init_from ? init_from->depth : 0));
+                    PyBool_FromLong(source && source->buffer && source->buffer->data));
+  AKB_IMAGE_SET_OBJ("face", PyLong_FromLong(source ? (long)source->face : 0));
+  AKB_IMAGE_SET_OBJ("mip_index", PyLong_FromUnsignedLong(source ? source->mipIndex : 0));
+  AKB_IMAGE_SET_OBJ("array_index", PyLong_FromLong(source ? (long)source->arrayIndex : -1));
+  AKB_IMAGE_SET_OBJ("depth", PyLong_FromUnsignedLong(source ? source->depth : 0));
   AKB_IMAGE_SET_OBJ("extra", akb_tree_to_py(image ? ak_extra(image) : NULL));
 
 #undef AKB_IMAGE_SET_OBJ
