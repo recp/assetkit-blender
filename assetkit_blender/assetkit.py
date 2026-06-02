@@ -197,13 +197,29 @@ class AkGeometryLib(ctypes.Structure):
     ]
 
 
+class AkScene(ctypes.Structure):
+    pass
+
+
+AkScene._fields_ = [
+    ("next", ctypes.POINTER(AkScene)),
+    ("name", ctypes.c_char_p),
+    ("node", ctypes.c_void_p),
+    ("firstCamNode", ctypes.c_void_p),
+    ("cameras", ctypes.c_void_p),
+    ("lights", ctypes.c_void_p),
+    ("bbox", ctypes.c_void_p),
+    ("extra", ctypes.c_void_p),
+]
+
+
 class AkLibraries(ctypes.Structure):
     _fields_ = [
         ("cameras", AkGenericLib),
         ("lights", AkGenericLib),
         ("materials", AkGenericLib),
         ("geometries", AkGeometryLib),
-        ("visualScenes", AkGenericLib),
+        ("scenes", AkGenericLib),
         ("nodes", AkGenericLib),
         ("animations", AkGenericLib),
         ("buffers", AkGenericLib),
@@ -214,10 +230,6 @@ class AkLibraries(ctypes.Structure):
         ("morphs", AkGenericLib),
         ("skins", AkGenericLib),
     ]
-
-
-class AkScene(ctypes.Structure):
-    _fields_ = [("visualScene", ctypes.c_void_p), ("extra", ctypes.c_void_p)]
 
 
 class AkMaterialPropertyRegistry(ctypes.Structure):
@@ -238,7 +250,7 @@ class AkDoc(ctypes.Structure):
         ("userData", ctypes.c_void_p),
         ("loadMillis", ctypes.c_float),
         ("lib", AkLibraries),
-        ("scene", AkScene),
+        ("scene", ctypes.POINTER(AkScene)),
         ("materialVariants", ctypes.c_void_p),
         ("materialVariantCount", ctypes.c_uint32),
         ("materialProperties", AkMaterialPropertyRegistry),

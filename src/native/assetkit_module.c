@@ -8819,22 +8819,22 @@ akb_extract_node(AkbArena *arena,
   return 1;
 }
 
-static AkVisualScene *
-akb_default_visual_scene(AkDoc *doc) {
-  if (!doc || !doc->scene.visualScene)
+static AkScene *
+akb_default_scene(AkDoc *doc) {
+  if (!doc || !doc->scene)
     return NULL;
-  return (AkVisualScene *)ak_instanceObject(doc->scene.visualScene);
+  return doc->scene;
 }
 
-static AkVisualScene *
-akb_visual_scene_by_index(AkDoc *doc, int32_t scene_index) {
-  AkVisualScene *scene;
+static AkScene *
+akb_scene_by_index(AkDoc *doc, int32_t scene_index) {
+  AkScene *scene;
   int32_t index;
 
-  if (!doc || scene_index < 0 || !doc->lib.visualScenes.first)
+  if (!doc || scene_index < 0 || !doc->lib.scenes.first)
     return NULL;
 
-  for (scene = doc->lib.visualScenes.first, index = 0;
+  for (scene = doc->lib.scenes.first, index = 0;
        scene;
        scene = scene->next, index++) {
     if (index == scene_index)
@@ -8844,12 +8844,12 @@ akb_visual_scene_by_index(AkDoc *doc, int32_t scene_index) {
   return NULL;
 }
 
-static AkVisualScene *
-akb_selected_visual_scene(AkDoc *doc, const AkbLoadOptions *options) {
-  AkVisualScene *scene;
+static AkScene *
+akb_selected_scene(AkDoc *doc, const AkbLoadOptions *options) {
+  AkScene *scene;
 
-  scene = options ? akb_visual_scene_by_index(doc, options->scene_index) : NULL;
-  return scene ? scene : akb_default_visual_scene(doc);
+  scene = options ? akb_scene_by_index(doc, options->scene_index) : NULL;
+  return scene ? scene : akb_default_scene(doc);
 }
 
 typedef struct AkbSceneEstimate {
@@ -8914,11 +8914,11 @@ akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate 
 static AkbSceneEstimate
 akb_estimate_scene(AkDoc *doc, const AkbLoadOptions *options) {
   AkbSceneEstimate estimate = {0};
-  AkVisualScene *scene;
+  AkScene *scene;
   AkInstanceBase *inst;
   AkNode *node;
 
-  scene = akb_selected_visual_scene(doc, options);
+  scene = akb_selected_scene(doc, options);
   if (!scene || !scene->node)
     return estimate;
 
@@ -8960,7 +8960,7 @@ akb_extract_scene(AkDoc *doc,
                   const AkbLoadOptions *options,
                   size_t *reuse_hits) {
   AkbPrimitiveReuseCache reuse_cache = {0};
-  AkVisualScene *scene;
+  AkScene *scene;
   AkInstanceBase *inst;
   AkNode *node;
   int ok = 1;
@@ -8968,7 +8968,7 @@ akb_extract_scene(AkDoc *doc,
   if (!doc)
     return 1;
 
-  scene = akb_selected_visual_scene(doc, options);
+  scene = akb_selected_scene(doc, options);
   if (!scene || !scene->node)
     return 1;
 
@@ -9407,14 +9407,14 @@ akb_doc_images_to_py(AkDoc *doc) {
 }
 
 static size_t
-akb_visual_scene_count(AkDoc *doc) {
-  AkVisualScene *scene;
+akb_scene_count(AkDoc *doc) {
+  AkScene *scene;
   size_t count = 0;
 
-  if (!doc || !doc->lib.visualScenes.first)
+  if (!doc || !doc->lib.scenes.first)
     return 0;
 
-  for (scene = doc->lib.visualScenes.first;
+  for (scene = doc->lib.scenes.first;
        scene;
        scene = scene->next)
     count++;
@@ -9423,14 +9423,14 @@ akb_visual_scene_count(AkDoc *doc) {
 }
 
 static int32_t
-akb_visual_scene_index(AkDoc *doc, AkVisualScene *selected) {
-  AkVisualScene *scene;
+akb_scene_index(AkDoc *doc, AkScene *selected) {
+  AkScene *scene;
   int32_t index = 0;
 
-  if (!doc || !doc->lib.visualScenes.first || !selected)
+  if (!doc || !doc->lib.scenes.first || !selected)
     return -1;
 
-  for (scene = doc->lib.visualScenes.first;
+  for (scene = doc->lib.scenes.first;
        scene;
        scene = scene->next, index++) {
     if (scene == selected)
@@ -9441,8 +9441,8 @@ akb_visual_scene_index(AkDoc *doc, AkVisualScene *selected) {
 }
 
 static PyObject *
-akb_visual_scene_names_to_py(AkDoc *doc) {
-  AkVisualScene *scene;
+akb_scene_names_to_py(AkDoc *doc) {
+  AkScene *scene;
   PyObject *list;
   PyObject *item;
 
@@ -9450,10 +9450,10 @@ akb_visual_scene_names_to_py(AkDoc *doc) {
   if (!list)
     return NULL;
 
-  if (!doc || !doc->lib.visualScenes.first)
+  if (!doc || !doc->lib.scenes.first)
     return list;
 
-  for (scene = doc->lib.visualScenes.first;
+  for (scene = doc->lib.scenes.first;
        scene;
        scene = scene->next) {
     item = akb_unicode_from_cstr(scene->name);
@@ -9470,22 +9470,22 @@ akb_visual_scene_names_to_py(AkDoc *doc) {
 
 static int
 akb_set_scene_info(PyObject *out, AkDoc *doc, const AkbLoadOptions *options) {
-  AkVisualScene *scene;
+  AkScene *scene;
 
-  scene = akb_selected_visual_scene(doc, options);
+  scene = akb_selected_scene(doc, options);
 
   return akb_py_dict_set_owned(out,
                                "scene_count",
-                               PyLong_FromSize_t(akb_visual_scene_count(doc)))
+                               PyLong_FromSize_t(akb_scene_count(doc)))
          && akb_py_dict_set_owned(out,
                                   "scene_index",
-                                  PyLong_FromLong(akb_visual_scene_index(doc, scene)))
+                                  PyLong_FromLong(akb_scene_index(doc, scene)))
          && akb_py_dict_set_owned(out,
                                   "scene_name",
                                   akb_unicode_from_cstr(scene ? scene->name : NULL))
          && akb_py_dict_set_owned(out,
                                   "scene_names",
-                                  akb_visual_scene_names_to_py(doc))
+                                  akb_scene_names_to_py(doc))
          && akb_py_dict_set_owned(out,
                                   "scene_extra",
                                   akb_tree_to_py(scene ? ak_extra(scene) : NULL));
