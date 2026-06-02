@@ -64,33 +64,41 @@ class AkIndexArray(ctypes.Structure):
 
 
 class AkBuffer(ctypes.Structure):
-    _fields_ = [
-        ("name", ctypes.c_char_p),
-        ("data", ctypes.c_void_p),
-        ("length", ctypes.c_size_t),
-    ]
+    pass
+
+
+AkBuffer._fields_ = [
+    ("next", ctypes.POINTER(AkBuffer)),
+    ("name", ctypes.c_char_p),
+    ("data", ctypes.c_void_p),
+    ("length", ctypes.c_size_t),
+]
 
 
 class AkAccessor(ctypes.Structure):
-    _fields_ = [
-        ("buffer", ctypes.POINTER(AkBuffer)),
-        ("name", ctypes.c_char_p),
-        ("min", ctypes.c_void_p),
-        ("max", ctypes.c_void_p),
-        ("byteOffset", ctypes.c_size_t),
-        ("byteStride", ctypes.c_size_t),
-        ("byteLength", ctypes.c_size_t),
-        ("count", ctypes.c_uint32),
-        ("bytesPerComponent", ctypes.c_uint32),
-        ("componentSize", ctypes.c_int32),
-        ("componentType", ctypes.c_int32),
-        ("componentCount", ctypes.c_uint32),
-        ("fillByteSize", ctypes.c_size_t),
-        ("gpuTarget", ctypes.c_int32),
-        ("normalized", ctypes.c_bool),
-        ("originalComponentType", ctypes.c_int32),
-        ("originallyNormalized", ctypes.c_bool),
-    ]
+    pass
+
+
+AkAccessor._fields_ = [
+    ("next", ctypes.POINTER(AkAccessor)),
+    ("buffer", ctypes.POINTER(AkBuffer)),
+    ("name", ctypes.c_char_p),
+    ("min", ctypes.c_void_p),
+    ("max", ctypes.c_void_p),
+    ("byteOffset", ctypes.c_size_t),
+    ("byteStride", ctypes.c_size_t),
+    ("byteLength", ctypes.c_size_t),
+    ("count", ctypes.c_uint32),
+    ("bytesPerComponent", ctypes.c_uint32),
+    ("componentSize", ctypes.c_int32),
+    ("componentType", ctypes.c_int32),
+    ("componentCount", ctypes.c_uint32),
+    ("fillByteSize", ctypes.c_size_t),
+    ("gpuTarget", ctypes.c_int32),
+    ("normalized", ctypes.c_bool),
+    ("originalComponentType", ctypes.c_int32),
+    ("originallyNormalized", ctypes.c_bool),
+]
 
 
 class AkInput(ctypes.Structure):
@@ -164,7 +172,7 @@ class AkGeometry(ctypes.Structure):
 
 
 AkGeometry._fields_ = [
-    ("base", AkOneWayIterBase),
+    ("next", ctypes.POINTER(AkGeometry)),
     ("name", ctypes.c_char_p),
     ("gdata", ctypes.POINTER(AkObject)),
     ("extra", ctypes.c_void_p),
@@ -173,38 +181,38 @@ AkGeometry._fields_ = [
 ]
 
 
-class AkLibrary(ctypes.Structure):
-    pass
+class AkGenericLib(ctypes.Structure):
+    _fields_ = [
+        ("first", ctypes.c_void_p),
+        ("last", ctypes.c_void_p),
+        ("count", ctypes.c_uint32),
+    ]
 
 
-AkLibrary._fields_ = [
-    ("next", ctypes.POINTER(AkLibrary)),
-    ("name", ctypes.c_char_p),
-    ("extra", ctypes.c_void_p),
-    ("chld", ctypes.c_void_p),
-    ("count", ctypes.c_uint64),
-]
+class AkGeometryLib(ctypes.Structure):
+    _fields_ = [
+        ("first", ctypes.POINTER(AkGeometry)),
+        ("last", ctypes.POINTER(AkGeometry)),
+        ("count", ctypes.c_uint32),
+    ]
 
 
 class AkLibraries(ctypes.Structure):
     _fields_ = [
-        ("cameras", ctypes.c_void_p),
-        ("lights", ctypes.c_void_p),
-        ("effects", ctypes.c_void_p),
-        ("libimages", ctypes.c_void_p),
-        ("materials", ctypes.c_void_p),
-        ("geometries", ctypes.POINTER(AkLibrary)),
-        ("controllers", ctypes.c_void_p),
-        ("visualScenes", ctypes.c_void_p),
-        ("nodes", ctypes.c_void_p),
-        ("animations", ctypes.c_void_p),
-        ("buffers", ctypes.c_void_p),
-        ("accessors", ctypes.c_void_p),
-        ("textures", ctypes.c_void_p),
-        ("samplers", ctypes.c_void_p),
-        ("images", ctypes.c_void_p),
-        ("morphs", ctypes.c_void_p),
-        ("skins", ctypes.c_void_p),
+        ("cameras", AkGenericLib),
+        ("lights", AkGenericLib),
+        ("materials", AkGenericLib),
+        ("geometries", AkGeometryLib),
+        ("visualScenes", AkGenericLib),
+        ("nodes", AkGenericLib),
+        ("animations", AkGenericLib),
+        ("buffers", AkGenericLib),
+        ("accessors", AkGenericLib),
+        ("textures", AkGenericLib),
+        ("samplers", AkGenericLib),
+        ("images", AkGenericLib),
+        ("morphs", AkGenericLib),
+        ("skins", AkGenericLib),
     ]
 
 
@@ -515,17 +523,14 @@ class AssetKit:
             self.lib.ak_free(ctypes.cast(doc, ctypes.c_void_p))
 
     def _iter_meshes(self, doc: AkDoc) -> Iterator[MeshPrimitiveData]:
-        lib = doc.lib.geometries
-        while lib:
-            geom_ptr = ctypes.cast(lib.contents.chld, ctypes.POINTER(AkGeometry))
-            while geom_ptr:
-                geom = geom_ptr.contents
-                gdata = geom.gdata
-                if gdata and gdata.contents.type == AK_GEOMETRY_MESH:
-                    mesh_ptr = ctypes.cast(gdata.contents.pData, ctypes.POINTER(AkMesh))
-                    yield from self._mesh_primitives(geom, mesh_ptr.contents)
-                geom_ptr = ctypes.cast(geom.base.next, ctypes.POINTER(AkGeometry))
-            lib = lib.contents.next
+        geom_ptr = doc.lib.geometries.first
+        while geom_ptr:
+            geom = geom_ptr.contents
+            gdata = geom.gdata
+            if gdata and gdata.contents.type == AK_GEOMETRY_MESH:
+                mesh_ptr = ctypes.cast(gdata.contents.pData, ctypes.POINTER(AkMesh))
+                yield from self._mesh_primitives(geom, mesh_ptr.contents)
+            geom_ptr = geom.next
 
     def _mesh_primitives(self, geom: AkGeometry, mesh: AkMesh) -> Iterator[MeshPrimitiveData]:
         prim_ptr = mesh.primitive

@@ -28,12 +28,6 @@
 #include "ak/options.h"
 #include "ak/path.h"
 
-struct FListItem {
-  struct FListItem *next;
-  void             *data;
-};
-typedef struct FListItem FListItem;
-
 #ifndef PATH_MAX
 #  define PATH_MAX 4096
 #endif
@@ -2466,15 +2460,15 @@ akb_finalize_primitive_buffers(AkbArena *arena,
 
 static size_t
 akb_doc_image_index(AkDoc *doc, AkImage *image) {
-  FListItem *item;
+  AkImage *item;
   size_t index;
 
   if (!doc || !image)
     return 0;
 
   index = 0;
-  for (item = doc->lib.images; item; item = item->next, index++)
-    if ((AkImage *)item->data == image)
+  for (item = doc->lib.images.first; item; item = item->next, index++)
+    if (item == image)
       return index;
 
   return 0;
@@ -6279,7 +6273,7 @@ akb_animation_collect_walk(AkbAnimation *animation,
     }
 
     if (source->animation) {
-      next = (AkAnimation *)source->base.next;
+      next = source->next;
       if (next && top < 256) {
         stack[top].source = next;
         stack[top].index = clip_index + 1;
@@ -6287,8 +6281,8 @@ akb_animation_collect_walk(AkbAnimation *animation,
         top++;
       }
       source = source->animation;
-    } else if (source->base.next) {
-      source = (AkAnimation *)source->base.next;
+    } else if (source->next) {
+      source = source->next;
       clip_index++;
       clip_name = source->name;
     } else if (top > 0) {
@@ -6371,7 +6365,7 @@ akb_animation_index_collect_walk(AkbAnimationIndex *index,
     }
 
     if (source->animation) {
-      next = (AkAnimation *)source->base.next;
+      next = source->next;
       if (next && top < 256) {
         stack[top].source = next;
         stack[top].index = clip_index + 1;
@@ -6379,8 +6373,8 @@ akb_animation_index_collect_walk(AkbAnimationIndex *index,
         top++;
       }
       source = source->animation;
-    } else if (source->base.next) {
-      source = (AkAnimation *)source->base.next;
+    } else if (source->next) {
+      source = source->next;
       clip_index++;
       clip_name = source->name;
     } else if (top > 0) {
@@ -6398,7 +6392,7 @@ akb_animation_index_collect_walk(AkbAnimationIndex *index,
 
 static int
 akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
-  AkLibrary *library;
+  AkAnimation *animation;
   AkContext context;
 
   if (!index || !doc)
@@ -6408,10 +6402,8 @@ akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
   memset(&context, 0, sizeof(context));
   context.doc = doc;
 
-  for (library = doc->lib.animations; library; library = library->next) {
-    if (!akb_animation_index_collect_walk(index,
-                                          (AkAnimation *)library->chld,
-                                          &context)) {
+  for (animation = doc->lib.animations.first; animation; animation = animation->next) {
+    if (!akb_animation_index_collect_walk(index, animation, &context)) {
       akb_animation_index_free(index);
       return 0;
     }
@@ -6462,13 +6454,13 @@ akb_animation_new_for_bindings(AkDoc *doc,
                                const AkbCoordContext *coord,
                                int *ok) {
   AkbAnimation *animation;
-  AkLibrary *library;
+  AkAnimation *source;
   AkContext context;
 
   *ok = 1;
   if (!doc || !bindings || binding_count <= 0)
     return NULL;
-  if ((index && !index->count) || (!index && !doc->lib.animations))
+  if ((index && !index->count) || (!index && !doc->lib.animations.first))
     return NULL;
 
   animation = (AkbAnimation *)calloc(1, sizeof(*animation));
@@ -6495,9 +6487,9 @@ akb_animation_new_for_bindings(AkDoc *doc,
     memset(&context, 0, sizeof(context));
     context.doc = doc;
 
-    for (library = doc->lib.animations; library; library = library->next) {
+    for (source = doc->lib.animations.first; source; source = source->next) {
       if (!akb_animation_collect_walk(animation,
-                                      (AkAnimation *)library->chld,
+                                      source,
                                       &context,
                                       bindings,
                                       binding_count,
@@ -7101,7 +7093,7 @@ akb_material_animation_new(AkDoc *doc,
   int binding_count;
 
   *ok = 1;
-  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations)))
+  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations.first)))
     return NULL;
 
   memset(&resolved, 0, sizeof(resolved));
@@ -7268,7 +7260,7 @@ akb_animation_new(AkDoc *doc,
                   const AkbCoordContext *coord,
                   int *ok) {
   AkbAnimation *animation;
-  AkLibrary *library;
+  AkAnimation *source;
   AkbAnimBinding bindings[64];
   AkContext context;
   int binding_count;
@@ -7276,7 +7268,7 @@ akb_animation_new(AkDoc *doc,
   int is_gltf;
 
   *ok = 1;
-  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations)))
+  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations.first)))
     return NULL;
 
   is_gltf = doc && doc->inf && doc->inf->ftype == AK_FILE_TYPE_GLTF;
@@ -7326,9 +7318,9 @@ akb_animation_new(AkDoc *doc,
     memset(&context, 0, sizeof(context));
     context.doc = doc;
 
-    for (library = doc->lib.animations; library; library = library->next) {
+    for (source = doc->lib.animations.first; source; source = source->next) {
       if (!akb_animation_collect_walk(animation,
-                                      (AkAnimation *)library->chld,
+                                      source,
                                       &context,
                                       bindings,
                                       binding_count,
@@ -7357,13 +7349,13 @@ akb_morph_animation_new(AkDoc *doc,
                         int *ok) {
   AkbAnimation *animation;
   AkbAnimBinding binding = {0};
-  AkLibrary *library;
+  AkAnimation *source;
   AkContext context;
 
   *ok = 1;
   if (!morpher || !morpher->morph || !morpher->morph->targetCount)
     return NULL;
-  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations)))
+  if ((index && !index->count) || (!index && (!doc || !doc->lib.animations.first)))
     return NULL;
 
   binding.target = morpher;
@@ -7394,9 +7386,9 @@ akb_morph_animation_new(AkDoc *doc,
     memset(&context, 0, sizeof(context));
     context.doc = doc;
 
-    for (library = doc->lib.animations; library; library = library->next) {
+    for (source = doc->lib.animations.first; source; source = source->next) {
       if (!akb_animation_collect_walk(animation,
-                                      (AkAnimation *)library->chld,
+                                      source,
                                       &context,
                                       &binding,
                                       1,
@@ -7519,7 +7511,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   akb_extract_node_camera(&out, node);
   akb_extract_node_light(&out, node);
   if ((anim_index && anim_index->count)
-      || (!anim_index && doc && doc->lib.animations)) {
+      || (!anim_index && doc && doc->lib.animations.first)) {
     out.animation = akb_animation_new(doc, doc_owner, node, anim_index, coord, &ok);
     if (!ok) {
       akb_scene_node_free(&out);
@@ -8771,7 +8763,7 @@ akb_extract_node(AkbArena *arena,
       ok = 1;
       if (geometry_inst->morpher
           && ((anim_index && anim_index->count)
-              || (!anim_index && doc && doc->lib.animations))) {
+              || (!anim_index && doc && doc->lib.animations.first))) {
         morph_animation = akb_morph_animation_new(doc,
                                                   doc_owner,
                                                   anim_index,
@@ -8839,12 +8831,12 @@ akb_visual_scene_by_index(AkDoc *doc, int32_t scene_index) {
   AkVisualScene *scene;
   int32_t index;
 
-  if (!doc || scene_index < 0 || !doc->lib.visualScenes)
+  if (!doc || scene_index < 0 || !doc->lib.visualScenes.first)
     return NULL;
 
-  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld, index = 0;
+  for (scene = doc->lib.visualScenes.first, index = 0;
        scene;
-       scene = (AkVisualScene *)scene->base.next, index++) {
+       scene = scene->next, index++) {
     if (index == scene_index)
       return scene;
   }
@@ -8945,17 +8937,14 @@ akb_estimate_scene(AkDoc *doc, const AkbLoadOptions *options) {
 
 static size_t
 akb_estimate_library_primitives(AkDoc *doc, const AkbLoadOptions *options) {
-  AkLibrary *lib;
   AkGeometry *geom;
   size_t count = 0;
 
   if (!doc)
     return 0;
 
-  for (lib = doc->lib.geometries; lib; lib = lib->next) {
-    for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next)
-      count += akb_count_geometry_primitives(geom, options);
-  }
+  for (geom = doc->lib.geometries.first; geom; geom = geom->next)
+    count += akb_count_geometry_primitives(geom, options);
 
   return count;
 }
@@ -9015,7 +9004,6 @@ akb_extract_doc(AkDoc *doc,
   AkbAnimationIndex anim_index;
   AkbSceneEstimate estimate;
   AkbLoadOptions runtime_options;
-  AkLibrary *lib;
   AkGeometry *geom;
   size_t fallback_estimate;
   size_t skin_count;
@@ -9126,24 +9114,22 @@ akb_extract_doc(AkDoc *doc,
     akb_animation_index_free(&anim_index);
     return 0;
   }
-  for (lib = doc->lib.geometries; lib; lib = lib->next) {
-    for (geom = (AkGeometry *)lib->chld; geom; geom = (AkGeometry *)geom->base.next) {
-      if (!akb_extract_mesh(&import->arena,
-                            &import->primitives,
-                            &import->nodes,
-                            doc,
-                            doc_owner,
-                            &anim_index,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            -1,
-                            geom,
-                            &runtime_options)) {
-        akb_animation_index_free(&anim_index);
-        return 0;
-      }
+  for (geom = doc->lib.geometries.first; geom; geom = geom->next) {
+    if (!akb_extract_mesh(&import->arena,
+                          &import->primitives,
+                          &import->nodes,
+                          doc,
+                          doc_owner,
+                          &anim_index,
+                          NULL,
+                          NULL,
+                          NULL,
+                          NULL,
+                          -1,
+                          geom,
+                          &runtime_options)) {
+      akb_animation_index_free(&anim_index);
+      return 0;
     }
   }
   if (profile) {
@@ -9394,7 +9380,7 @@ akb_image_to_py(AkDoc *doc, AkImage *image, size_t index) {
 
 static PyObject *
 akb_doc_images_to_py(AkDoc *doc) {
-  FListItem *item;
+  AkImage *item;
   PyObject *list;
   PyObject *image_obj;
   size_t index;
@@ -9407,8 +9393,8 @@ akb_doc_images_to_py(AkDoc *doc) {
     return list;
 
   index = 0;
-  for (item = doc->lib.images; item; item = item->next) {
-    image_obj = akb_image_to_py(doc, (AkImage *)item->data, index++);
+  for (item = doc->lib.images.first; item; item = item->next) {
+    image_obj = akb_image_to_py(doc, item, index++);
     if (!image_obj || PyList_Append(list, image_obj) < 0) {
       Py_XDECREF(image_obj);
       Py_DECREF(list);
@@ -9425,12 +9411,12 @@ akb_visual_scene_count(AkDoc *doc) {
   AkVisualScene *scene;
   size_t count = 0;
 
-  if (!doc || !doc->lib.visualScenes)
+  if (!doc || !doc->lib.visualScenes.first)
     return 0;
 
-  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld;
+  for (scene = doc->lib.visualScenes.first;
        scene;
-       scene = (AkVisualScene *)scene->base.next)
+       scene = scene->next)
     count++;
 
   return count;
@@ -9441,12 +9427,12 @@ akb_visual_scene_index(AkDoc *doc, AkVisualScene *selected) {
   AkVisualScene *scene;
   int32_t index = 0;
 
-  if (!doc || !doc->lib.visualScenes || !selected)
+  if (!doc || !doc->lib.visualScenes.first || !selected)
     return -1;
 
-  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld;
+  for (scene = doc->lib.visualScenes.first;
        scene;
-       scene = (AkVisualScene *)scene->base.next, index++) {
+       scene = scene->next, index++) {
     if (scene == selected)
       return index;
   }
@@ -9464,12 +9450,12 @@ akb_visual_scene_names_to_py(AkDoc *doc) {
   if (!list)
     return NULL;
 
-  if (!doc || !doc->lib.visualScenes)
+  if (!doc || !doc->lib.visualScenes.first)
     return list;
 
-  for (scene = (AkVisualScene *)doc->lib.visualScenes->chld;
+  for (scene = doc->lib.visualScenes.first;
        scene;
-       scene = (AkVisualScene *)scene->base.next) {
+       scene = scene->next) {
     item = akb_unicode_from_cstr(scene->name);
     if (!item || PyList_Append(list, item) < 0) {
       Py_XDECREF(item);
