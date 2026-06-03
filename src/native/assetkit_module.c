@@ -8733,7 +8733,7 @@ akb_extract_node(AkbArena *arena,
   AkInstanceGeometry *geometry_inst;
   AkInstanceGeometry *next_geometry;
   AkInstanceGeometry *saved_geometry;
-  AkNodeRef *node_ref;
+  AkInstanceNode *node_ref;
   AkbAnimation *animation;
   AkbAnimation *morph_animation;
   int32_t node_index;
@@ -8808,8 +8808,8 @@ akb_extract_node(AkbArena *arena,
       return 0;
   }
 
-  for (node_ref = node->nodeRefs; node_ref; node_ref = node_ref->next) {
-    inst_node = ak_nodeRefTarget(node_ref);
+  for (node_ref = node->node; node_ref; node_ref = node_ref->next) {
+    inst_node = ak_instanceNodeTarget(node_ref);
     if (!inst_node || inst_node == node)
       continue;
     if (!akb_extract_node(arena, list, nodes, doc, doc_owner, inst_node, anim_index, reuse_cache, coord, options, node_index))
@@ -8883,7 +8883,7 @@ static void
 akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate *estimate) {
   AkNode *child;
   AkNode *inst_node;
-  AkNodeRef *node_ref;
+  AkInstanceNode *node_ref;
   AkInstanceGeometry *geometry_inst;
   AkGeometry *geom;
 
@@ -8903,8 +8903,8 @@ akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate 
   for (child = node->chld; child; child = child->next)
     akb_estimate_node(child, options, estimate);
 
-  for (node_ref = node->nodeRefs; node_ref; node_ref = node_ref->next) {
-    inst_node = ak_nodeRefTarget(node_ref);
+  for (node_ref = node->node; node_ref; node_ref = node_ref->next) {
+    inst_node = ak_instanceNodeTarget(node_ref);
     if (!inst_node || inst_node == node)
       continue;
     akb_estimate_node(inst_node, options, estimate);
