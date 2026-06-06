@@ -97,6 +97,12 @@
 #define AKB_COORD_RAW 0
 #define AKB_COORD_TRANSFORM 1
 #define AKB_COORD_ALL 2
+#define AKB_LOAD_COORD_Z_UP 0
+#define AKB_LOAD_COORD_Y_UP 1
+#define AKB_LOAD_COORD_X_UP 2
+#define AKB_LOAD_COORD_Z_UP_LH 3
+#define AKB_LOAD_COORD_Y_UP_LH 4
+#define AKB_LOAD_COORD_X_UP_LH 5
 #define AKB_SKIN_DEFAULT_JOINTS_PER_VERTEX 4
 #define AKB_SKIN_MAX_JOINTS_PER_VERTEX 64
 #define AKB_TEXTURE_INFO_MAX 24
@@ -108,6 +114,27 @@
 #define AKB_VEC3(value) (*(vec3 *)(void *)(value))
 #define AKB_VEC4(value) (*(vec4 *)(void *)(value))
 #define AKB_VERSOR(value) (*(versor *)(void *)(value))
+
+typedef enum AkbLoadOptionField {
+  AKB_LOAD_OPT_COORD_SYSTEM = 0,
+  AKB_LOAD_OPT_COORD_CONVERSION,
+  AKB_LOAD_OPT_SCENE_INDEX,
+  AKB_LOAD_OPT_TRIANGULATE,
+  AKB_LOAD_OPT_GENERATE_NORMALS,
+  AKB_LOAD_OPT_CONVERT_TRIANGLE_STRIP,
+  AKB_LOAD_OPT_CONVERT_TRIANGLE_FAN,
+  AKB_LOAD_OPT_IMPORT_LINES,
+  AKB_LOAD_OPT_CONVERT_LINE_LOOP,
+  AKB_LOAD_OPT_CONVERT_LINE_STRIP,
+  AKB_LOAD_OPT_USE_MMAP,
+  AKB_LOAD_OPT_PRESERVE_EXTRAS,
+  AKB_LOAD_OPT_BUILD_TRIANGLE_EDGES,
+  AKB_LOAD_OPT_GEOMETRY_KEYS,
+  AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS,
+  AKB_LOAD_OPT_TEXTURE_LOADING,
+  AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
+  AKB_LOAD_OPT_COUNT
+} AkbLoadOptionField;
 
 static double
 akb_now_ms(void) {
@@ -273,7 +300,6 @@ typedef struct AkbPrimitive {
   AkTree *mesh_extra;
   AkTree *geometry_extra;
   AkTree *material_extra;
-  AkTree *source_extra;
   AkbMorphTarget *morph_targets;
   AkMorphPreset *morph_presets;
   AkbLoopFloatAttribute *uv_sets;
@@ -517,6 +543,7 @@ typedef struct AkbLoadOptions {
   uint8_t     cvt_line_loop;
   uint8_t     cvt_line_strip;
   uint8_t     use_mmap;
+  uint8_t     preserve_extras;
   uint8_t     build_triangle_edges;
   uint8_t     geometry_keys;
   uint8_t     geometry_content_keys;
@@ -532,6 +559,7 @@ typedef struct AkbSavedOptions {
   uintptr_t cvt_line_loop;
   uintptr_t cvt_line_strip;
   uintptr_t use_mmap;
+  uintptr_t preserve_extras;
   uintptr_t meshopt_decoder_path;
   uintptr_t draco_decoder_path;
   uintptr_t gsplat_decoder_path;
@@ -744,7 +772,6 @@ typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_MESH_EXTRA,
   AKB_PY_PRIM_GEOMETRY_EXTRA,
   AKB_PY_PRIM_MATERIAL_EXTRA,
-  AKB_PY_PRIM_SOURCE_EXTRA,
   AKB_PY_PRIM_MATERIAL_VARIANT_COUNT,
   AKB_PY_PRIM_MATERIAL_VARIANTS,
   AKB_PY_PRIM_MATRIX_F32,
@@ -911,29 +938,29 @@ akb_prepare_blender_coords(AkDoc *doc,
 }
 
 static AkCoordSys *
-akb_coord_from_name(const char *name) {
-  if (!name || !name[0])
-    return AK_ZUP;
-  if (strcmp(name, "Y_UP") == 0)
-    return AK_YUP;
-  if (strcmp(name, "X_UP") == 0)
-    return AK_XUP;
-  if (strcmp(name, "Z_UP_LH") == 0)
-    return AK_ZUP_LH;
-  if (strcmp(name, "Y_UP_LH") == 0)
-    return AK_YUP_LH;
-  if (strcmp(name, "X_UP_LH") == 0)
-    return AK_XUP_LH;
+akb_coord_from_id(long id) {
+  switch (id) {
+    case AKB_LOAD_COORD_Y_UP:
+      return AK_YUP;
+    case AKB_LOAD_COORD_X_UP:
+      return AK_XUP;
+    case AKB_LOAD_COORD_Z_UP_LH:
+      return AK_ZUP_LH;
+    case AKB_LOAD_COORD_Y_UP_LH:
+      return AK_YUP_LH;
+    case AKB_LOAD_COORD_X_UP_LH:
+      return AK_XUP_LH;
+    default:
+      break;
+  }
   return AK_ZUP;
 }
 
 static uint8_t
-akb_conversion_from_name(const char *name) {
-  if (!name || !name[0])
-    return AKB_COORD_TRANSFORM;
-  if (strcmp(name, "RAW") == 0)
+akb_conversion_from_id(long id) {
+  if (id == AKB_COORD_RAW)
     return AKB_COORD_RAW;
-  if (strcmp(name, "ALL") == 0)
+  if (id == AKB_COORD_ALL)
     return AKB_COORD_ALL;
   return AKB_COORD_TRANSFORM;
 }
@@ -952,75 +979,111 @@ akb_load_options_default(AkbLoadOptions *options) {
   options->cvt_line_loop = 1;
   options->cvt_line_strip = 1;
   options->use_mmap = 1;
+  options->preserve_extras = 1;
   options->build_triangle_edges = 0;
   options->geometry_keys = 1;
 }
 
+static PyObject *
+akb_load_option_item(PyObject **items, Py_ssize_t count, Py_ssize_t index) {
+  if (index < 0 || index >= count)
+    return NULL;
+  return items[index];
+}
+
 static int
-akb_load_options_from_dict(AkbLoadOptions *options, PyObject *dict) {
-  PyObject *value;
+akb_load_option_long(PyObject  **items,
+                     Py_ssize_t count,
+                     Py_ssize_t index,
+                     long      *value) {
+  PyObject *item;
+  long      val;
+
+  item = akb_load_option_item(items, count, index);
+  if (!item || item == Py_None)
+    return 1;
+
+  val = PyLong_AsLong(item);
+  if (PyErr_Occurred())
+    return 0;
+
+  *value = val;
+  return 1;
+}
+
+static int
+akb_load_option_bool(PyObject  **items,
+                     Py_ssize_t count,
+                     Py_ssize_t index,
+                     uint8_t   *value) {
+  PyObject *item;
+  int       isTrue;
+
+  item = akb_load_option_item(items, count, index);
+  if (!item || item == Py_None)
+    return 1;
+
+  isTrue = PyObject_IsTrue(item);
+  if (isTrue < 0)
+    return 0;
+
+  *value = isTrue ? 1 : 0;
+  return 1;
+}
+
+static int
+akb_load_options_from_object(AkbLoadOptions *options, PyObject *obj) {
+  PyObject  *seq;
+  PyObject **items;
+  Py_ssize_t count;
+  long       value;
 
   akb_load_options_default(options);
-  if (!dict || dict == Py_None)
+  if (!obj || obj == Py_None)
     return 1;
-  if (!PyDict_Check(dict)) {
-    PyErr_SetString(PyExc_TypeError, "AssetKit load options must be a dict");
+
+  seq = PySequence_Fast(obj, "AssetKit load options must be a tuple or list");
+  if (!seq)
     return 0;
-  }
 
-  value = PyDict_GetItemString(dict, "coordinate_system");
-  if (value && PyUnicode_Check(value))
-    options->target_coord = akb_coord_from_name(PyUnicode_AsUTF8(value));
+  count = PySequence_Fast_GET_SIZE(seq);
+  items = PySequence_Fast_ITEMS(seq);
 
-  value = PyDict_GetItemString(dict, "coordinate_conversion");
-  if (value && PyUnicode_Check(value))
-    options->coord_conversion = akb_conversion_from_name(PyUnicode_AsUTF8(value));
+  value = AKB_LOAD_COORD_Z_UP;
+  if (!akb_load_option_long(items, count, AKB_LOAD_OPT_COORD_SYSTEM, &value))
+    goto fail;
+  options->target_coord = akb_coord_from_id(value);
 
-  value = PyDict_GetItemString(dict, "scene_index");
-  if (value && value != Py_None) {
-    long index = PyLong_AsLong(value);
-    if (PyErr_Occurred())
-      return 0;
-    options->scene_index = (int32_t)index;
-  }
+  value = AKB_COORD_TRANSFORM;
+  if (!akb_load_option_long(items, count, AKB_LOAD_OPT_COORD_CONVERSION, &value))
+    goto fail;
+  options->coord_conversion = akb_conversion_from_id(value);
 
-  value = PyDict_GetItemString(dict, "triangulate");
-  if (value)
-    options->triangulate = PyObject_IsTrue(value) ? 1 : 0;
+  value = options->scene_index;
+  if (!akb_load_option_long(items, count, AKB_LOAD_OPT_SCENE_INDEX, &value))
+    goto fail;
+  options->scene_index = (int32_t)value;
 
-  value = PyDict_GetItemString(dict, "generate_normals");
-  if (value)
-    options->gen_normals = PyObject_IsTrue(value) ? 1 : 0;
+  if (!akb_load_option_bool(items, count, AKB_LOAD_OPT_TRIANGULATE, &options->triangulate)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_GENERATE_NORMALS, &options->gen_normals)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_CONVERT_TRIANGLE_STRIP, &options->cvt_triangle_strip)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_CONVERT_TRIANGLE_FAN, &options->cvt_triangle_fan)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_IMPORT_LINES, &options->import_lines)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_CONVERT_LINE_LOOP, &options->cvt_line_loop)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_CONVERT_LINE_STRIP, &options->cvt_line_strip)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_USE_MMAP, &options->use_mmap)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_PRESERVE_EXTRAS, &options->preserve_extras)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_BUILD_TRIANGLE_EDGES, &options->build_triangle_edges)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_GEOMETRY_KEYS, &options->geometry_keys)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS, &options->geometry_content_keys))
+    goto fail;
 
-  value = PyDict_GetItemString(dict, "convert_triangle_strip");
-  if (value)
-    options->cvt_triangle_strip = PyObject_IsTrue(value) ? 1 : 0;
+  Py_DECREF(seq);
+  return 1;
 
-  value = PyDict_GetItemString(dict, "convert_triangle_fan");
-  if (value)
-    options->cvt_triangle_fan = PyObject_IsTrue(value) ? 1 : 0;
-
-  value = PyDict_GetItemString(dict, "import_lines");
-  if (value)
-    options->import_lines = PyObject_IsTrue(value) ? 1 : 0;
-
-  value = PyDict_GetItemString(dict, "convert_line_loop");
-  if (value)
-    options->cvt_line_loop = PyObject_IsTrue(value) ? 1 : 0;
-
-  value = PyDict_GetItemString(dict, "convert_line_strip");
-  if (value)
-    options->cvt_line_strip = PyObject_IsTrue(value) ? 1 : 0;
-
-  value = PyDict_GetItemString(dict, "use_mmap");
-  if (value)
-    options->use_mmap = PyObject_IsTrue(value) ? 1 : 0;
-
-  value = PyDict_GetItemString(dict, "build_triangle_edges");
-  if (value)
-    options->build_triangle_edges = PyObject_IsTrue(value) ? 1 : 0;
-
-  return !PyErr_Occurred();
+fail:
+  Py_DECREF(seq);
+  return 0;
 }
 
 static AkCoordCvtType
@@ -1161,6 +1224,7 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   saved->cvt_line_loop = ak_opt_get(AK_OPT_CVT_LINELOOP);
   saved->cvt_line_strip = ak_opt_get(AK_OPT_CVT_LINESTRIP);
   saved->use_mmap = ak_opt_get(AK_OPT_USE_MMAP);
+  saved->preserve_extras = ak_opt_get(AK_OPT_PRESERVE_EXTRAS);
   saved->meshopt_decoder_path = ak_opt_get(AK_OPT_GLTF_MESHOPT_DECODER_PATH);
   saved->draco_decoder_path = ak_opt_get(AK_OPT_GLTF_DRACO_DECODER_PATH);
   saved->gsplat_decoder_path = ak_opt_get(AK_OPT_GLTF_GSPLAT_DECODER_PATH);
@@ -1176,6 +1240,7 @@ akb_options_apply(const AkbLoadOptions *options, AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_CVT_LINELOOP, options->cvt_line_loop);
   ak_opt_set(AK_OPT_CVT_LINESTRIP, options->cvt_line_strip);
   ak_opt_set(AK_OPT_USE_MMAP, options->use_mmap);
+  ak_opt_set(AK_OPT_PRESERVE_EXTRAS, options->preserve_extras);
 
   akb_decoder_paths_init();
   akb_set_decoder_path_if_empty(AK_OPT_GLTF_MESHOPT_DECODER_PATH,
@@ -1199,6 +1264,7 @@ akb_options_restore(const AkbSavedOptions *saved) {
   ak_opt_set(AK_OPT_CVT_LINELOOP, saved->cvt_line_loop);
   ak_opt_set(AK_OPT_CVT_LINESTRIP, saved->cvt_line_strip);
   ak_opt_set(AK_OPT_USE_MMAP, saved->use_mmap);
+  ak_opt_set(AK_OPT_PRESERVE_EXTRAS, saved->preserve_extras);
   ak_opt_set(AK_OPT_GLTF_MESHOPT_DECODER_PATH, saved->meshopt_decoder_path);
   ak_opt_set(AK_OPT_GLTF_DRACO_DECODER_PATH, saved->draco_decoder_path);
   ak_opt_set(AK_OPT_GLTF_GSPLAT_DECODER_PATH, saved->gsplat_decoder_path);
@@ -2931,7 +2997,7 @@ akb_extract_material_fast_surface(AkDoc *doc,
                                   AkbPrimitive *out) {
   if (!surface || !out)
     return 0;
-  if (out->material_extra || out->source_extra)
+  if (out->material_extra)
     return 0;
   if (surface->type != AK_MATERIAL_TYPE_PBR
       && surface->type != AK_MATERIAL_TYPE_PBR_METALLIC_ROUGHNESS)
@@ -3053,21 +3119,6 @@ akb_clampf(float value, float min_value, float max_value) {
   return value;
 }
 
-static AkTree *
-akb_material_source_extra(AkMaterial *mat) {
-  AkMaterialSourceRecord *record;
-
-  if (!mat)
-    return NULL;
-
-  for (record = mat->sourceRecords; record; record = record->next) {
-    if (record->extra)
-      return record->extra;
-  }
-
-  return NULL;
-}
-
 static AkInstanceGeometry *
 akb_node_geometry_instance(AkNode *node) {
   return node ? node->geometry : NULL;
@@ -3182,7 +3233,6 @@ akb_extract_material(AkDoc *doc,
 
   if (mat)
     out->material_extra = ak_extra(mat);
-  out->source_extra = akb_material_source_extra(mat);
   if (akb_extract_material_fast_surface(doc, instance, prim, surface, out))
     return;
 
@@ -9797,7 +9847,6 @@ akb_primitive_is_simple_py(const AkbPrimitive *prim) {
          && !prim->mesh_extra
          && !prim->geometry_extra
          && !prim->material_extra
-         && !prim->source_extra
          && !prim->material_variant_count
          && !prim->morph_target_count
          && !prim->morph_preset_count
@@ -10271,7 +10320,6 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SET_OBJ(AKB_PY_PRIM_MESH_EXTRA, akb_tree_to_py(prim->mesh_extra));
   AKB_SET_OBJ(AKB_PY_PRIM_GEOMETRY_EXTRA, akb_tree_to_py(prim->geometry_extra));
   AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_EXTRA, akb_tree_to_py(prim->material_extra));
-  AKB_SET_OBJ(AKB_PY_PRIM_SOURCE_EXTRA, akb_tree_to_py(prim->source_extra));
   AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_VARIANT_COUNT,
               PyLong_FromUnsignedLong(prim->material_variant_count));
   AKB_SET_OBJ(AKB_PY_PRIM_MATERIAL_VARIANTS, akb_material_variants_to_py(prim, owner));
@@ -10723,7 +10771,7 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   if (!PyArg_ParseTuple(args, "s|O", &filepath, &options_obj))
     return NULL;
 
-  if (!akb_load_options_from_dict(&options, options_obj))
+  if (!akb_load_options_from_object(&options, options_obj))
     return NULL;
   if (!akb_load_lock_ensure())
     return NULL;
@@ -10936,7 +10984,7 @@ akb_open_scene(PyObject *self, PyObject *args) {
   if (!PyArg_ParseTuple(args, "s|O", &filepath, &options_obj))
     return NULL;
 
-  if (!akb_load_options_from_dict(&options, options_obj))
+  if (!akb_load_options_from_object(&options, options_obj))
     return NULL;
   if (!akb_load_lock_ensure())
     return NULL;

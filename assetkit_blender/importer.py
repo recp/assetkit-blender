@@ -42,6 +42,17 @@ from .assetkit import (
     native_write_offset_i32,
 )
 from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
+from .load_options import (
+    AKB_LOAD_DEFER_NORMALS_AUTO,
+    AKB_LOAD_DEFER_NORMALS_NO,
+    AKB_LOAD_DEFER_NORMALS_YES,
+    AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
+    AKB_LOAD_OPT_TEXTURE_LOADING,
+    AKB_LOAD_TEXTURE_AUTO,
+    AKB_LOAD_TEXTURE_DEFERRED,
+    AKB_LOAD_TEXTURE_IMMEDIATE,
+    LoadOptions,
+)
 
 _ANIM_TRANSLATION = 1
 _ANIM_ROTATION_QUAT = 2
@@ -301,7 +312,7 @@ class _DeferredMaterialSpec:
 def import_assetkit_file(
     filepath: str,
     library_path: str = "",
-    load_options: dict | None = None,
+    load_options: LoadOptions | None = None,
     collection: bpy.types.Collection | None = None,
     focus_mode: str = "NEVER",
     placement_mode: str = "AS_AUTHORED",
@@ -396,7 +407,7 @@ def import_assetkit_file(
 def import_assetkit_file_progressive(
     filepath: str,
     library_path: str = "",
-    load_options: dict | None = None,
+    load_options: LoadOptions | None = None,
     collection: bpy.types.Collection | None = None,
     batch_size: int = _PROGRESSIVE_BATCH_SIZE,
     focus_mode: str = "NEVER",
@@ -435,7 +446,7 @@ def import_assetkit_file_progressive(
 def import_assetkit_file_auto(
     filepath: str,
     library_path: str = "",
-    load_options: dict | None = None,
+    load_options: LoadOptions | None = None,
     collection: bpy.types.Collection | None = None,
     batch_size: int = _PROGRESSIVE_BATCH_SIZE,
     focus_mode: str = "NEVER",
@@ -475,7 +486,7 @@ def import_assetkit_file_auto(
 def _load_assetkit_scene(
     filepath: str,
     library_path: str = "",
-    load_options: dict | None = None,
+    load_options: LoadOptions | None = None,
 ) -> tuple[list[MeshPrimitiveData], list[SceneNodeData], object | None, object | None, dict, list[dict]]:
     loaded = native_load_meshes(filepath, load_options) if not library_path else None
     if loaded is None:
@@ -669,24 +680,33 @@ def _record_finish_profile(
     stats["finish_total_ms"] = float(stats.get("finish_total_ms", 0.0) or 0.0) + total_ms
 
 
-def _texture_load_mode(load_options: dict | None) -> str:
-    mode = str((load_options or {}).get("texture_loading") or "IMMEDIATE").upper()
-    if mode == "AUTO":
+def _load_option_int(load_options: LoadOptions | None, index: int, default: int) -> int:
+    if not load_options or index >= len(load_options):
+        return default
+    return int(load_options[index])
+
+
+def _texture_load_mode(load_options: LoadOptions | None) -> str:
+    mode = _load_option_int(load_options, AKB_LOAD_OPT_TEXTURE_LOADING, AKB_LOAD_TEXTURE_IMMEDIATE)
+    if mode == AKB_LOAD_TEXTURE_AUTO:
         return "IMMEDIATE" if bpy.app.background else "DEFERRED"
-    if mode == "DEFERRED":
+    if mode == AKB_LOAD_TEXTURE_DEFERRED:
         return "DEFERRED"
     return "IMMEDIATE"
 
 
-def _defer_custom_normals(load_options: dict | None, shading_mode: str) -> bool:
+def _defer_custom_normals(load_options: LoadOptions | None, shading_mode: str) -> bool:
     if bpy.app.background or str(shading_mode or "AUTO").upper() != "AUTO":
         return False
 
-    value = (load_options or {}).get("defer_custom_normals", "AUTO")
-    if isinstance(value, bool):
-        return value
-    mode = str(value or "AUTO").upper()
-    return mode not in {"0", "FALSE", "IMMEDIATE", "NO", "OFF"}
+    mode = _load_option_int(load_options,
+                            AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
+                            AKB_LOAD_DEFER_NORMALS_AUTO)
+    if mode == AKB_LOAD_DEFER_NORMALS_NO:
+        return False
+    if mode == AKB_LOAD_DEFER_NORMALS_YES:
+        return True
+    return True
 
 
 def _effective_shading_mode(data: MeshPrimitiveData, shading_mode: str) -> str:
@@ -2253,7 +2273,7 @@ class _ProgressiveImportJob:
         self,
         filepath: str,
         library_path: str,
-        load_options: dict | None,
+        load_options: LoadOptions | None,
         collection: bpy.types.Collection,
         batch_size: int,
         focus_mode: str,
@@ -6870,7 +6890,6 @@ def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) ->
         "material_key": _raw_int(raw, "material_key", data.material_key),
         "texture_infos": _variant_texture_infos(data.texture_infos, raw.get("texture_infos") or {}),
         "material_extra": raw.get("material_extra"),
-        "source_extra": raw.get("source_extra"),
     }
 
     for name in _MATERIAL_TEXTURE_FIELDS:
@@ -7101,7 +7120,6 @@ def _create_material(
             nodes_ms = lap_ms()
             _set_assetkit_material_props(mat, data)
             _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
-            _set_assetkit_json_prop(mat, "assetkit_material_source_extra_json", data.source_extra)
             props_ms = lap_ms()
             if material_cache is not None:
                 material_cache[cache_key] = mat
@@ -7241,7 +7259,6 @@ def _create_material(
 
     _set_assetkit_material_props(mat, data)
     _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
-    _set_assetkit_json_prop(mat, "assetkit_material_source_extra_json", data.source_extra)
     props_ms = lap_ms()
     settings_node = _ensure_gltf_settings_node(mat, data, bsdf)
     settings_ms = lap_ms()
@@ -7525,7 +7542,7 @@ def _can_use_base_color_texture_fast_material(
         return False
     if data.material_anim_channels:
         return False
-    if data.material_extra or data.source_extra or data.material_variants:
+    if data.material_extra or data.material_variants:
         return False
     if _is_unlit_material(data) or _is_classic_lit_material(data) or _is_specular_glossiness_material(data):
         return False
@@ -7558,7 +7575,7 @@ def _can_use_classic_texture_fast_material(data: MeshPrimitiveData, color_attr: 
         return False
     if not _is_classic_lit_material(data):
         return False
-    if data.material_anim_channels or data.material_extra or data.source_extra or data.material_variants:
+    if data.material_anim_channels or data.material_extra or data.material_variants:
         return False
     if not data.base_color_texture and not data.normal_texture:
         return False
@@ -8253,7 +8270,6 @@ def _configure_simple_material(
     if _has_nondefault_assetkit_material_props(data):
         _set_assetkit_material_props(mat, data)
     _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
-    _set_assetkit_json_prop(mat, "assetkit_material_source_extra_json", data.source_extra)
     if not getattr(mat, "use_nodes", False):
         _set_material_scalar(mat, "metallic", data.metallic)
         _set_material_scalar(mat, "roughness", data.roughness)
@@ -9171,7 +9187,6 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
         data.diffuse_transmission_color_texture,
         _texture_infos_cache_key(data.texture_infos),
         _json_cache_key(data.material_extra),
-        _json_cache_key(data.source_extra),
     )
 
 
@@ -9179,7 +9194,6 @@ def _preserve_native_material_identity(data: MeshPrimitiveData) -> bool:
     return bool(
         data.material_name
         or data.material_extra
-        or data.source_extra
         or data.material_anim_channels
         or data.material_variants
     )

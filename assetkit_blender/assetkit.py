@@ -409,7 +409,6 @@ class MeshPrimitiveData:
     mesh_extra: object | None = None
     geometry_extra: object | None = None
     material_extra: object | None = None
-    source_extra: object | None = None
     skin_vertex_count: int = 0
     skin_joint_count: int = 0
     skin_joint_width: int = 0
@@ -839,7 +838,7 @@ def _profile_log(message: str) -> None:
 
 def native_load_meshes(
     filepath: str | os.PathLike[str],
-    options: dict | None = None,
+    options: tuple[int, ...] | None = None,
 ) -> AssetKitSceneData | None:
     _assetkit_blender = _native_module()
     if _assetkit_blender is None:
@@ -894,7 +893,7 @@ def native_load_meshes(
 
 def native_open_scene_stream(
     filepath: str | os.PathLike[str],
-    options: dict | None = None,
+    options: tuple[int, ...] | None = None,
 ) -> NativeSceneStream | None:
     _assetkit_blender = _native_module()
     if _assetkit_blender is None:
@@ -1267,7 +1266,6 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     "mesh_extra",
     "geometry_extra",
     "material_extra",
-    "source_extra",
     "has_skin",
     "has_gsplat",
     "material_key",
@@ -1426,7 +1424,6 @@ _S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
     _M_MESH_EXTRA,
     _M_GEOMETRY_EXTRA,
     _M_MATERIAL_EXTRA,
-    _M_SOURCE_EXTRA,
     _M_MATERIAL_VARIANT_COUNT,
     _M_MATERIAL_VARIANTS,
     _M_MATRIX_F32,
@@ -1470,7 +1467,7 @@ _S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
     _M_EDGE_COUNT,
     _M_EDGES_U32,
     _M_SMOOTH_SHADING,
-) = range(134)
+) = range(133)
 
 _M_FIELD_NAMES = (
     "_owner",
@@ -1563,7 +1560,6 @@ _M_FIELD_NAMES = (
     "mesh_extra",
     "geometry_extra",
     "material_extra",
-    "source_extra",
     "material_variant_count",
     "material_variants",
     "matrix_f32",
@@ -1882,7 +1878,6 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         data.mesh_extra = get(_M_MESH_EXTRA)
         data.geometry_extra = get(_M_GEOMETRY_EXTRA)
         data.material_extra = get(_M_MATERIAL_EXTRA)
-        data.source_extra = get(_M_SOURCE_EXTRA)
         data.skin_vertex_count = int(get(_M_SKIN_VERTEX_COUNT) or 0)
         data.skin_joint_count = int(get(_M_SKIN_JOINT_COUNT) or 0)
         data.skin_joint_width = int(get(_M_SKIN_JOINT_WIDTH) or 0)

@@ -10,6 +10,7 @@ from bpy_extras.io_utils import ImportHelper
 
 from .assetkit import AssetKitError
 from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
+from .load_options import LoadOptions, make_load_options
 from .importer import import_assetkit_file, import_assetkit_file_auto, import_assetkit_file_progressive
 
 _DEFERRED_BLOCKING_DELAY = 0.016
@@ -431,20 +432,21 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         clean_row.prop(self, "clean_viewport_overlays")
         view_checks.prop(self, "fit_timeline")
 
-    def _load_options(self) -> dict:
-        return {
-            "coordinate_conversion": self.coordinate_conversion,
-            "coordinate_system": self.coordinate_system,
-            "scene_index": self.scene_index,
-            "triangulate": self.triangulate,
-            "generate_normals": self.generate_normals,
-            "convert_triangle_strip": self.convert_triangle_strip,
-            "convert_triangle_fan": self.convert_triangle_fan,
-            "import_lines": self.import_lines,
-            "convert_line_loop": self.convert_line_loop,
-            "convert_line_strip": self.convert_line_strip,
-            "texture_loading": self.texture_loading,
-        }
+    def _load_options(self) -> LoadOptions:
+        return make_load_options(
+            coordinate_conversion=self.coordinate_conversion,
+            coordinate_system=self.coordinate_system,
+            scene_index=self.scene_index,
+            triangulate=self.triangulate,
+            generate_normals=self.generate_normals,
+            convert_triangle_strip=self.convert_triangle_strip,
+            convert_triangle_fan=self.convert_triangle_fan,
+            import_lines=self.import_lines,
+            convert_line_loop=self.convert_line_loop,
+            convert_line_strip=self.convert_line_strip,
+            texture_loading=self.texture_loading,
+            preserve_extras=True,
+        )
 
 
 def _scene_has_no_content(scene: bpy.types.Scene) -> bool:
@@ -472,7 +474,7 @@ def _auto_should_import_blocking(filepath: str) -> bool:
 def _schedule_auto_import(
     filepath: str,
     assetkit_library: str,
-    load_options: dict,
+    load_options: LoadOptions,
     collection: bpy.types.Collection,
     batch_size: int,
     focus_mode: str,
@@ -520,7 +522,7 @@ def _schedule_auto_import(
 def _schedule_progressive_import(
     filepath: str,
     assetkit_library: str,
-    load_options: dict,
+    load_options: LoadOptions,
     collection: bpy.types.Collection,
     batch_size: int,
     focus_mode: str,
@@ -568,7 +570,7 @@ def _schedule_progressive_import(
 def _schedule_blocking_import(
     filepath: str,
     assetkit_library: str,
-    load_options: dict,
+    load_options: LoadOptions,
     collection: bpy.types.Collection,
     focus_mode: str,
     placement_mode: str,
