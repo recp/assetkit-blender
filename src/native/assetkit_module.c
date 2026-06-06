@@ -7480,8 +7480,8 @@ akb_extract_node_light(AkbSceneNode *out, AkNode *node) {
 
     spot = (AkSpotLight *)base;
     out->light_values[2] = spot->innerConeAngle;
-    out->light_values[3] = spot->outerConeAngle ? spot->outerConeAngle : spot->falloffAngle;
-    out->light_values[4] = spot->falloffExp;
+    out->light_values[3] = spot->outerConeAngle;
+    out->light_values[4] = spot->coneFalloffExponent;
   }
 }
 
