@@ -109,7 +109,6 @@
 #define AKB_EDGE_BUILD_FACE_LIMIT 256
 #define AKB_LARGE_SCENE_PRIMITIVE_THRESHOLD 1024
 #define AKB_GEOMETRY_CONTENT_KEY_BYTE_LIMIT (64u * 1024u)
-#define AKB_WOBJ_PRIM_FLAG_SMOOTH 1u
 #define AKB_MAT4(value) (*(mat4 *)(void *)(value))
 #define AKB_VEC3(value) (*(vec3 *)(void *)(value))
 #define AKB_VEC4(value) (*(vec4 *)(void *)(value))
@@ -7654,7 +7653,7 @@ static int
 akb_wavefront_primitive_smooth(const AkDoc *doc, const AkMeshPrimitive *prim) {
   return akb_doc_is_wavefront(doc)
          && prim
-         && (prim->reserved1 & AKB_WOBJ_PRIM_FLAG_SMOOTH);
+         && ak_meshPrimitiveSmoothShading(prim);
 }
 
 static int

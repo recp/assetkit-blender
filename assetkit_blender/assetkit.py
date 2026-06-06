@@ -140,6 +140,7 @@ AkMeshPrimitive._fields_ = [
     ("nPolygons", ctypes.c_uint32),
     ("inputCount", ctypes.c_uint32),
     ("center", ctypes.c_float * 3),
+    ("flags", ctypes.c_uint32),
     ("indexStride", ctypes.c_uint32),
     ("reserved1", ctypes.c_uint32),
     ("reserved2", ctypes.c_uint32),
