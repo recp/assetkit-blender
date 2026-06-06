@@ -201,13 +201,55 @@ class AkScene(ctypes.Structure):
     pass
 
 
+class AkSceneCamera(ctypes.Structure):
+    pass
+
+
+AkSceneCamera._fields_ = [
+    ("next", ctypes.POINTER(AkSceneCamera)),
+    ("camera", ctypes.c_void_p),
+    ("firstInstance", ctypes.c_void_p),
+    ("useCount", ctypes.c_uint32),
+]
+
+
+class AkSceneLight(ctypes.Structure):
+    pass
+
+
+AkSceneLight._fields_ = [
+    ("next", ctypes.POINTER(AkSceneLight)),
+    ("light", ctypes.c_void_p),
+    ("firstInstance", ctypes.c_void_p),
+    ("useCount", ctypes.c_uint32),
+]
+
+
+class AkSceneCameraList(ctypes.Structure):
+    _fields_ = [
+        ("first", ctypes.POINTER(AkSceneCamera)),
+        ("last", ctypes.POINTER(AkSceneCamera)),
+        ("count", ctypes.c_uint32),
+        ("useCount", ctypes.c_uint32),
+    ]
+
+
+class AkSceneLightList(ctypes.Structure):
+    _fields_ = [
+        ("first", ctypes.POINTER(AkSceneLight)),
+        ("last", ctypes.POINTER(AkSceneLight)),
+        ("count", ctypes.c_uint32),
+        ("useCount", ctypes.c_uint32),
+    ]
+
+
 AkScene._fields_ = [
     ("next", ctypes.POINTER(AkScene)),
     ("name", ctypes.c_char_p),
     ("node", ctypes.c_void_p),
     ("firstCamNode", ctypes.c_void_p),
-    ("cameras", ctypes.c_void_p),
-    ("lights", ctypes.c_void_p),
+    ("cameras", AkSceneCameraList),
+    ("lights", AkSceneLightList),
     ("bbox", ctypes.c_void_p),
     ("extra", ctypes.c_void_p),
 ]
