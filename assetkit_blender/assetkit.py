@@ -9,30 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
-AK_OK = 0
-AK_FILE_TYPE_AUTO = 0
-AK_FILE_TYPE_WAVEFRONT = 3
-AK_FILE_TYPE_STL = 4
-AK_GEOMETRY_MESH = 1
-AK_PRIMITIVE_LINES = 1
-AK_PRIMITIVE_POLYGONS = 2
-AK_PRIMITIVE_TRIANGLES = 3
-AK_PRIMITIVE_POINTS = 4
-AK_INPUT_NORMAL = 13
-AK_INPUT_POSITION = 16
-AK_INPUT_TEXCOORD = 19
-AK_INPUT_UV = 21
-
-AKT_FLOAT = 10
-AKT_DOUBLE = 33
-AKT_INT = 6
-AKT_UINT = 28
-AKT_BYTE = 29
-AKT_UBYTE = 30
-AKT_SHORT = 31
-AKT_USHORT = 32
-AKT_INT64 = 34
-AKT_UINT64 = 35
+from .enums import *  # re-exported for existing add-on imports
 
 _PROFILE_ENABLED: bool | None = None
 _EMPTY_SEQUENCE: tuple = ()
@@ -1159,37 +1136,98 @@ def _native_result_int(result: object, key: str, default: int) -> int:
 ) = range(19)
 
 
+class NativeSceneNodeData:
+    __slots__ = ("_raw", "_visible")
+
+    def __init__(self, raw: tuple):
+        self._raw = raw
+        extra = raw[_N_EXTRA]
+        visible = _extra_bool(extra, ("extensions", "KHR_node_visibility", "visible")) if extra else None
+        self._visible = bool(raw[_N_VISIBLE]) if visible is None else visible
+
+    @property
+    def name(self):
+        return self._raw[_N_NAME] or "AssetKitNode"
+
+    @property
+    def parent_index(self):
+        value = self._raw[_N_PARENT_INDEX]
+        return int(value if value is not None else -1)
+
+    @property
+    def matrix_f32(self):
+        return self._raw[_N_MATRIX_F32] or b""
+
+    @property
+    def anim_channels(self):
+        return self._raw[_N_ANIM_CHANNELS] or _EMPTY_SEQUENCE
+
+    @property
+    def anim_count(self):
+        return int(self._raw[_N_ANIM_COUNT] or 0)
+
+    @property
+    def visible(self):
+        return self._visible
+
+    @property
+    def layers(self):
+        return self._raw[_N_LAYERS] or _EMPTY_SEQUENCE
+
+    @property
+    def camera_type(self):
+        return int(self._raw[_N_CAMERA_TYPE] or 0)
+
+    @property
+    def camera_name(self):
+        return self._raw[_N_CAMERA_NAME] or ""
+
+    @property
+    def camera_values(self):
+        return self._raw[_N_CAMERA_VALUES] or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    @property
+    def camera_extra(self):
+        return self._raw[_N_CAMERA_EXTRA]
+
+    @property
+    def camera_imager_extra(self):
+        return self._raw[_N_CAMERA_IMAGER_EXTRA]
+
+    @property
+    def light_type(self):
+        return int(self._raw[_N_LIGHT_TYPE] or 0)
+
+    @property
+    def light_name(self):
+        return self._raw[_N_LIGHT_NAME] or ""
+
+    @property
+    def light_color(self):
+        return self._raw[_N_LIGHT_COLOR] or (1.0, 1.0, 1.0)
+
+    @property
+    def light_values(self):
+        return self._raw[_N_LIGHT_VALUES] or (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    @property
+    def light_extra(self):
+        return self._raw[_N_LIGHT_EXTRA]
+
+    @property
+    def extra(self):
+        return self._raw[_N_EXTRA]
+
+    @property
+    def _native_owner(self):
+        return self._raw[_N_OWNER]
+
+
 def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
     nodes = []
     for item in raw_nodes:
         if isinstance(item, tuple) and len(item) >= 19:
-            extra = item[_N_EXTRA]
-            visible = _extra_bool(extra, ("extensions", "KHR_node_visibility", "visible")) if extra else None
-            if visible is None:
-                visible = bool(item[_N_VISIBLE])
-            nodes.append(
-                SceneNodeData(
-                    name=item[_N_NAME] or "AssetKitNode",
-                    parent_index=int(item[_N_PARENT_INDEX] if item[_N_PARENT_INDEX] is not None else -1),
-                    matrix_f32=item[_N_MATRIX_F32] or b"",
-                    anim_channels=item[_N_ANIM_CHANNELS] or [],
-                    anim_count=int(item[_N_ANIM_COUNT] or 0),
-                    visible=visible,
-                    layers=item[_N_LAYERS] or [],
-                    camera_type=int(item[_N_CAMERA_TYPE] or 0),
-                    camera_name=item[_N_CAMERA_NAME] or "",
-                    camera_values=item[_N_CAMERA_VALUES] or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                    camera_extra=item[_N_CAMERA_EXTRA],
-                    camera_imager_extra=item[_N_CAMERA_IMAGER_EXTRA],
-                    light_type=int(item[_N_LIGHT_TYPE] or 0),
-                    light_name=item[_N_LIGHT_NAME] or "",
-                    light_color=item[_N_LIGHT_COLOR] or (1.0, 1.0, 1.0),
-                    light_values=item[_N_LIGHT_VALUES] or (0.0, 0.0, 0.0, 0.0, 0.0),
-                    light_extra=item[_N_LIGHT_EXTRA],
-                    extra=extra,
-                    _native_owner=item[_N_OWNER],
-                )
-            )
+            nodes.append(NativeSceneNodeData(item))
             continue
 
         extra = item.get("extra")
@@ -1333,6 +1371,268 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
 ) = range(36)
 _S_LEGACY_FIELD_COUNT = _S_GEOMETRY_KEY + 1
 _S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
+
+
+class NativeSimpleMeshData:
+    __slots__ = ("_raw", "_count")
+
+    vertices = _EMPTY_SEQUENCE
+    faces = _EMPTY_SEQUENCE
+    normals = _EMPTY_SEQUENCE
+    uvs = _EMPTY_SEQUENCE
+    loop_vertex_indices = _EMPTY_SEQUENCE
+    uvs_f32 = b""
+    colors_f32 = b""
+    uv_sets = None
+    color_sets = None
+    point_attrs = None
+    texture_infos = None
+    morph_targets = None
+    morph_presets = None
+    material_variants = None
+    skin_pose_anim_channels = None
+    anim_channels = None
+    morph_anim_channels = None
+    material_anim_channels = None
+    sharp_faces_u8 = b""
+    has_gsplat = False
+    gsplat_kernel = 0
+    gsplat_color_space = 0
+    gsplat_projection = 0
+    gsplat_sorting_method = 0
+    gsplat_decoded_count = 0
+    has_skin = False
+    anim_count = 0
+    morph_target_count = 0
+    morph_preset_count = 0
+    morph_anim_count = 0
+    material_anim_count = 0
+    material_variant_count = 0
+    primitive_extra = None
+    mesh_extra = None
+    geometry_extra = None
+    material_extra = None
+    skin_vertex_count = 0
+    skin_joint_count = 0
+    skin_joint_width = 0
+    uv_set_count = 0
+    color_set_count = 0
+    point_attr_count = 0
+    skin_root_node_index = -1
+    material_name = ""
+    base_color = (1.0, 1.0, 1.0, 1.0)
+    transparent_color = (1.0, 1.0, 1.0, 1.0)
+    emissive_color = (0.0, 0.0, 0.0)
+    specular_color = (1.0, 1.0, 1.0)
+    sheen_color = (0.0, 0.0, 0.0)
+    volume_attenuation_color = (1.0, 1.0, 1.0)
+    volume_scatter_color = (0.0, 0.0, 0.0)
+    diffuse_transmission_color = (1.0, 1.0, 1.0)
+    alpha_cutoff = 0.5
+    transparent_amount = 1.0
+    opacity = 1.0
+    normal_scale = 1.0
+    occlusion_strength = 1.0
+    emissive_strength = 1.0
+    specular_strength = 1.0
+    ior = 1.5
+    clearcoat = 0.0
+    clearcoat_roughness = 0.0
+    clearcoat_normal_scale = 1.0
+    transmission = 0.0
+    sheen_roughness = 0.0
+    iridescence = 0.0
+    iridescence_ior = 1.3
+    iridescence_thickness_minimum = 100.0
+    iridescence_thickness_maximum = 400.0
+    volume_thickness = 0.0
+    volume_attenuation_distance = float("inf")
+    volume_scatter_anisotropy = 0.0
+    anisotropy = 0.0
+    anisotropy_rotation = 0.0
+    diffuse_transmission = 0.0
+    dispersion = 0.0
+    alpha_mode = 0
+    transparent_inverted = False
+    has_sheen = False
+    skin_mesh_in_bind_pose = False
+    transparent_texture = ""
+    metallic_roughness_texture = ""
+    occlusion_texture = ""
+    normal_texture = ""
+    emissive_texture = ""
+    specular_texture = ""
+    specular_color_texture = ""
+    clearcoat_texture = ""
+    clearcoat_roughness_texture = ""
+    clearcoat_normal_texture = ""
+    transmission_texture = ""
+    sheen_color_texture = ""
+    sheen_roughness_texture = ""
+    iridescence_texture = ""
+    iridescence_thickness_texture = ""
+    volume_thickness_texture = ""
+    anisotropy_texture = ""
+    diffuse_transmission_texture = ""
+    diffuse_transmission_color_texture = ""
+    skin_joints_u16 = b""
+    skin_weights_f32 = b""
+    skin_joint_nodes_i32 = b""
+    skin_inverse_bind_matrices_f32 = b""
+    skin_bind_shape_matrix_f32 = b""
+    simple_native = True
+
+    def __init__(self, raw: tuple):
+        self._raw = raw
+        self._count = len(raw)
+
+    def _get(self, index: int, default=None):
+        return self._raw[index] if index < self._count and self._raw[index] is not None else default
+
+    @property
+    def _native_owner(self):
+        return self._raw[_S_OWNER]
+
+    @property
+    def name(self):
+        return self._get(_S_NAME, "AssetKitMesh") or "AssetKitMesh"
+
+    @property
+    def object_name(self):
+        return self._get(_S_OBJECT_NAME, "") or ""
+
+    @property
+    def vertex_count(self):
+        return self._get(_S_VERTEX_COUNT, 0) or 0
+
+    @property
+    def loop_count(self):
+        return self._get(_S_LOOP_COUNT, 0) or 0
+
+    @property
+    def face_count(self):
+        return self._get(_S_FACE_COUNT, 0) or 0
+
+    @property
+    def edge_count(self):
+        return self._get(_S_EDGE_COUNT, 0) or 0
+
+    @property
+    def primitive_type(self):
+        return self._get(_S_PRIMITIVE_TYPE, AK_PRIMITIVE_TRIANGLES) or AK_PRIMITIVE_TRIANGLES
+
+    @property
+    def primitive_mode(self):
+        return self._get(_S_PRIMITIVE_MODE, 0) or 0
+
+    @property
+    def file_type(self):
+        return self._get(_S_FILE_TYPE, 0) or 0
+
+    @property
+    def mesh_key(self):
+        return self._get(_S_MESH_KEY, 0) or 0
+
+    @property
+    def primitive_index(self):
+        return self._get(_S_PRIMITIVE_INDEX, 0) or 0
+
+    @property
+    def zero_copy_flags(self):
+        return self._get(_S_ZERO_COPY_FLAGS, 0) or 0
+
+    @property
+    def has_node(self):
+        return bool(self._get(_S_HAS_NODE, False))
+
+    @property
+    def node_index(self):
+        return self._get(_S_NODE_INDEX, -1)
+
+    @property
+    def matrix_f32(self):
+        return self._get(_S_MATRIX_F32, b"") or b""
+
+    @property
+    def coord_matrix_f32(self):
+        return self._get(_S_COORD_MATRIX_F32, b"") or b""
+
+    @property
+    def instance_count(self):
+        return self._get(_S_INSTANCE_COUNT, 0) or 0
+
+    @property
+    def instance_matrices_f32(self):
+        return self._get(_S_INSTANCE_MATRICES_F32, b"") or b""
+
+    @property
+    def vertices_f32(self):
+        return self._get(_S_VERTICES_F32, b"") or b""
+
+    @property
+    def indices_u32(self):
+        return self._get(_S_INDICES_U32, b"") or b""
+
+    @property
+    def loop_starts_i32(self):
+        return self._get(_S_LOOP_STARTS_I32, b"") or b""
+
+    @property
+    def loop_totals_i32(self):
+        return self._get(_S_LOOP_TOTALS_I32, b"") or b""
+
+    @property
+    def normals_f32(self):
+        return self._get(_S_NORMALS_F32, b"") or b""
+
+    @property
+    def vertex_normals_f32(self):
+        return self._get(_S_VERTEX_NORMALS_F32, b"") or b""
+
+    @property
+    def tangents_f32(self):
+        return self._get(_S_TANGENTS_F32, b"") or b""
+
+    @property
+    def geometry_key(self):
+        return self._get(_S_GEOMETRY_KEY, 0) or 0
+
+    @property
+    def edges_u32(self):
+        return self._get(_S_EDGES_U32, b"") or b""
+
+    @property
+    def uvs_f32(self):
+        return self._get(_S_UVS_F32, b"") or b""
+
+    @property
+    def base_color_texture(self):
+        return self._get(_S_BASE_COLOR_TEXTURE, "") or ""
+
+    @property
+    def material_type(self):
+        return self._get(_S_MATERIAL_TYPE, 0) or 0
+
+    @property
+    def material_key(self):
+        return self._get(_S_MATERIAL_KEY, 0) or 0
+
+    @property
+    def metallic(self):
+        return self._get(_S_METALLIC, 1.0)
+
+    @property
+    def roughness(self):
+        return self._get(_S_ROUGHNESS, 1.0)
+
+    @property
+    def double_sided(self):
+        return bool(self._get(_S_DOUBLE_SIDED, False))
+
+    @property
+    def smooth_shading(self):
+        return bool(self._get(_S_SMOOTH_SHADING, False))
+
 
 (
     _M_OWNER,
@@ -1632,58 +1932,7 @@ def _native_mesh_is_simple(item: object) -> bool:
 
 def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
     if isinstance(item, tuple):
-        count = len(item)
-        data = MeshPrimitiveData(
-            item[_S_NAME] or "AssetKitMesh",
-            _EMPTY_SEQUENCE,
-            _EMPTY_SEQUENCE,
-            _EMPTY_SEQUENCE,
-            _EMPTY_SEQUENCE,
-            _EMPTY_SEQUENCE,
-        )
-        data.vertex_count = int(item[_S_VERTEX_COUNT] or 0)
-        data.loop_count = int(item[_S_LOOP_COUNT] or 0)
-        data.face_count = int(item[_S_FACE_COUNT] or 0)
-        data.edge_count = int(item[_S_EDGE_COUNT] or 0) if count > _S_EDGE_COUNT else 0
-        data.primitive_type = int(item[_S_PRIMITIVE_TYPE] or AK_PRIMITIVE_TRIANGLES)
-        data.primitive_mode = int(item[_S_PRIMITIVE_MODE] or 0)
-        data.vertices_f32 = item[_S_VERTICES_F32] or b""
-        data.indices_u32 = item[_S_INDICES_U32] or b""
-        data.edges_u32 = (item[_S_EDGES_U32] or b"") if count > _S_EDGES_U32 else b""
-        data.loop_starts_i32 = item[_S_LOOP_STARTS_I32] or b""
-        data.loop_totals_i32 = item[_S_LOOP_TOTALS_I32] or b""
-        data.normals_f32 = item[_S_NORMALS_F32] or b""
-        data.vertex_normals_f32 = item[_S_VERTEX_NORMALS_F32] or b""
-        data.tangents_f32 = item[_S_TANGENTS_F32] or b""
-        data.uvs_f32 = (item[_S_UVS_F32] or b"") if count > _S_UVS_F32 else b""
-        data.object_name = item[_S_OBJECT_NAME] or ""
-        data.matrix_f32 = item[_S_MATRIX_F32] or b""
-        data.coord_matrix_f32 = item[_S_COORD_MATRIX_F32] or b""
-        data.instance_matrices_f32 = item[_S_INSTANCE_MATRICES_F32] or b""
-        data.node_index = int(item[_S_NODE_INDEX] if item[_S_NODE_INDEX] is not None else -1)
-        data.instance_count = int(item[_S_INSTANCE_COUNT] or 0)
-        data.has_node = bool(item[_S_HAS_NODE])
-        data.file_type = int(item[_S_FILE_TYPE] or 0)
-        data.mesh_key = int(item[_S_MESH_KEY] or 0)
-        data.primitive_index = int(item[_S_PRIMITIVE_INDEX] or 0)
-        data.zero_copy_flags = int(item[_S_ZERO_COPY_FLAGS] or 0)
-        data.geometry_key = int(item[_S_GEOMETRY_KEY] or 0)
-        data.base_color_texture = (item[_S_BASE_COLOR_TEXTURE] or "") if count > _S_BASE_COLOR_TEXTURE else ""
-        if count > _S_MATERIAL_TYPE:
-            data.material_type = int(item[_S_MATERIAL_TYPE] or 0)
-        if count > _S_MATERIAL_KEY:
-            data.material_key = int(item[_S_MATERIAL_KEY] or 0)
-        if count > _S_METALLIC:
-            data.metallic = float(item[_S_METALLIC] if item[_S_METALLIC] is not None else 1.0)
-        if count > _S_ROUGHNESS:
-            data.roughness = float(item[_S_ROUGHNESS] if item[_S_ROUGHNESS] is not None else 1.0)
-        if count > _S_DOUBLE_SIDED:
-            data.double_sided = bool(item[_S_DOUBLE_SIDED])
-        if count > _S_SMOOTH_SHADING:
-            data.smooth_shading = bool(item[_S_SMOOTH_SHADING])
-        data.simple_native = True
-        data._native_owner = item[_S_OWNER]
-        return data
+        return NativeSimpleMeshData(item)
 
     get = item.get
     data = MeshPrimitiveData(

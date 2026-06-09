@@ -33,34 +33,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from assetkit_blender.assetkit import (  # noqa: E402
+from assetkit_blender.assetkit import native_load_meshes  # noqa: E402
+from assetkit_blender.enums import (  # noqa: E402
     AK_PRIMITIVE_LINES,
     AK_PRIMITIVE_POINTS,
     AK_PRIMITIVE_TRIANGLES,
-    native_load_meshes,
 )
 from assetkit_blender.importer import import_assetkit_file  # noqa: E402
-
-
-NATIVE_OPTIONS = {
-    "coordinate_system": "Z_UP",
-    "coordinate_conversion": "TRANSFORM",
-    "generate_normals": False,
-    "convert_triangle_strip": True,
-    "convert_triangle_fan": True,
-    "import_lines": True,
-    "convert_line_loop": True,
-    "convert_line_strip": True,
-    "triangulate": False,
-}
-
-IMPORT_OPTIONS = {
-    "coordinate_system": "Z_UP",
-    "coordinate_conversion": "DEFAULT",
-    "triangulate": False,
-    "generate_normals": False,
-    "texture_loading": "DEFERRED",
-}
+from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 
 KNOWN_OBJ_DIFFS = {
@@ -103,17 +83,7 @@ class MeshStats:
 
 
 def purge_scene() -> None:
-    for obj in list(bpy.data.objects):
-        bpy.data.objects.remove(obj, do_unlink=True)
-    for datablocks in (
-        bpy.data.meshes,
-        bpy.data.curves,
-        bpy.data.materials,
-        bpy.data.images,
-    ):
-        for item in list(datablocks):
-            if item.users == 0:
-                datablocks.remove(item)
+    bpy.ops.wm.read_factory_settings(use_empty=True)
 
 
 def infer_format(path: str) -> str:
@@ -188,8 +158,17 @@ def mesh_tri_loop_count(mesh: object, face_count: int, loop_count: int) -> int:
 
 
 def assetkit_native_stats(path: str, triangulate: bool = False) -> MeshStats:
-    options = dict(NATIVE_OPTIONS)
-    options["triangulate"] = bool(triangulate)
+    options = make_load_options(
+        coordinate_system="Z_UP",
+        coordinate_conversion="TRANSFORM",
+        generate_normals=False,
+        convert_triangle_strip=True,
+        convert_triangle_fan=True,
+        import_lines=True,
+        convert_line_loop=True,
+        convert_line_strip=True,
+        triangulate=triangulate,
+    )
     result = native_load_meshes(path, options)
     meshes = list(result.meshes if result else [])
     stats = MeshStats(meshes=len(meshes), objects=len(meshes))
@@ -225,8 +204,13 @@ def import_blender_builtin(path: str, fmt: str) -> None:
 
 
 def import_assetkit(path: str, triangulate: bool = False) -> None:
-    options = dict(IMPORT_OPTIONS)
-    options["triangulate"] = bool(triangulate)
+    options = make_load_options(
+        coordinate_system="Z_UP",
+        coordinate_conversion="TRANSFORM",
+        triangulate=triangulate,
+        generate_normals=False,
+        texture_loading="DEFERRED",
+    )
     import_assetkit_file(
         path,
         load_options=options,

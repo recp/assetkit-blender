@@ -16,12 +16,6 @@ from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Matrix, Quaternion, Vector
 
 from .assetkit import (
-    AK_FILE_TYPE_WAVEFRONT,
-    AK_FILE_TYPE_STL,
-    AK_PRIMITIVE_LINES,
-    AK_PRIMITIVE_POLYGONS,
-    AK_PRIMITIVE_POINTS,
-    AK_PRIMITIVE_TRIANGLES,
     AssetKit,
     AssetKitSceneData,
     LoopFloatAttributeData,
@@ -30,6 +24,7 @@ from .assetkit import (
     TextureRefData,
     _profile_enabled,
     _profile_log,
+    _native_meshes_from_raw,
     native_animation_component_constant,
     native_animation_coords,
     native_load_meshes,
@@ -40,6 +35,14 @@ from .assetkit import (
     native_open_scene_stream,
     native_skin_group_assignments,
     native_write_offset_i32,
+)
+from .enums import (
+    AK_FILE_TYPE_WAVEFRONT,
+    AK_FILE_TYPE_STL,
+    AK_PRIMITIVE_LINES,
+    AK_PRIMITIVE_POLYGONS,
+    AK_PRIMITIVE_POINTS,
+    AK_PRIMITIVE_TRIANGLES,
 )
 from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
 from .load_options import (
@@ -129,6 +132,7 @@ _ANIM_TEXTURE_TRANSFORM_ROLES = (
 _MATERIAL_TEXTURE_FIELDS = tuple(f"{role}_texture" for role in _ANIM_TEXTURE_TRANSFORM_ROLES)
 _TEXTURE_IMAGE_CACHE: dict[tuple[str, str], object] = {}
 _TEXTURE_PATH_CACHE: dict[str, str] = {}
+_MATERIAL_TEMPLATE_CACHE: dict[object, bpy.types.Material] = {}
 _ACTIVE_TEXTURE_NODE_CACHE: dict[object, object] | None = None
 _ACTIVE_SEPARATE_COLOR_CACHE: dict[int, object] | None = None
 _ACTIVE_TEXTURE_LOAD_MODE = "IMMEDIATE"
@@ -325,6 +329,7 @@ def import_assetkit_file(
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
     _reset_action_cache()
+    _reset_material_template_cache()
     _reset_material_profile()
     existing_actions = _snapshot_actions(fit_timeline)
     texture_load_mode = _texture_load_mode(load_options)
@@ -372,6 +377,7 @@ def import_assetkit_file(
         _apply_deferred_bind_pose_skins(state)
     finally:
         _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
+        _reset_material_template_cache()
     if profile_detail:
         _profile_log(
             "blocking build_objects "
@@ -421,6 +427,7 @@ def import_assetkit_file_progressive(
     fit_timeline: bool = False,
 ) -> "_ProgressiveImportJob":
     _reset_action_cache()
+    _reset_material_template_cache()
     _reset_material_profile()
     job = _ProgressiveImportJob(
         filepath,
@@ -459,6 +466,23 @@ def import_assetkit_file_auto(
     clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object] | "_ProgressiveImportJob":
+    if bpy.app.background:
+        return import_assetkit_file(
+            filepath,
+            library_path,
+            load_options,
+            collection,
+            focus_mode,
+            placement_mode,
+            scene_was_empty,
+            focus_camera,
+            select_imported,
+            shading_mode,
+            set_viewport_shading,
+            clean_viewport_overlays,
+            fit_timeline,
+        )
+
     _reset_action_cache()
     _reset_material_profile()
     active_collection = collection or bpy.context.collection
@@ -860,6 +884,19 @@ def _set_document_extra_props(
     scene_info: dict | None = None,
     doc_images: list[dict] | None = None,
 ) -> None:
+    for target in (collection, bpy.context.scene, getattr(bpy.context.scene, "world", None)):
+        _clear_assetkit_props(
+            target,
+            (
+                "assetkit_document_extra_json",
+                "assetkit_document_images_json",
+                "assetkit_scene_extra_json",
+                "assetkit_scene_index",
+                "assetkit_scene_count",
+                "assetkit_scene_name",
+                "assetkit_scene_names_json",
+            ),
+        )
     _set_assetkit_json_prop(collection, "assetkit_document_extra_json", doc_extra)
     _set_assetkit_json_prop(bpy.context.scene, "assetkit_document_extra_json", doc_extra)
     _set_assetkit_json_prop(collection, "assetkit_document_images_json", doc_images)
@@ -870,6 +907,17 @@ def _set_document_extra_props(
     if world:
         _set_assetkit_json_prop(world, "assetkit_document_extra_json", doc_extra)
         _set_assetkit_json_prop(world, "assetkit_document_images_json", doc_images)
+
+
+def _clear_assetkit_props(target, keys: tuple[str, ...]) -> None:
+    if target is None:
+        return
+    for key in keys:
+        try:
+            if key in target:
+                del target[key]
+        except Exception:
+            pass
 
 
 def _set_scene_props(target, scene_extra: object | None, scene_info: dict | None) -> None:
@@ -2630,6 +2678,7 @@ class _ProgressiveImportJob:
         self._finish()
 
     def _finish(self) -> None:
+        _reset_material_template_cache()
         self._progress_end()
         self._status_clear()
         finish_loading_hud()
@@ -4685,7 +4734,9 @@ def _apply_instancing(
 
     original = obj.matrix_local.copy()
     objects = [obj]
+    group = obj.name
     obj.matrix_local = original @ _matrix_from_values(matrices, 0)
+    obj["assetkit_instance_group"] = group
     obj["assetkit_instance_index"] = 0
     obj["assetkit_instance_count"] = count
 
@@ -4695,6 +4746,7 @@ def _apply_instancing(
         duplicate.data = obj.data
         duplicate.name = f"{base_name}_Instance_{index:03d}"
         duplicate.matrix_local = original @ _matrix_from_values(matrices, index * 16)
+        duplicate["assetkit_instance_group"] = group
         duplicate["assetkit_instance_index"] = index
         duplicate["assetkit_instance_count"] = count
         collection.objects.link(duplicate)
@@ -6821,9 +6873,14 @@ def _create_variant_material(
     material_cache: dict[object, bpy.types.Material] | None,
 ) -> bpy.types.Material | None:
     raw = variant.get("material")
-    if not isinstance(raw, dict):
+    if isinstance(raw, dict):
+        return _create_material(_variant_material_data(data, variant, raw), material_cache)
+    if raw is None:
         return None
-    return _create_material(_variant_material_data(data, variant, raw), material_cache)
+    material_data = _native_meshes_from_raw((raw,))
+    if not material_data:
+        return None
+    return _create_material(material_data[0], material_cache)
 
 
 def _variant_material_data(data: MeshPrimitiveData, variant: dict, raw: dict) -> MeshPrimitiveData:
@@ -7072,6 +7129,54 @@ def _create_material(
     if data.material_name and color_attr:
         material_name = f"{material_name}_{color_attr}"
     base_color = _material_base_color(data)
+    if (
+        _ACTIVE_TEXTURE_LOAD_MODE != "DEFERRED"
+        and _can_use_base_color_texture_fast_material(data, color_attr, base_color)
+    ):
+        mat = _copy_base_color_texture_template_material(material_name, data, base_color)
+        new_ms = lap_ms()
+        if mat is not None:
+            if material_cache is not None:
+                material_cache[cache_key] = mat
+            if profile_detail:
+                _record_material_profile(
+                    cache_hit=False,
+                    cache_key_ms=cache_key_ms,
+                    new_ms=new_ms,
+                    simple_ms=0.0,
+                    nodes_ms=0.0,
+                    props_ms=0.0,
+                    settings_ms=0.0,
+                    textures_ms=0.0,
+                    animation_ms=0.0,
+                    total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+                )
+            return mat
+
+    if (
+        _ACTIVE_TEXTURE_LOAD_MODE != "DEFERRED"
+        and _can_use_classic_texture_fast_material(data, color_attr)
+    ):
+        mat = _copy_classic_texture_template_material(material_name, data, base_color)
+        new_ms = lap_ms()
+        if mat is not None:
+            if material_cache is not None:
+                material_cache[cache_key] = mat
+            if profile_detail:
+                _record_material_profile(
+                    cache_hit=False,
+                    cache_key_ms=cache_key_ms,
+                    new_ms=new_ms,
+                    simple_ms=0.0,
+                    nodes_ms=0.0,
+                    props_ms=0.0,
+                    settings_ms=0.0,
+                    textures_ms=0.0,
+                    animation_ms=0.0,
+                    total_ms=(time.perf_counter() - profile_started_at) * 1000.0,
+                )
+            return mat
+
     mat = bpy.data.materials.new(material_name)
     mat.diffuse_color = base_color
     new_ms = lap_ms()
@@ -7836,6 +7941,8 @@ def _configure_base_color_texture_fast_material(
     interpolation = _texture_interpolation(tex_info)
     if interpolation != _TEXTURE_INTERPOLATION_DEFAULT:
         tex.interpolation = interpolation
+    if tex_info is not None:
+        _set_texture_sampler_props(tex, tex_info)
     if image:
         tex.image = image
     else:
@@ -7846,6 +7953,186 @@ def _configure_base_color_texture_fast_material(
     if color_socket and color_output:
         tree.links.new(color_output, color_socket)
     return True
+
+
+def _copy_base_color_texture_template_material(
+    name: str,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> bpy.types.Material | None:
+    key = _base_color_texture_template_key(data)
+    if key is None:
+        return None
+
+    template = _MATERIAL_TEMPLATE_CACHE.get(key)
+    if template is not None and not _material_ref_alive(template):
+        _MATERIAL_TEMPLATE_CACHE.pop(key, None)
+        template = None
+
+    if template is None:
+        template = bpy.data.materials.new(".AssetKit_BaseColorTexture_Template")
+        try:
+            template["assetkit_internal_template"] = True
+        except Exception:
+            pass
+        if not _configure_base_color_texture_fast_material(template, data, (1.0, 1.0, 1.0, 1.0)):
+            try:
+                bpy.data.materials.remove(template)
+            except Exception:
+                pass
+            return None
+        _MATERIAL_TEMPLATE_CACHE[key] = template
+
+    try:
+        mat = template.copy()
+    except Exception:
+        return None
+
+    mat.name = name
+    mat.diffuse_color = base_color
+    mat.use_backface_culling = not _is_double_sided_material(data)
+    _set_material_alpha_mode(mat, data)
+
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if bsdf:
+        _set_input(bsdf, "Metallic", data.metallic)
+        _set_input(bsdf, "Roughness", data.roughness)
+        _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _pbr_specular_level(data))
+    else:
+        _set_material_scalar(mat, "metallic", data.metallic)
+        _set_material_scalar(mat, "roughness", data.roughness)
+        _set_material_scalar(mat, "specular_intensity", _pbr_specular_level(data))
+    return mat
+
+
+def _base_color_texture_template_key(data: MeshPrimitiveData) -> object | None:
+    tex_info = _texture_info(data, "base_color")
+    colorspace = _texture_color_space(tex_info, "sRGB")
+    texture_key = _texture_node_cache_key(data.base_color_texture, colorspace, tex_info)
+    if texture_key is None:
+        return None
+    return ("base-color-texture-template", int(data.material_type), texture_key)
+
+
+def _copy_classic_texture_template_material(
+    name: str,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> bpy.types.Material | None:
+    key = _classic_texture_template_key(data)
+    if key is None:
+        return None
+
+    template = _MATERIAL_TEMPLATE_CACHE.get(key)
+    if template is not None and not _material_ref_alive(template):
+        _MATERIAL_TEMPLATE_CACHE.pop(key, None)
+        template = None
+
+    if template is None:
+        template = bpy.data.materials.new(".AssetKit_ClassicTexture_Template")
+        try:
+            template["assetkit_internal_template"] = True
+        except Exception:
+            pass
+        if not _configure_classic_texture_fast_material(template, data, (1.0, 1.0, 1.0, 1.0)):
+            try:
+                bpy.data.materials.remove(template)
+            except Exception:
+                pass
+            return None
+        _MATERIAL_TEMPLATE_CACHE[key] = template
+
+    try:
+        mat = template.copy()
+    except Exception:
+        return None
+
+    mat.name = name
+    mat.diffuse_color = base_color
+    mat.use_backface_culling = not _is_double_sided_material(data)
+
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if bsdf:
+        _set_input(bsdf, "Base Color", base_color)
+        _set_input(bsdf, "Metallic", 0.0)
+        _set_input(bsdf, "Roughness", _classic_roughness(data.specular_strength))
+        _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _classic_specular(data))
+        _set_input(
+            bsdf,
+            "Emission Color",
+            (*data.emissive_color, 1.0) if _has_emission(data) else (0.0, 0.0, 0.0, 1.0),
+        )
+        _set_first_input(bsdf, ("Emission Strength",), _emission_strength(data) if _has_emission(data) else 0.0)
+        _set_first_input(
+            bsdf,
+            ("Specular Tint",),
+            (*data.specular_color, 1.0) if _has_specular(data) else (1.0, 1.0, 1.0, 1.0),
+        )
+        _set_first_input(bsdf, ("IOR",), _material_ior(data))
+
+    normal_map = _normal_map_node(mat, "normal")
+    if normal_map:
+        scale = normal_map.inputs.get("Strength")
+        if scale:
+            try:
+                scale.default_value = data.normal_scale
+            except TypeError:
+                pass
+    return mat
+
+
+def _classic_texture_template_key(data: MeshPrimitiveData) -> object | None:
+    base_key: object = None
+    normal_key: object = None
+
+    if data.base_color_texture:
+        base_info = _texture_info(data, "base_color")
+        base_key = _texture_node_cache_key(
+            data.base_color_texture,
+            _texture_color_space(base_info, "sRGB"),
+            base_info,
+        )
+        if base_key is None:
+            return None
+
+    if data.normal_texture:
+        normal_info = _texture_info(data, "normal")
+        normal_key = _texture_node_cache_key(
+            data.normal_texture,
+            _texture_color_space(normal_info, "Non-Color"),
+            normal_info,
+        )
+        if normal_key is None:
+            return None
+
+    return ("classic-texture-template", int(data.material_type), base_key, normal_key)
+
+
+def _material_ref_alive(mat: bpy.types.Material) -> bool:
+    try:
+        return bpy.data.materials.get(mat.name) == mat
+    except ReferenceError:
+        return False
+    except Exception:
+        return False
+
+
+def _reset_material_template_cache() -> None:
+    if not _MATERIAL_TEMPLATE_CACHE:
+        return
+
+    templates = tuple(_MATERIAL_TEMPLATE_CACHE.values())
+    _MATERIAL_TEMPLATE_CACHE.clear()
+    for mat in templates:
+        try:
+            if bpy.data.materials.get(mat.name) == mat:
+                bpy.data.materials.remove(mat)
+        except ReferenceError:
+            pass
+        except Exception:
+            pass
 
 
 def _new_fast_image_texture_node(tree, path: str, tex_info: TextureRefData | None, colorspace: str):
@@ -7862,6 +8149,8 @@ def _new_fast_image_texture_node(tree, path: str, tex_info: TextureRefData | Non
     interpolation = _texture_interpolation(tex_info)
     if interpolation != _TEXTURE_INTERPOLATION_DEFAULT:
         tex.interpolation = interpolation
+    if tex_info is not None:
+        _set_texture_sampler_props(tex, tex_info)
     if image:
         tex.image = image
     else:
@@ -7919,6 +8208,11 @@ def _configure_classic_texture_fast_material(
     normal_socket = bsdf_inputs.get("Normal")
     if normal_tex and normal_socket:
         normal_map = tree.nodes.new("ShaderNodeNormalMap")
+        normal_map.label = "AssetKit normal"
+        try:
+            normal_map["assetkit_normal_role"] = "normal"
+        except Exception:
+            pass
         if abs(float(data.normal_scale) - 1.0) > 1e-6:
             scale = normal_map.inputs.get("Strength")
             if scale:
@@ -8169,6 +8463,8 @@ def _apply_deferred_base_color_texture_material(
     interpolation = _texture_interpolation(tex_info)
     if interpolation != _TEXTURE_INTERPOLATION_DEFAULT:
         tex.interpolation = interpolation
+    if tex_info is not None:
+        _set_texture_sampler_props(tex, tex_info)
     if image:
         tex.image = image
     else:
@@ -9220,6 +9516,7 @@ def _fast_simple_native_base_color_texture_key(data: MeshPrimitiveData) -> objec
         round(float(data.metallic), 6),
         round(float(data.roughness), 6),
         bool(data.double_sided),
+        _texture_infos_cache_key(data.texture_infos),
     )
 
 
@@ -9487,6 +9784,8 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         "assetkit_diffuse_transmission_color_texture": data.diffuse_transmission_color_texture,
         "assetkit_transparent_texture": data.transparent_texture,
     }
+    if _material_extra_extension(data, "KHR_materials_ior") is not None or abs(float(data.ior) - 1.5) > 1e-6:
+        props["assetkit_ior"] = data.ior
     scatter_color = _volume_scatter_color(data)
     if scatter_color:
         props["assetkit_volume_scatter_multiscatter_color"] = scatter_color
@@ -10775,7 +11074,7 @@ def _texture_node_cache_key(path: str, colorspace: str, tex_info: TextureRefData
         return None
 
     if tex_info is None:
-        return (source_path, colorspace, 0, 1, 1, 0, 0, 0, False)
+        return (source_path, colorspace, 0, 1, 1, 1, 0, 0, 0, False)
 
     transform = None
     if tex_info.has_transform:
@@ -10793,6 +11092,7 @@ def _texture_node_cache_key(path: str, colorspace: str, tex_info: TextureRefData
         _texture_uv_slot(tex_info),
         int(tex_info.wrap_s),
         int(tex_info.wrap_t),
+        int(tex_info.wrap_p),
         int(tex_info.min_filter),
         int(tex_info.mag_filter),
         int(tex_info.mip_filter),
