@@ -4,6 +4,7 @@ import os
 from array import array
 from pathlib import Path
 
+import bmesh
 import bpy
 
 from ..assetkit import _native_module
@@ -18,6 +19,7 @@ class _ExportImageStore:
         self._channel_cache: dict[tuple[int, int, int, float], str | None] = {}
         self._rgb_channel_cache: dict[tuple[int, int, float], str | None] = {}
         self._spec_gloss_cache: dict[tuple[int, int, int, int, bytes, float], str | None] = {}
+        self._shader_bake_cache: dict[tuple[int, int, int, int, str], str | None] = {}
         self._counter = 0
 
     def path_for(self, image: bpy.types.Image) -> str | None:
@@ -182,6 +184,46 @@ class _ExportImageStore:
             name,
         )
         self._spec_gloss_cache[key] = path
+        return path
+
+    def shader_bake_path(
+        self,
+        context: bpy.types.Context,
+        obj: bpy.types.Object,
+        mesh: bpy.types.Mesh,
+        material: bpy.types.Material,
+        material_index: int,
+        size: int,
+        name: str,
+        uv_key: str = "",
+    ) -> str | None:
+        if obj.type != "MESH":
+            return None
+        uv_layers = getattr(mesh, "uv_layers", None) if mesh is not None else None
+        if uv_layers is None or len(uv_layers) == 0:
+            return None
+
+        size = max(64, min(8192, int(size)))
+        key = (
+            int(obj.as_pointer()),
+            int(mesh.as_pointer()),
+            int(material_index),
+            int(size),
+            str(uv_key or ""),
+        )
+        if key in self._shader_bake_cache:
+            return self._shader_bake_cache[key]
+
+        path = self._write_shader_bake(
+            context,
+            obj,
+            mesh,
+            material,
+            int(material_index),
+            size,
+            name,
+        )
+        self._shader_bake_cache[key] = path
         return path
 
     def _source_path(self, image: bpy.types.Image) -> str | None:
@@ -535,6 +577,212 @@ class _ExportImageStore:
                 )
 
         return self._write_rgba_pixels(f"{name}_specularGlossiness", width, height, pixels)
+
+    def _write_shader_bake(
+        self,
+        context: bpy.types.Context,
+        obj: bpy.types.Object,
+        mesh: bpy.types.Mesh,
+        material: bpy.types.Material,
+        material_index: int,
+        size: int,
+        name: str,
+    ) -> str | None:
+        scene = context.scene
+        view_layer = context.view_layer
+        image = None
+        temp_nodes = []
+        bake_obj = None
+        bake_mesh = None
+        old_active = view_layer.objects.active
+        old_selected = tuple(context.selected_objects)
+        old_engine = getattr(scene.render, "engine", None)
+        cycles = getattr(scene, "cycles", None)
+        old_cycles_samples = getattr(cycles, "samples", None) if cycles is not None else None
+
+        try:
+            bake_obj, bake_mesh = self._filtered_material_bake_object(
+                context,
+                obj,
+                mesh,
+                material,
+                material_index,
+                name,
+            )
+            if bake_obj is None:
+                return None
+
+            image = bpy.data.images.new(
+                f"##assetkit-bake:{name}##",
+                int(size),
+                int(size),
+                alpha=True,
+                float_buffer=False,
+            )
+            for slot in getattr(bake_obj, "material_slots", ()) or ():
+                material = getattr(slot, "material", None)
+                if material is None or not material.use_nodes or material.node_tree is None:
+                    continue
+                nodes = material.node_tree.nodes
+                active_node = getattr(nodes, "active", None)
+                selected_nodes = tuple(node for node in nodes if getattr(node, "select", False))
+                bake_node = nodes.new("ShaderNodeTexImage")
+                bake_node.name = "##assetkit_bake_target##"
+                bake_node.label = "AssetKit Bake Target"
+                bake_node.image = image
+                for node in selected_nodes:
+                    node.select = False
+                bake_node.select = True
+                nodes.active = bake_node
+                temp_nodes.append((nodes, bake_node, active_node, selected_nodes))
+
+            if not temp_nodes:
+                return None
+
+            if bpy.ops.object.mode_set.poll():
+                bpy.ops.object.mode_set(mode="OBJECT")
+            for selected in old_selected:
+                selected.select_set(False)
+            bake_obj.select_set(True)
+            view_layer.objects.active = bake_obj
+
+            try:
+                scene.render.engine = "CYCLES"
+            except Exception:
+                pass
+            if cycles is not None and old_cycles_samples is not None:
+                cycles.samples = min(max(int(old_cycles_samples), 1), 32)
+
+            try:
+                bpy.ops.object.bake(
+                    type="DIFFUSE",
+                    pass_filter={"COLOR"},
+                    margin=4,
+                    use_clear=True,
+                )
+            except TypeError:
+                bpy.ops.object.bake(type="DIFFUSE", margin=4, use_clear=True)
+
+            pixels = self._image_pixels(image)
+            if pixels is None:
+                return None
+            width, height, rgba = pixels
+            return self._write_rgba_pixels(f"{name}_shaderBake", width, height, rgba)
+        except Exception:
+            return None
+        finally:
+            for nodes, bake_node, active_node, selected_nodes in reversed(temp_nodes):
+                try:
+                    nodes.remove(bake_node)
+                except Exception:
+                    pass
+                try:
+                    nodes.active = active_node
+                except Exception:
+                    pass
+                try:
+                    for node in selected_nodes:
+                        node.select = True
+                except Exception:
+                    pass
+            if image is not None:
+                try:
+                    bpy.data.images.remove(image)
+                except Exception:
+                    pass
+            if old_cycles_samples is not None and cycles is not None:
+                try:
+                    cycles.samples = old_cycles_samples
+                except Exception:
+                    pass
+            if old_engine is not None:
+                try:
+                    scene.render.engine = old_engine
+                except Exception:
+                    pass
+            try:
+                if bake_obj is not None:
+                    bake_obj.select_set(False)
+                for selected in old_selected:
+                    selected.select_set(True)
+                view_layer.objects.active = old_active
+            except Exception:
+                pass
+            if bake_obj is not None:
+                try:
+                    bpy.data.objects.remove(bake_obj, do_unlink=True)
+                except Exception:
+                    pass
+            if bake_mesh is not None:
+                try:
+                    bpy.data.meshes.remove(bake_mesh)
+                except Exception:
+                    pass
+
+    def _filtered_material_bake_object(
+        self,
+        context: bpy.types.Context,
+        obj: bpy.types.Object,
+        mesh: bpy.types.Mesh,
+        material: bpy.types.Material,
+        material_index: int,
+        name: str,
+    ) -> tuple[bpy.types.Object | None, bpy.types.Mesh | None]:
+        if mesh is None or material is None or material_index < 0:
+            return None, None
+
+        polygons = getattr(mesh, "polygons", None)
+        if polygons is None or len(polygons) == 0:
+            return None, None
+        found = False
+        for poly in polygons:
+            if int(poly.material_index) == material_index:
+                found = True
+                break
+        if not found:
+            return None, None
+
+        filtered_mesh = bpy.data.meshes.new(f"##assetkit-bake-mesh:{name}##")
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(mesh)
+            bm.faces.ensure_lookup_table()
+            delete = [
+                face
+                for face in bm.faces
+                if int(face.material_index) != int(material_index)
+            ]
+            if len(delete) >= len(bm.faces):
+                try:
+                    bpy.data.meshes.remove(filtered_mesh)
+                except Exception:
+                    pass
+                return None, None
+            if delete:
+                bmesh.ops.delete(bm, geom=delete, context="FACES_ONLY")
+            for face in bm.faces:
+                face.material_index = 0
+            bm.to_mesh(filtered_mesh)
+        except Exception:
+            try:
+                bpy.data.meshes.remove(filtered_mesh)
+            except Exception:
+                pass
+            return None, None
+        finally:
+            bm.free()
+
+        filtered_mesh.update()
+        filtered_mesh.materials.append(material)
+        bake_obj = bpy.data.objects.new(f"##assetkit-bake-object:{name}##", filtered_mesh)
+        bake_obj.matrix_world = obj.matrix_world.copy()
+        bake_obj.hide_render = False
+        bake_obj.hide_viewport = False
+        try:
+            context.collection.objects.link(bake_obj)
+        except Exception:
+            bpy.context.scene.collection.objects.link(bake_obj)
+        return bake_obj, filtered_mesh
 
     def _write_rgba_pixels(self, name: str, width: int, height: int, pixels: array) -> str | None:
         path = self._next_path(name, ".png")

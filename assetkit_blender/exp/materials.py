@@ -76,6 +76,13 @@ def _material_tuple(
     image_store: _ExportImageStore,
     uv_slot_by_name: dict[str, int] | None = None,
     fps: float = 24.0,
+    *,
+    context: bpy.types.Context | None = None,
+    obj: bpy.types.Object | None = None,
+    mesh: bpy.types.Mesh | None = None,
+    material_index: int = -1,
+    material_export_mode: str = "AUTO",
+    material_bake_size: int = 1024,
 ) -> tuple | None:
     if material is None:
         return None
@@ -125,8 +132,29 @@ def _material_tuple(
     uv_slot_by_name = uv_slot_by_name or {}
     bsdf = None
     unlit_emission = None
+    baked_base_color_texture = None
+    baked_visual_only = False
 
-    if material.use_nodes and material.node_tree:
+    if (
+        context is not None
+        and obj is not None
+        and mesh is not None
+        and material_index >= 0
+        and _material_bake_required(material, material_export_mode)
+    ):
+        baked_visual_only = not _material_surface_extractable(material)
+        baked_base_color_texture = image_store.shader_bake_path(
+            context,
+            obj,
+            mesh,
+            material,
+            int(material_index),
+            int(material_bake_size),
+            f"{obj.name}_{material.name}",
+            _bake_uv_key(uv_slot_by_name),
+        )
+
+    if material.use_nodes and material.node_tree and not baked_visual_only:
         bsdf = _principled_bsdf(material)
         unlit_emission = _unlit_emission_node(material)
         if bsdf is not None:
@@ -271,6 +299,16 @@ def _material_tuple(
             if value is not None and not occlusion_socket.is_linked:
                 occlusion_strength = _clamp01(float(value))
 
+    if baked_base_color_texture is not None:
+        base_color_texture = baked_base_color_texture
+        base_color_slot = 0
+        base_color_info = None
+        base_color = [1.0, 1.0, 1.0, alpha]
+        if opacity_texture == base_color_texture:
+            opacity_texture = None
+            opacity_info = None
+            opacity_slot = 0
+
     if len(base_color) < 4:
         base_color = [*base_color[:3], alpha]
     base_color = [_clamp01(v) for v in base_color[:4]]
@@ -334,6 +372,8 @@ def _material_tuple(
         metallic_roughness_slot = roughness_slot if roughness_image is not None else metallic_slot
 
     material_type = _material_type(material, bsdf, unlit_emission)
+    if baked_base_color_texture is not None and bsdf is None:
+        material_type = _MATERIAL_TYPE_UNLIT
     animations = _material_animation_payload(material, bsdf, base_color, fps)
 
     return (
@@ -437,6 +477,131 @@ def _material_type(material: bpy.types.Material, bsdf, unlit_emission) -> int:
     if unlit_emission is not None and bsdf is None:
         return _MATERIAL_TYPE_UNLIT
     return 0
+
+
+def _material_bake_required(material: bpy.types.Material | None, material_export_mode: str) -> bool:
+    mode = (material_export_mode or "AUTO").upper()
+    if mode == "DIRECT":
+        return False
+    if material is None or not material.use_nodes or not material.node_tree:
+        return False
+    if mode == "BAKE":
+        return True
+    return not _material_graph_directly_supported(material)
+
+
+def _bake_uv_key(uv_slot_by_name: dict[str, int]) -> str:
+    for name, slot in uv_slot_by_name.items():
+        if int(slot) == 0:
+            return str(name)
+    return ""
+
+
+def _material_graph_directly_supported(material: bpy.types.Material) -> bool:
+    surface = _material_surface_socket(material)
+    if surface is None or not surface.is_linked:
+        return True
+
+    node = _skip_reroute(surface.links[0].from_node)
+    if node is None:
+        return True
+
+    if node.type == "BSDF_PRINCIPLED":
+        for socket_name in (
+            "Base Color",
+            "Alpha",
+            "Metallic",
+            "Roughness",
+            "Emission Color",
+            "Normal",
+        ):
+            if not _socket_direct_texture_or_default(node.inputs.get(socket_name), set()):
+                return False
+        return True
+
+    unlit_emission = _unlit_emission_node(material)
+    if unlit_emission is not None:
+        return _socket_direct_texture_or_default(unlit_emission.inputs.get("Color"), set())
+
+    return False
+
+
+def _material_surface_extractable(material: bpy.types.Material) -> bool:
+    node = _material_surface_shader_node(material)
+    if node is not None and node.type == "BSDF_PRINCIPLED":
+        return True
+    return _unlit_emission_node(material) is not None
+
+
+def _material_surface_shader_node(material: bpy.types.Material):
+    surface = _material_surface_socket(material)
+    if surface is None or not surface.is_linked:
+        return None
+    return _skip_reroute(surface.links[0].from_node)
+
+
+def _material_surface_socket(material: bpy.types.Material):
+    node_tree = material.node_tree
+    if not node_tree:
+        return None
+    output = None
+    for node in node_tree.nodes:
+        if node.type == "OUTPUT_MATERIAL" and getattr(node, "is_active_output", True):
+            output = node
+            break
+    if output is None:
+        output = node_tree.nodes.get("Material Output")
+    if output is None:
+        return None
+    return output.inputs.get("Surface")
+
+
+def _skip_reroute(node):
+    seen: set[int] = set()
+    while node is not None and node.type == "REROUTE":
+        node_id = id(node)
+        if node_id in seen:
+            return None
+        seen.add(node_id)
+        input_socket = node.inputs[0] if len(node.inputs) > 0 else None
+        if input_socket is None or not input_socket.is_linked:
+            return None
+        node = input_socket.links[0].from_node
+    return node
+
+
+def _socket_direct_texture_or_default(socket, seen: set[int]) -> bool:
+    if socket is None or not socket.is_linked:
+        return True
+    if len(socket.links) != 1:
+        return False
+    return _direct_texture_node(socket.links[0].from_node, seen)
+
+
+def _direct_texture_node(node, seen: set[int]) -> bool:
+    node = _skip_reroute(node)
+    if node is None:
+        return False
+    node_id = id(node)
+    if node_id in seen:
+        return False
+    seen.add(node_id)
+
+    if node.type == "TEX_IMAGE":
+        return node.image is not None
+
+    if node.type == "NORMAL_MAP":
+        return _socket_direct_texture_or_default(node.inputs.get("Color"), seen)
+
+    if node.type in {"SEPARATE_COLOR", "SEPARATE_RGB", "SEPRGB"}:
+        color_socket = (
+            node.inputs.get("Color")
+            or node.inputs.get("Image")
+            or (node.inputs[0] if len(node.inputs) > 0 else None)
+        )
+        return _socket_direct_texture_or_default(color_socket, seen)
+
+    return False
 
 
 def _unlit_emission_node(material: bpy.types.Material):

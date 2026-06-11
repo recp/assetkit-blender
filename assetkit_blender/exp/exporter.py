@@ -50,7 +50,7 @@ from ..enums import (
     AKB_LOAD_COORD_Z_UP,
 )
 from .images import _ExportImageStore
-from .materials import _material_tuple
+from .materials import _material_bake_required, _material_tuple
 
 EXPORT_FORMATS = (
     ("GLTF", "glTF", "Export .gltf with external .bin/resources", AK_FILE_TYPE_GLTF, ".gltf"),
@@ -123,6 +123,8 @@ def export_scene(
     dae_index_mode: int = AK_DAE_EXPORT_INDEX_SINGLE,
     coordinate_system: int | None = None,
     coordinate_conversion: int | None = None,
+    material_export_mode: str = "AUTO",
+    material_bake_size: int = 1024,
 ) -> int:
     module = _native_module()
     if module is None:
@@ -132,12 +134,14 @@ def export_scene(
     suffix = suffix_from_file_type(file_type)
     if path.suffix.lower() != suffix:
         path = path.with_suffix(suffix)
+    material_export_mode = _material_export_mode_id(material_export_mode)
+    material_bake_size = _material_bake_size(material_bake_size)
 
     profile = _profile_enabled()
     started_at = time.perf_counter() if profile else 0.0
     with tempfile.TemporaryDirectory(prefix="akb-export-images-") as image_tmp:
         image_store = _ExportImageStore(Path(image_tmp))
-        material_cache: dict[tuple[int, tuple[str, ...]], tuple | None] = {}
+        material_cache: dict[tuple, tuple | None] = {}
         mesh_payload_cache: dict[tuple[int, tuple[int, ...]], tuple | None] = {}
         mesh_cleanup = []
         collect_started_at = time.perf_counter() if profile else 0.0
@@ -149,6 +153,8 @@ def export_scene(
             material_cache=material_cache,
             mesh_payload_cache=mesh_payload_cache,
             mesh_cleanup=mesh_cleanup,
+            material_export_mode=material_export_mode,
+            material_bake_size=material_bake_size,
         )
         if not items:
             raise AssetKitError("No exportable scene objects found")
@@ -219,15 +225,38 @@ def _assetkit_blender_authoring_tool() -> str:
     return "AssetKit Blender"
 
 
+def _material_export_mode_id(value: str | None) -> str:
+    mode = (value or "AUTO").upper()
+    if mode not in {"DIRECT", "AUTO", "BAKE"}:
+        return "AUTO"
+    return mode
+
+
+def _material_bake_size(value: int | str | None) -> int:
+    try:
+        size = int(value or 1024)
+    except (TypeError, ValueError):
+        return 1024
+    if size <= 0:
+        return 1024
+    if size < 64:
+        return 64
+    if size > 8192:
+        return 8192
+    return size
+
+
 def _collect_scene_items(
     context: bpy.types.Context,
     *,
     file_type: int,
     selected_only: bool,
     image_store: "_ExportImageStore",
-    material_cache: dict[tuple[int, tuple[str, ...]], tuple | None],
+    material_cache: dict[tuple, tuple | None],
     mesh_payload_cache: dict[tuple[int, tuple[int, ...]], tuple | None],
     mesh_cleanup: list,
+    material_export_mode: str,
+    material_bake_size: int,
 ) -> list[tuple]:
     profile = _profile_enabled()
     phase_started_at = time.perf_counter() if profile else 0.0
@@ -452,12 +481,18 @@ def _collect_scene_items(
                     obj.data,
                     image_store,
                     material_cache,
+                    material_export_mode,
+                    material_bake_size,
                     skin_setup=skin_setup,
                 )
                 if profile:
                     mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
             else:
-                shared_key = _shared_mesh_payload_key(obj)
+                shared_key = (
+                    None
+                    if _mesh_material_bake_required(obj, material_export_mode)
+                    else _shared_mesh_payload_key(obj)
+                )
                 if shared_key is not None and shared_key in mesh_payload_cache:
                     payload = mesh_payload_cache[shared_key]
                 elif shared_key is not None:
@@ -469,6 +504,8 @@ def _collect_scene_items(
                         obj.data,
                         image_store,
                         material_cache,
+                        material_export_mode,
+                        material_bake_size,
                         skin_setup=None,
                     )
                     if profile:
@@ -490,6 +527,8 @@ def _collect_scene_items(
                             obj.data if obj.type == "MESH" else None,
                             image_store,
                             material_cache,
+                            material_export_mode,
+                            material_bake_size,
                             skin_setup=None,
                         )
                         if profile:
@@ -644,6 +683,19 @@ def _shared_mesh_payload_key(obj: bpy.types.Object) -> tuple[int, tuple[int, ...
         for material in (_material_for_index(obj, mesh, index) for index in range(slot_count))
     )
     return int(mesh.as_pointer()), materials
+
+
+def _mesh_material_bake_required(obj: bpy.types.Object, material_export_mode: str) -> bool:
+    if material_export_mode == "DIRECT":
+        return False
+    mesh = obj.data if obj.type == "MESH" else None
+    if mesh is None:
+        return False
+    slot_count = max(len(mesh.materials), len(getattr(obj, "material_slots", ()) or ()))
+    for index in range(slot_count):
+        if _material_bake_required(_material_for_index(obj, mesh, index), material_export_mode):
+            return True
+    return False
 
 
 def _assetkit_int_prop(obj: bpy.types.Object, key: str, default: int) -> int:
@@ -1733,7 +1785,9 @@ def _mesh_payload(
     mesh: bpy.types.Mesh,
     source_mesh: bpy.types.Mesh | None,
     image_store: "_ExportImageStore",
-    material_cache: dict[tuple[int, tuple[str, ...]], tuple | None],
+    material_cache: dict[tuple, tuple | None],
+    material_export_mode: str,
+    material_bake_size: int,
     *,
     skin_setup: tuple | None = None,
 ) -> tuple | None:
@@ -1768,6 +1822,9 @@ def _mesh_payload(
         uv_slot_by_name,
         uv_names,
         fps,
+        context,
+        material_export_mode,
+        material_bake_size,
         variant_payload=_material_variant_payload(obj),
         skin_setup=skin_setup,
         morph_targets=morph_targets,
@@ -1789,10 +1846,13 @@ def _native_mesh_payload(
     uv_layers: list,
     color_layers: list,
     image_store: "_ExportImageStore",
-    material_cache: dict[tuple[int, tuple[str, ...]], tuple | None],
+    material_cache: dict[tuple, tuple | None],
     uv_slot_by_name: dict[str, int],
     uv_names: tuple[str, ...],
     fps: float,
+    context: bpy.types.Context,
+    material_export_mode: str,
+    material_bake_size: int,
     *,
     variant_payload: tuple | None = None,
     skin_setup: tuple | None = None,
@@ -1807,6 +1867,12 @@ def _native_mesh_payload(
             uv_slot_by_name,
             uv_names,
             fps,
+            context,
+            obj,
+            mesh,
+            index,
+            material_export_mode,
+            material_bake_size,
         )
         for index in range(len(mesh.materials))
     )
@@ -1900,18 +1966,46 @@ def _native_morph_payload(morph_targets: list | None, morph_animation: tuple | N
 def _cached_material_tuple(
     material: bpy.types.Material | None,
     image_store: "_ExportImageStore",
-    material_cache: dict[tuple[int, tuple[str, ...]], tuple | None],
+    material_cache: dict[tuple, tuple | None],
     uv_slot_by_name: dict[str, int],
     uv_names: tuple[str, ...],
     fps: float,
+    context: bpy.types.Context,
+    obj: bpy.types.Object,
+    mesh: bpy.types.Mesh,
+    material_index: int,
+    material_export_mode: str,
+    material_bake_size: int,
 ) -> tuple | None:
     if material is None:
         return None
-    key = (int(material.as_pointer()), uv_names)
+    if _material_bake_required(material, material_export_mode):
+        key = (
+            int(material.as_pointer()),
+            int(obj.as_pointer()),
+            int(mesh.as_pointer()),
+            int(material_index),
+            uv_names,
+            material_export_mode,
+            int(material_bake_size),
+        )
+    else:
+        key = (int(material.as_pointer()), uv_names)
     cached = material_cache.get(key)
     if cached is not None or key in material_cache:
         return cached
-    cached = _material_tuple(material, image_store, uv_slot_by_name, fps)
+    cached = _material_tuple(
+        material,
+        image_store,
+        uv_slot_by_name,
+        fps,
+        context=context,
+        obj=obj,
+        mesh=mesh,
+        material_index=material_index,
+        material_export_mode=material_export_mode,
+        material_bake_size=material_bake_size,
+    )
     material_cache[key] = cached
     return cached
 

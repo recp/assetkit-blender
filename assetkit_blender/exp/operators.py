@@ -107,11 +107,36 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="SINGLE",
     )
+    material_export_mode: bpy.props.EnumProperty(
+        name="Shader Graphs",
+        description="How unsupported Blender shader graphs are exported",
+        items=(
+            ("AUTO", "Auto Bake", "Bake only shader graphs that cannot be mapped directly"),
+            ("DIRECT", "Direct", "Use direct AssetKit material mapping only"),
+            ("BAKE", "Bake All", "Bake material color for every node material"),
+        ),
+        default="AUTO",
+    )
+    material_bake_size: bpy.props.EnumProperty(
+        name="Bake Size",
+        description="Texture size for baked shader fallback",
+        items=(
+            ("512", "512", "Bake 512 x 512 fallback textures"),
+            ("1024", "1024", "Bake 1024 x 1024 fallback textures"),
+            ("2048", "2048", "Bake 2048 x 2048 fallback textures"),
+        ),
+        default="1024",
+    )
 
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "export_format")
         layout.prop(self, "selected_only")
+        materials = layout.box()
+        materials.label(text="Materials")
+        materials.prop(self, "material_export_mode")
+        if self.material_export_mode != "DIRECT":
+            materials.prop(self, "material_bake_size")
         coords = layout.box()
         coords.label(text="Coordinates")
         coords.prop(self, "coordinate_conversion")
@@ -176,6 +201,8 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 ),
                 coordinate_system=_coord_system_id(coord_system),
                 coordinate_conversion=_coord_conversion_id(coord_conversion),
+                material_export_mode=self.material_export_mode,
+                material_bake_size=int(self.material_bake_size),
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
