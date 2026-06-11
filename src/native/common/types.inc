@@ -1,4 +1,8 @@
 #define AKB_GEOMETRY_MESH AK_GEOMETRY_MESH
+#define AKB_GEOMETRY_SPLINE AK_GEOMETRY_SPLINE
+#define AKB_GEOMETRY_BREP AK_GEOMETRY_BREP
+#define AKB_CURVE_POLY 1
+#define AKB_CURVE_NURBS 2
 #define AKB_PRIMITIVE_LINES AK_PRIMITIVE_LINES
 #define AKB_PRIMITIVE_POLYGONS AK_PRIMITIVE_POLYGONS
 #define AKB_PRIMITIVE_TRIANGLES AK_PRIMITIVE_TRIANGLES
@@ -84,7 +88,9 @@
 #define AKB_EXPORT_ITEM_CAMERA 2
 #define AKB_EXPORT_ITEM_LIGHT 3
 #define AKB_EXPORT_ITEM_JOINT 4
+#define AKB_EXPORT_ITEM_CURVE 5
 #define AKB_EXPORT_NATIVE_MESH_PAYLOAD 0x414B4D46u
+#define AKB_EXPORT_NATIVE_CURVE_PAYLOAD 0x414B4356u
 #define AKB_EXPORT_MATERIAL_FEATURE_IOR 100
 #define AKB_LIB_APPEND(LIB, ITEM, NEXT)                                      \
   do {                                                                       \
@@ -464,6 +470,30 @@ typedef struct AkbPrimitiveList {
   size_t        skin_count;
 } AkbPrimitiveList;
 
+typedef struct AkbCurve {
+  AkTree     *geometry_extra;
+  AkTree     *curve_extra;
+  const char *name;
+  const char *object_name;
+  float      *points;
+  float       matrix[16];
+  float       coord_matrix[16];
+  int32_t     node_index;
+  uint32_t    point_count;
+  uint32_t    degree;
+  uint8_t     kind;
+  uint8_t     closed;
+  uint8_t     has_node;
+  uint8_t     has_coord_matrix;
+  uint8_t     arena_points;
+} AkbCurve;
+
+typedef struct AkbCurveList {
+  AkbCurve *items;
+  size_t    count;
+  size_t    capacity;
+} AkbCurveList;
+
 typedef struct AkbPrimitiveReuseEntry {
   AkGeometry      *geom;
   AkMesh          *mesh;
@@ -510,6 +540,7 @@ typedef struct AkbSceneNodeList {
 
 typedef struct AkbImport {
   AkbPrimitiveList primitives;
+  AkbCurveList     curves;
   AkbSceneNodeList nodes;
   AkbArena         arena;
 } AkbImport;
@@ -648,6 +679,24 @@ typedef enum AkbPySimplePrimitiveField {
   AKB_PY_SIMPLE_SMOOTH_SHADING,
   AKB_PY_SIMPLE_FIELD_COUNT
 } AkbPySimplePrimitiveField;
+
+typedef enum AkbPyCurveField {
+  AKB_PY_CURVE_OWNER = 0,
+  AKB_PY_CURVE_NAME,
+  AKB_PY_CURVE_OBJECT_NAME,
+  AKB_PY_CURVE_KIND,
+  AKB_PY_CURVE_POINT_COUNT,
+  AKB_PY_CURVE_DEGREE,
+  AKB_PY_CURVE_CLOSED,
+  AKB_PY_CURVE_HAS_NODE,
+  AKB_PY_CURVE_NODE_INDEX,
+  AKB_PY_CURVE_MATRIX_F32,
+  AKB_PY_CURVE_COORD_MATRIX_F32,
+  AKB_PY_CURVE_POINTS_F32,
+  AKB_PY_CURVE_GEOMETRY_EXTRA,
+  AKB_PY_CURVE_CURVE_EXTRA,
+  AKB_PY_CURVE_FIELD_COUNT
+} AkbPyCurveField;
 
 typedef enum AkbPySceneNodeField {
   AKB_PY_NODE_OWNER = 0,

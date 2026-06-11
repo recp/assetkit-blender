@@ -464,6 +464,24 @@ class MeshPrimitiveData:
 
 
 @dataclass(slots=True)
+class CurveData:
+    name: str = "AssetKitCurve"
+    object_name: str = ""
+    kind: int = 1
+    point_count: int = 0
+    degree: int = 1
+    closed: bool = False
+    has_node: bool = False
+    node_index: int = -1
+    matrix_f32: object = b""
+    coord_matrix_f32: object = b""
+    points_f32: object = b""
+    geometry_extra: object | None = None
+    curve_extra: object | None = None
+    _native_owner: object | None = None
+
+
+@dataclass(slots=True)
 class SceneNodeData:
     name: str
     parent_index: int = -1
@@ -490,6 +508,7 @@ class SceneNodeData:
 class AssetKitSceneData:
     meshes: list[MeshPrimitiveData]
     nodes: list[SceneNodeData]
+    curves: list[CurveData] | None = None
     doc_extra: object | None = None
     scene_extra: object | None = None
     images: list[dict] | None = None
@@ -829,6 +848,7 @@ def native_load_meshes(
     except RuntimeError as exc:
         raise AssetKitError(str(exc)) from exc
     raw_meshes = result.get("meshes", []) if isinstance(result, dict) else result
+    raw_curves = result.get("curves", []) if isinstance(result, dict) else []
     raw_nodes = result.get("nodes", []) if isinstance(result, dict) else []
 
     gc_was_enabled = gc.isenabled()
@@ -841,12 +861,16 @@ def native_load_meshes(
         nodes_started_at = time.perf_counter() if profile else 0.0
         nodes = _native_nodes_from_raw(raw_nodes)
         nodes_ms = (time.perf_counter() - nodes_started_at) * 1000.0 if profile else 0.0
+        curves_started_at = time.perf_counter() if profile else 0.0
+        curves = _native_curves_from_raw(raw_curves)
+        curves_ms = (time.perf_counter() - curves_started_at) * 1000.0 if profile else 0.0
     finally:
         if gc_was_enabled:
             gc.enable()
     data = AssetKitSceneData(
         meshes=meshes,
         nodes=nodes,
+        curves=curves,
         doc_extra=result.get("doc_extra") if isinstance(result, dict) else None,
         scene_extra=result.get("scene_extra") if isinstance(result, dict) else None,
         images=list(result.get("images") or []) if isinstance(result, dict) else None,
@@ -861,7 +885,8 @@ def native_load_meshes(
             f"native={native_ms:.3f}ms "
             f"mesh_dataclass={meshes_ms:.3f}ms "
             f"node_dataclass={nodes_ms:.3f}ms "
-            f"meshes={len(meshes)} nodes={len(nodes)} "
+            f"curve_dataclass={curves_ms:.3f}ms "
+            f"meshes={len(meshes)} curves={len(curves)} nodes={len(nodes)} "
             f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
         )
     return data
@@ -886,11 +911,15 @@ def native_open_scene_stream(
     nodes_started_at = time.perf_counter() if profile else 0.0
     nodes = _native_nodes_from_raw(result.get("nodes", []))
     nodes_ms = (time.perf_counter() - nodes_started_at) * 1000.0 if profile else 0.0
+    curves_started_at = time.perf_counter() if profile else 0.0
+    curves = _native_curves_from_raw(result.get("curves", []))
+    curves_ms = (time.perf_counter() - curves_started_at) * 1000.0 if profile else 0.0
     stream = NativeSceneStream(
         _assetkit_blender,
         result.get("_owner"),
         int(result.get("mesh_count") or 0),
         nodes,
+        curves,
         result.get("doc_extra"),
         result.get("scene_extra"),
         list(result.get("images") or []),
@@ -905,7 +934,8 @@ def native_open_scene_stream(
             "open_scene "
             f"native={native_ms:.3f}ms "
             f"node_dataclass={nodes_ms:.3f}ms "
-            f"meshes={stream.mesh_count} nodes={len(nodes)} "
+            f"curve_dataclass={curves_ms:.3f}ms "
+            f"meshes={stream.mesh_count} curves={len(curves)} nodes={len(nodes)} "
             f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
         )
     return stream
@@ -1057,6 +1087,7 @@ class NativeSceneStream:
         owner: object,
         mesh_count: int,
         nodes: list[SceneNodeData],
+        curves: list[CurveData] | None = None,
         doc_extra: object | None = None,
         scene_extra: object | None = None,
         images: list[dict] | None = None,
@@ -1070,6 +1101,7 @@ class NativeSceneStream:
         self._owner = owner
         self.mesh_count = mesh_count
         self.nodes = nodes
+        self.curves = curves or []
         self.doc_extra = doc_extra
         self.scene_extra = scene_extra
         self.images = images or []
@@ -2239,3 +2271,120 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         data._native_owner = get(_M_OWNER)
         meshes.append(data)
     return meshes
+
+
+(
+    _C_OWNER,
+    _C_NAME,
+    _C_OBJECT_NAME,
+    _C_KIND,
+    _C_POINT_COUNT,
+    _C_DEGREE,
+    _C_CLOSED,
+    _C_HAS_NODE,
+    _C_NODE_INDEX,
+    _C_MATRIX_F32,
+    _C_COORD_MATRIX_F32,
+    _C_POINTS_F32,
+    _C_GEOMETRY_EXTRA,
+    _C_CURVE_EXTRA,
+) = range(14)
+
+
+class NativeCurveData:
+    __slots__ = ("_raw", "_count")
+
+    def __init__(self, raw: tuple):
+        self._raw = raw
+        self._count = len(raw)
+
+    def _get(self, index: int, default=None):
+        return self._raw[index] if index < self._count and self._raw[index] is not None else default
+
+    @property
+    def _native_owner(self):
+        return self._get(_C_OWNER)
+
+    @property
+    def name(self):
+        return self._get(_C_NAME, "AssetKitCurve") or "AssetKitCurve"
+
+    @property
+    def object_name(self):
+        return self._get(_C_OBJECT_NAME, "") or ""
+
+    @property
+    def kind(self):
+        return int(self._get(_C_KIND, 1) or 1)
+
+    @property
+    def point_count(self):
+        return int(self._get(_C_POINT_COUNT, 0) or 0)
+
+    @property
+    def degree(self):
+        return int(self._get(_C_DEGREE, 1) or 1)
+
+    @property
+    def closed(self):
+        return bool(self._get(_C_CLOSED, False))
+
+    @property
+    def has_node(self):
+        return bool(self._get(_C_HAS_NODE, False))
+
+    @property
+    def node_index(self):
+        return int(self._get(_C_NODE_INDEX, -1))
+
+    @property
+    def matrix_f32(self):
+        return self._get(_C_MATRIX_F32, b"") or b""
+
+    @property
+    def coord_matrix_f32(self):
+        return self._get(_C_COORD_MATRIX_F32, b"") or b""
+
+    @property
+    def points_f32(self):
+        return self._get(_C_POINTS_F32, b"") or b""
+
+    @property
+    def geometry_extra(self):
+        return self._get(_C_GEOMETRY_EXTRA)
+
+    @property
+    def curve_extra(self):
+        return self._get(_C_CURVE_EXTRA)
+
+
+def _native_curves_from_raw(raw_curves: Iterable[dict | tuple]) -> list[CurveData]:
+    curves = []
+    for item in raw_curves:
+        if isinstance(item, tuple) and len(item) >= _C_CURVE_EXTRA + 1:
+            curves.append(NativeCurveData(item))
+            continue
+
+        if not isinstance(item, dict):
+            continue
+
+        node_index = item.get("node_index")
+        curves.append(
+            CurveData(
+                name=item.get("name") or "AssetKitCurve",
+                object_name=item.get("object_name") or "",
+                kind=int(item.get("kind") or 1),
+                point_count=int(item.get("point_count") or 0),
+                degree=int(item.get("degree") or 1),
+                closed=bool(item.get("closed")),
+                has_node=bool(item.get("has_node")),
+                node_index=int(node_index if node_index is not None else -1),
+                matrix_f32=item.get("matrix_f32") or b"",
+                coord_matrix_f32=item.get("coord_matrix_f32") or b"",
+                points_f32=item.get("points_f32") or b"",
+                geometry_extra=item.get("geometry_extra"),
+                curve_extra=item.get("curve_extra"),
+                _native_owner=item.get("_owner"),
+            )
+        )
+    return curves

@@ -619,6 +619,15 @@ akb_primitive_free(AkbPrimitive *prim) {
 }
 
 static void
+akb_curve_free(AkbCurve *curve) {
+  if (!curve)
+    return;
+  if (!curve->arena_points)
+    free(curve->points);
+  memset(curve, 0, sizeof(*curve));
+}
+
+static void
 akb_scene_node_free(AkbSceneNode *node) {
   if (!node)
     return;
@@ -635,6 +644,19 @@ akb_list_free(AkbPrimitiveList *list) {
 
   for (i = 0; i < list->count; i++)
     akb_primitive_free(&list->items[i]);
+  free(list->items);
+  memset(list, 0, sizeof(*list));
+}
+
+static void
+akb_curve_list_free(AkbCurveList *list) {
+  size_t i;
+
+  if (!list || !list->items)
+    return;
+
+  for (i = 0; i < list->count; i++)
+    akb_curve_free(&list->items[i]);
   free(list->items);
   memset(list, 0, sizeof(*list));
 }
@@ -662,6 +684,24 @@ akb_list_reserve(AkbPrimitiveList *list, size_t capacity) {
     return 0;
 
   new_items = (AkbPrimitive *)realloc(list->items, capacity * sizeof(*new_items));
+  if (!new_items)
+    return 0;
+
+  list->items = new_items;
+  list->capacity = capacity;
+  return 1;
+}
+
+static int
+akb_curve_list_reserve(AkbCurveList *list, size_t capacity) {
+  AkbCurve *new_items;
+
+  if (!list || capacity <= list->capacity)
+    return 1;
+  if (capacity > SIZE_MAX / sizeof(*new_items))
+    return 0;
+
+  new_items = (AkbCurve *)realloc(list->items, capacity * sizeof(*new_items));
   if (!new_items)
     return 0;
 
@@ -710,6 +750,25 @@ akb_list_push(AkbPrimitiveList *list, AkbPrimitive *prim) {
 }
 
 static int
+akb_curve_list_push(AkbCurveList *list, AkbCurve *curve) {
+  AkbCurve *new_items;
+  size_t new_capacity;
+
+  if (list->count == list->capacity) {
+    new_capacity = list->capacity ? list->capacity * 2 : 8;
+    new_items = (AkbCurve *)realloc(list->items, new_capacity * sizeof(*new_items));
+    if (!new_items)
+      return 0;
+    list->items = new_items;
+    list->capacity = new_capacity;
+  }
+
+  list->items[list->count++] = *curve;
+  memset(curve, 0, sizeof(*curve));
+  return 1;
+}
+
+static int
 akb_node_list_push(AkbSceneNodeList *list, AkbSceneNode *node) {
   AkbSceneNode *new_items;
   size_t new_capacity;
@@ -737,6 +796,14 @@ akb_set_primitive_coord_matrix(AkbPrimitive *prim, const AkbCoordContext *coord)
 }
 
 static void
+akb_set_curve_coord_matrix(AkbCurve *curve, const AkbCoordContext *coord) {
+  if (!curve || !coord)
+    return;
+  memcpy(curve->coord_matrix, coord->matrix, sizeof(curve->coord_matrix));
+  curve->has_coord_matrix = 1;
+}
+
+static void
 akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord, int include_skin_primitives) {
   size_t i;
 
@@ -747,6 +814,17 @@ akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord, 
 
   for (i = 0; i < list->count; i++)
     akb_set_primitive_coord_matrix(&list->items[i], coord);
+}
+
+static void
+akb_curve_list_set_coord_matrix(AkbCurveList *list, const AkbCoordContext *coord) {
+  size_t i;
+
+  if (!list || !coord || !coord->convert || coord->conversion != AKB_COORD_TRANSFORM)
+    return;
+
+  for (i = 0; i < list->count; i++)
+    akb_set_curve_coord_matrix(&list->items[i], coord);
 }
 
 static void
@@ -783,4 +861,3 @@ akb_mkdir_if_needed(const char *path) {
 
   return 0;
 }
-

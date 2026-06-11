@@ -31,6 +31,7 @@ from ..enums import (
     AK_PRIMITIVE_LINES,
     AK_PRIMITIVE_POINTS,
     AKB_EXPORT_ITEM_CAMERA,
+    AKB_EXPORT_ITEM_CURVE,
     AKB_EXPORT_ITEM_JOINT,
     AKB_EXPORT_ITEM_LIGHT,
     AKB_EXPORT_ITEM_MESH,
@@ -58,6 +59,7 @@ EXPORT_FORMATS = (
 )
 
 _AKB_NATIVE_MESH_PAYLOAD = 0x414B4D46
+_AKB_NATIVE_CURVE_PAYLOAD = 0x414B4356
 _MESH_EXPORT_OBJECT_TYPES = {"MESH", "CURVE", "SURFACE", "FONT", "META"}
 
 _TRANSFORM_ANIMATION_PATHS = {
@@ -141,6 +143,7 @@ def export_scene(
         collect_started_at = time.perf_counter() if profile else 0.0
         items = _collect_scene_items(
             context,
+            file_type=file_type,
             selected_only=selected_only,
             image_store=image_store,
             material_cache=material_cache,
@@ -219,6 +222,7 @@ def _assetkit_blender_authoring_tool() -> str:
 def _collect_scene_items(
     context: bpy.types.Context,
     *,
+    file_type: int,
     selected_only: bool,
     image_store: "_ExportImageStore",
     material_cache: dict[tuple[int, tuple[str, ...]], tuple | None],
@@ -271,6 +275,9 @@ def _collect_scene_items(
             include_export_chain(obj)
         elif obj.type == "LIGHT":
             payload_kinds[obj] = AKB_EXPORT_ITEM_LIGHT
+            include_export_chain(obj)
+        elif file_type == AK_FILE_TYPE_DAE and _can_export_native_curve(obj):
+            payload_kinds[obj] = AKB_EXPORT_ITEM_CURVE
             include_export_chain(obj)
         elif obj.type in _MESH_EXPORT_OBJECT_TYPES:
             payload_kinds[obj] = AKB_EXPORT_ITEM_MESH
@@ -422,6 +429,8 @@ def _collect_scene_items(
             payload = _camera_payload(context, obj)
         elif kind == AKB_EXPORT_ITEM_LIGHT:
             payload = _light_payload(obj)
+        elif kind == AKB_EXPORT_ITEM_CURVE:
+            payload = _curve_payload(obj)
         elif kind == AKB_EXPORT_ITEM_MESH:
             armature = mesh_armatures.get(obj)
             skin_setup_started_at = time.perf_counter() if profile else 0.0
@@ -505,6 +514,59 @@ def _collect_scene_items(
         )
 
     return [tuple(item) for item in out]
+
+
+def _can_export_native_curve(obj: bpy.types.Object) -> bool:
+    if obj.type != "CURVE":
+        return False
+
+    curve = getattr(obj, "data", None)
+    splines = getattr(curve, "splines", None)
+    if curve is None or splines is None or len(splines) != 1:
+        return False
+
+    spline = splines[0]
+    spline_type = getattr(spline, "type", "")
+    if spline_type not in {"POLY", "NURBS"}:
+        return False
+
+    points = getattr(spline, "points", None)
+    point_count = len(points) if points is not None else 0
+    if point_count <= 1:
+        return False
+
+    if abs(float(getattr(curve, "bevel_depth", 0.0) or 0.0)) > 0.0:
+        return False
+    if abs(float(getattr(curve, "extrude", 0.0) or 0.0)) > 0.0:
+        return False
+    if getattr(curve, "bevel_object", None) is not None:
+        return False
+    if getattr(curve, "taper_object", None) is not None:
+        return False
+    if getattr(curve, "dimensions", "3D") == "2D" and getattr(curve, "fill_mode", "NONE") != "NONE":
+        return False
+
+    if spline_type == "NURBS":
+        try:
+            order = int(getattr(spline, "order_u", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if order <= 1 or order > point_count:
+            return False
+
+    return True
+
+
+def _curve_payload(obj: bpy.types.Object) -> tuple | None:
+    curve = getattr(obj, "data", None)
+    if curve is None:
+        return None
+    return (
+        _AKB_NATIVE_CURVE_PAYLOAD,
+        curve,
+        _assetkit_json_prop(obj, "assetkit_geometry_extra_json"),
+        _assetkit_json_prop(obj, "assetkit_curve_extra_json"),
+    )
 
 
 def _assetkit_instancing_groups(

@@ -3,6 +3,7 @@ akb_import_free(AkbImport *import) {
   if (!import)
     return;
   akb_list_free(&import->primitives);
+  akb_curve_list_free(&import->curves);
   akb_node_list_free(&import->nodes);
   akb_arena_free(&import->arena);
 }
@@ -808,6 +809,73 @@ akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
 }
 
 static PyObject *
+akb_curve_to_py(AkbCurve *curve, PyObject *owner) {
+  PyObject *tuple;
+  PyObject *value;
+
+  tuple = PyTuple_New(AKB_PY_CURVE_FIELD_COUNT);
+  if (!tuple)
+    return NULL;
+
+#define AKB_CURVE_SET(INDEX, OBJ) do {                    \
+    value = (OBJ);                                        \
+    if (!value) { Py_DECREF(tuple); return NULL; }        \
+    PyTuple_SET_ITEM(tuple, (INDEX), value);              \
+  } while (0)
+
+  Py_INCREF(owner);
+  AKB_CURVE_SET(AKB_PY_CURVE_OWNER, owner);
+  AKB_CURVE_SET(AKB_PY_CURVE_NAME, akb_unicode_from_cstr(curve->name));
+  AKB_CURVE_SET(AKB_PY_CURVE_OBJECT_NAME, akb_unicode_from_cstr(curve->object_name));
+  AKB_CURVE_SET(AKB_PY_CURVE_KIND, PyLong_FromUnsignedLong(curve->kind));
+  AKB_CURVE_SET(AKB_PY_CURVE_POINT_COUNT, PyLong_FromUnsignedLong(curve->point_count));
+  AKB_CURVE_SET(AKB_PY_CURVE_DEGREE, PyLong_FromUnsignedLong(curve->degree));
+  AKB_CURVE_SET(AKB_PY_CURVE_CLOSED, PyBool_FromLong(curve->closed));
+  AKB_CURVE_SET(AKB_PY_CURVE_HAS_NODE, PyBool_FromLong(curve->has_node));
+  AKB_CURVE_SET(AKB_PY_CURVE_NODE_INDEX, PyLong_FromLong(curve->node_index));
+  AKB_CURVE_SET(AKB_PY_CURVE_MATRIX_F32,
+                akb_memoryview_or_empty(curve->matrix,
+                                        curve->has_node ? 16 * sizeof(float) : 0));
+  AKB_CURVE_SET(AKB_PY_CURVE_COORD_MATRIX_F32,
+                akb_memoryview_or_empty(curve->coord_matrix,
+                                        curve->has_coord_matrix ? 16 * sizeof(float) : 0));
+  AKB_CURVE_SET(AKB_PY_CURVE_POINTS_F32,
+                akb_memoryview_or_empty(curve->points,
+                                        (size_t)curve->point_count * 4 * sizeof(float)));
+  AKB_CURVE_SET(AKB_PY_CURVE_GEOMETRY_EXTRA, akb_tree_to_py(curve->geometry_extra));
+  AKB_CURVE_SET(AKB_PY_CURVE_CURVE_EXTRA, akb_tree_to_py(curve->curve_extra));
+
+#undef AKB_CURVE_SET
+
+  return tuple;
+}
+
+static PyObject *
+akb_curve_list_to_py(AkbImport *import, PyObject *owner) {
+  PyObject *list;
+  PyObject *item;
+  size_t i;
+
+  list = PyList_New((Py_ssize_t)(import ? import->curves.count : 0));
+  if (!list)
+    return NULL;
+
+  if (!import)
+    return list;
+
+  for (i = 0; i < import->curves.count; i++) {
+    item = akb_curve_to_py(&import->curves.items[i], owner);
+    if (!item) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, (Py_ssize_t)i, item);
+  }
+
+  return list;
+}
+
+static PyObject *
 akb_material_variants_to_py(AkbPrimitive *prim, PyObject *owner) {
   PyObject *list;
   PyObject *dict;
@@ -1448,6 +1516,7 @@ akb_required_node_add_parent_ancestors(uint8_t                *required,
 static PyObject *
 akb_required_node_indices_to_py(const AkbImport *import) {
   const AkbPrimitive *prim;
+  const AkbCurve *curve;
   const AkbSceneNode *node;
   const AkbSceneNodeList *nodes;
   PyObject *list;
@@ -1510,6 +1579,13 @@ akb_required_node_indices_to_py(const AkbImport *import) {
     }
   }
 
+  for (i = 0; i < import->curves.count; i++) {
+    curve = &import->curves.items[i];
+    node_index = curve->node_index;
+    if (node_index >= 0 && (size_t)node_index < node_count)
+      primitive_nodes[node_index] = 1;
+  }
+
   for (i = 0; i < import->primitives.count; i++) {
     prim = &import->primitives.items[i];
     node_index = prim->node_index;
@@ -1534,6 +1610,19 @@ akb_required_node_indices_to_py(const AkbImport *import) {
       joint_count = prim->skin_joint_count;
       for (uint32_t j = 0; j < joint_count; j++)
         akb_required_node_add_ancestors(required, nodes, prim->skin_joint_nodes[j]);
+    }
+  }
+
+  for (i = 0; i < import->curves.count; i++) {
+    curve = &import->curves.items[i];
+    node_index = curve->node_index;
+    if (node_index >= 0
+        && (size_t)node_index < node_count
+        && (child_counts[node_index]
+            || akb_scene_node_requires_object(&nodes->items[node_index]))) {
+      akb_required_node_add_ancestors(required, nodes, node_index);
+    } else {
+      akb_required_node_add_parent_ancestors(required, nodes, node_index);
     }
   }
 

@@ -1345,9 +1345,208 @@ akb_extract_mesh(AkbArena *arena,
   return 1;
 }
 
+static AkInput *
+akb_vertices_position_input(AkVertices *vertices) {
+  AkInput *input;
+
+  for (input = vertices ? vertices->input : NULL; input; input = input->next) {
+    if (!input->accessor || input->accessor->count == 0)
+      continue;
+    if (input->semantic == AK_INPUT_POSITION || akb_raw_semantic_is(input, "POSITION"))
+      return input;
+  }
+
+  return NULL;
+}
+
+static int
+akb_curve_points4_from_vertices(AkbArena   *arena,
+                                AkVertices *vertices,
+                                const float origin[3],
+                                uint32_t    position_width,
+                                AkbCurve   *out) {
+  AkInput *pos_input;
+  const float *positions;
+  float *copied_positions;
+  float *points;
+  uint32_t count;
+  uint32_t i;
+
+  pos_input = akb_vertices_position_input(vertices);
+  if (!pos_input || !pos_input->accessor)
+    return 0;
+
+  copied_positions = NULL;
+  position_width = position_width == 4 ? 4 : 3;
+  positions = akb_accessor_float_borrow(pos_input->accessor,
+                                        position_width,
+                                        &count);
+  if (!positions) {
+    copied_positions = position_width == 4
+                       ? akb_accessor_float_copy_with_default(pos_input->accessor,
+                                                             4,
+                                                             1.0f,
+                                                             &count)
+                       : akb_accessor_float_copy(pos_input->accessor, 3, &count);
+    positions = copied_positions;
+  }
+  if (!positions || count == 0) {
+    free(copied_positions);
+    return 0;
+  }
+
+  points = (float *)akb_owned_alloc(arena,
+                                    (size_t)count * 4 * sizeof(float),
+                                    sizeof(float),
+                                    &out->arena_points);
+  if (!points) {
+    free(copied_positions);
+    return 0;
+  }
+
+  for (i = 0; i < count; i++) {
+    points[(size_t)i * 4]     = positions[(size_t)i * position_width]     + (origin ? origin[0] : 0.0f);
+    points[(size_t)i * 4 + 1] = positions[(size_t)i * position_width + 1] + (origin ? origin[1] : 0.0f);
+    points[(size_t)i * 4 + 2] = positions[(size_t)i * position_width + 2] + (origin ? origin[2] : 0.0f);
+    points[(size_t)i * 4 + 3] = position_width == 4
+                                ? positions[(size_t)i * 4 + 3]
+                                : 1.0f;
+  }
+
+  free(copied_positions);
+  out->points = points;
+  out->point_count = count;
+  return 1;
+}
+
+static int
+akb_extract_curve_from_vertices(AkbArena    *arena,
+                                AkbCurveList *list,
+                                AkNode      *node,
+                                int32_t      node_index,
+                                AkGeometry  *geom,
+                                AkVertices  *vertices,
+                                AkTree      *curve_extra,
+                                const char  *name,
+                                const float  origin[3],
+                                uint32_t     kind,
+                                uint32_t     degree,
+                                AkBool       closed) {
+  AkbCurve out = {0};
+
+  if (!list || !geom || !vertices)
+    return 1;
+
+  out.name = akb_name(name, akb_name(geom->name, "AssetKitCurve"));
+  out.object_name = node ? akb_name(node->name, out.name) : out.name;
+  out.geometry_extra = ak_extra(geom);
+  out.curve_extra = curve_extra;
+  out.kind = (uint8_t)kind;
+  out.degree = degree;
+  out.closed = closed ? 1 : 0;
+  out.node_index = node_index;
+  if (node) {
+    ak_transformCombine(node->transform, out.matrix);
+    out.has_node = 1;
+  }
+
+  if (!akb_curve_points4_from_vertices(arena,
+                                       vertices,
+                                       origin,
+                                       kind == AKB_CURVE_NURBS ? 4 : 3,
+                                       &out))
+    return 1;
+
+  if (!akb_curve_list_push(list, &out)) {
+    akb_curve_free(&out);
+    return 0;
+  }
+
+  return 1;
+}
+
+static int
+akb_extract_curve(AkbArena     *arena,
+                  AkbCurveList *list,
+                  AkNode       *node,
+                  int32_t       node_index,
+                  AkGeometry   *geom) {
+  AkObject *gdata;
+
+  if (!geom || !(gdata = geom->gdata))
+    return 1;
+
+  if (gdata->type == AKB_GEOMETRY_SPLINE) {
+    AkSpline *spline;
+
+    spline = (AkSpline *)ak_objGet(gdata);
+    if (!spline)
+      return 1;
+
+    return akb_extract_curve_from_vertices(arena,
+                                           list,
+                                           node,
+                                           node_index,
+                                           geom,
+                                           spline->cverts,
+                                           spline->extra,
+                                           geom->name,
+                                           NULL,
+                                           AKB_CURVE_POLY,
+                                           1,
+                                           spline->closed);
+  }
+
+  if (gdata->type == AKB_GEOMETRY_BREP) {
+    AkBoundryRep *brep;
+    AkCurve *curve;
+    uint32_t curve_index;
+
+    brep = (AkBoundryRep *)ak_objGet(gdata);
+    if (!brep || !brep->curves)
+      return 1;
+
+    curve_index = 0;
+    for (curve = brep->curves->curve; curve; curve = curve->next, curve_index++) {
+      AkNurbs *nurbs;
+      const char *name;
+
+      if (!curve->curve || curve->curve->type != AK_CURVE_NURBS)
+        continue;
+
+      nurbs = (AkNurbs *)ak_objGet(curve->curve);
+      if (!nurbs)
+        continue;
+
+      name = akb_arena_format_name_u32(arena,
+                                       akb_name(geom->name, "AssetKitCurve"),
+                                       curve_index);
+      if (!name)
+        return 0;
+
+      if (!akb_extract_curve_from_vertices(arena,
+                                           list,
+                                           node,
+                                           node_index,
+                                           geom,
+                                           nurbs->cverts,
+                                           nurbs->extra,
+                                           name,
+                                           curve->origin,
+                                           AKB_CURVE_NURBS,
+                                           nurbs->degree,
+                                           nurbs->closed))
+        return 0;
+    }
+  }
+
+  return 1;
+}
+
 static int
 akb_extract_node(AkbArena *arena,
                  AkbPrimitiveList *list,
+                 AkbCurveList *curves,
                  AkbSceneNodeList *nodes,
                  AkDoc *doc,
                  AkbSharedDoc *doc_owner,
@@ -1427,6 +1626,16 @@ akb_extract_node(AkbArena *arena,
         akb_animation_release(morph_animation);
         return 0;
       }
+      if (!akb_extract_curve(arena,
+                             curves,
+                             node,
+                             node_index,
+                             geom)) {
+        node->geometry = saved_geometry;
+        akb_animation_release(animation);
+        akb_animation_release(morph_animation);
+        return 0;
+      }
       akb_animation_release(animation);
       akb_animation_release(morph_animation);
     }
@@ -1434,7 +1643,7 @@ akb_extract_node(AkbArena *arena,
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, child, anim_index, reuse_cache, coord, options, node_index))
+    if (!akb_extract_node(arena, list, curves, nodes, doc, doc_owner, child, anim_index, reuse_cache, coord, options, node_index))
       return 0;
   }
 
@@ -1442,7 +1651,7 @@ akb_extract_node(AkbArena *arena,
     inst_node = ak_instanceNodeTarget(node_ref);
     if (!inst_node || inst_node == node)
       continue;
-    if (!akb_extract_node(arena, list, nodes, doc, doc_owner, inst_node, anim_index, reuse_cache, coord, options, node_index))
+    if (!akb_extract_node(arena, list, curves, nodes, doc, doc_owner, inst_node, anim_index, reuse_cache, coord, options, node_index))
       return 0;
   }
 
@@ -1485,6 +1694,7 @@ akb_selected_scene(AkDoc *doc, const AkbLoadOptions *options) {
 typedef struct AkbSceneEstimate {
   size_t nodes;
   size_t primitives;
+  size_t curves;
 } AkbSceneEstimate;
 
 static size_t
@@ -1509,6 +1719,45 @@ akb_count_geometry_primitives(AkGeometry *geom, const AkbLoadOptions *options) {
   return count;
 }
 
+static size_t
+akb_count_geometry_curves(AkGeometry *geom) {
+  AkObject *gdata;
+  size_t count;
+
+  if (!geom || !(gdata = geom->gdata))
+    return 0;
+
+  if (gdata->type == AKB_GEOMETRY_SPLINE) {
+    AkSpline *spline;
+
+    spline = (AkSpline *)ak_objGet(gdata);
+    return spline && akb_vertices_position_input(spline->cverts) ? 1 : 0;
+  }
+
+  if (gdata->type == AKB_GEOMETRY_BREP) {
+    AkBoundryRep *brep;
+    AkCurve *curve;
+
+    brep = (AkBoundryRep *)ak_objGet(gdata);
+    if (!brep || !brep->curves)
+      return 0;
+
+    count = 0;
+    for (curve = brep->curves->curve; curve; curve = curve->next) {
+      AkNurbs *nurbs;
+
+      if (!curve->curve || curve->curve->type != AK_CURVE_NURBS)
+        continue;
+      nurbs = (AkNurbs *)ak_objGet(curve->curve);
+      if (nurbs && akb_vertices_position_input(nurbs->cverts))
+        count++;
+    }
+    return count;
+  }
+
+  return 0;
+}
+
 static void
 akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate *estimate) {
   AkNode *child;
@@ -1527,6 +1776,7 @@ akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate 
          geometry_inst = (AkInstanceGeometry *)geometry_inst->base.next) {
       geom = (AkGeometry *)ak_instanceObject(&geometry_inst->base);
       estimate->primitives += akb_count_geometry_primitives(geom, options);
+      estimate->curves += akb_count_geometry_curves(geom);
     }
   }
 
@@ -1569,12 +1819,27 @@ akb_estimate_library_primitives(AkDoc *doc, const AkbLoadOptions *options) {
   return count;
 }
 
+static size_t
+akb_estimate_library_curves(AkDoc *doc) {
+  AkGeometry *geom;
+  size_t count = 0;
+
+  if (!doc)
+    return 0;
+
+  for (geom = doc->lib.geometries.first; geom; geom = geom->next)
+    count += akb_count_geometry_curves(geom);
+
+  return count;
+}
+
 static int
 akb_extract_scene(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
                   const AkbAnimationIndex *anim_index,
                   AkbArena *arena,
                   AkbPrimitiveList *list,
+                  AkbCurveList *curves,
                   AkbSceneNodeList *nodes,
                   const AkbCoordContext *coord,
                   const AkbLoadOptions *options,
@@ -1590,7 +1855,7 @@ akb_extract_scene(AkDoc *doc,
   if (!scene || !scene->node)
     return 1;
 
-  if (!akb_extract_node(arena, list, nodes, doc, doc_owner, scene->node, anim_index, &reuse_cache, coord, options, -1))
+  if (!akb_extract_node(arena, list, curves, nodes, doc, doc_owner, scene->node, anim_index, &reuse_cache, coord, options, -1))
     ok = 0;
 
   if (reuse_hits)
@@ -1610,6 +1875,7 @@ akb_extract_doc(AkDoc *doc,
   AkbLoadOptions runtime_options;
   AkGeometry *geom;
   size_t fallback_estimate;
+  size_t fallback_curve_estimate;
   size_t skin_count;
   size_t reuse_hits = 0;
   double total_started_at = 0.0;
@@ -1646,6 +1912,7 @@ akb_extract_doc(AkDoc *doc,
     runtime_options.build_triangle_edges = 0;
   }
   if ((estimate.primitives && !akb_list_reserve(&import->primitives, estimate.primitives))
+      || (estimate.curves && !akb_curve_list_reserve(&import->curves, estimate.curves))
       || (estimate.nodes && !akb_node_list_reserve(&import->nodes, estimate.nodes))) {
     akb_animation_index_free(&anim_index);
     return 0;
@@ -1656,6 +1923,7 @@ akb_extract_doc(AkDoc *doc,
                          &anim_index,
                          &import->arena,
                          &import->primitives,
+                         &import->curves,
                          &import->nodes,
                          &coord,
                          &runtime_options,
@@ -1682,13 +1950,15 @@ akb_extract_doc(AkDoc *doc,
     }
   }
 
-  if (import->primitives.count > 0) {
+  if (import->primitives.count > 0 || import->curves.count > 0) {
     akb_list_set_coord_matrix(&import->primitives, &coord, skin_count > 0);
+    akb_curve_list_set_coord_matrix(&import->curves, &coord);
     if (profile) {
       set_coord_ms = akb_now_ms() - phase_started_at;
-      akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
+      akb_profile_log("extract_doc nodes=%zu primitives=%zu curves=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
                       import->nodes.count,
                       import->primitives.count,
+                      import->curves.count,
                       anim_index.count,
                       reuse_hits,
                       coord_ms,
@@ -1707,10 +1977,13 @@ akb_extract_doc(AkDoc *doc,
   if (profile)
     phase_started_at = akb_now_ms();
   fallback_estimate = akb_estimate_library_primitives(doc, &runtime_options);
+  fallback_curve_estimate = akb_estimate_library_curves(doc);
   if (fallback_estimate >= AKB_LARGE_SCENE_PRIMITIVE_THRESHOLD) {
     runtime_options.build_triangle_edges = 0;
   }
-  if (fallback_estimate && !akb_list_reserve(&import->primitives, fallback_estimate)) {
+  if ((fallback_estimate && !akb_list_reserve(&import->primitives, fallback_estimate))
+      || (fallback_curve_estimate
+          && !akb_curve_list_reserve(&import->curves, fallback_curve_estimate))) {
     akb_animation_index_free(&anim_index);
     return 0;
   }
@@ -1731,6 +2004,14 @@ akb_extract_doc(AkDoc *doc,
       akb_animation_index_free(&anim_index);
       return 0;
     }
+    if (!akb_extract_curve(&import->arena,
+                           &import->curves,
+                           NULL,
+                           -1,
+                           geom)) {
+      akb_animation_index_free(&anim_index);
+      return 0;
+    }
   }
   if (profile) {
     fallback_mesh_ms = akb_now_ms() - phase_started_at;
@@ -1738,11 +2019,13 @@ akb_extract_doc(AkDoc *doc,
   }
 
   akb_list_set_coord_matrix(&import->primitives, &coord, 1);
+  akb_curve_list_set_coord_matrix(&import->curves, &coord);
   if (profile) {
     set_coord_ms = akb_now_ms() - phase_started_at;
-    akb_profile_log("extract_doc nodes=%zu primitives=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
+    akb_profile_log("extract_doc nodes=%zu primitives=%zu curves=%zu anim_channels=%zu reuse_hits=%zu coord=%.3fms anim_index=%.3fms scene=%.3fms resolve_skin=%.3fms pose_anim=%.3fms fallback_mesh=%.3fms set_coord=%.3fms total=%.3fms",
                     import->nodes.count,
                     import->primitives.count,
+                    import->curves.count,
                     anim_index.count,
                     reuse_hits,
                     coord_ms,

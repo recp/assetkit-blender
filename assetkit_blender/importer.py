@@ -18,6 +18,7 @@ from mathutils import Matrix, Quaternion, Vector
 from .assetkit import (
     AssetKit,
     AssetKitSceneData,
+    CurveData,
     LoopFloatAttributeData,
     MeshPrimitiveData,
     SceneNodeData,
@@ -156,6 +157,7 @@ _AK_MATERIAL_TYPE_LAMBERT = 3
 _AK_MATERIAL_TYPE_CONSTANT = 4
 _AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS = 6
 _AK_MATERIAL_TYPE_PBR = 7
+_AKB_CURVE_NURBS = 2
 _GLTF_SETTINGS_GROUP_NAME = "glTF Material Output"
 _GLTF_SETTINGS_SOCKETS = (
     ("Occlusion", 1.0),
@@ -337,7 +339,7 @@ def import_assetkit_file(
     defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
     total_started_at = time.perf_counter() if profile_detail else 0.0
     load_started_at = total_started_at
-    primitives, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
+    primitives, curves, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
         filepath,
         library_path,
         load_options,
@@ -345,7 +347,7 @@ def import_assetkit_file(
     if profile_detail:
         _profile_log(
             "blocking load "
-            f"meshes={len(primitives)} nodes={len(scene_nodes)} "
+            f"meshes={len(primitives)} curves={len(curves)} nodes={len(scene_nodes)} "
             f"elapsed={(time.perf_counter() - load_started_at) * 1000.0:.3f}ms"
         )
     scene_started_at = time.perf_counter() if profile_detail else 0.0
@@ -357,6 +359,7 @@ def import_assetkit_file(
         scene_extra,
         scene_info,
         doc_images,
+        curves=curves,
         defer_custom_normals=defer_custom_normals,
     )
     if profile_detail:
@@ -372,6 +375,7 @@ def import_assetkit_file(
     previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
     _ACTIVE_TEXTURE_LOAD_MODE = texture_load_mode
     try:
+        objects.extend(_create_curve_objects(curves, state, collection or bpy.context.collection))
         for unit in import_units:
             objects.extend(_create_import_unit(unit, state, collection or bpy.context.collection, shading_mode))
         _apply_deferred_bind_pose_skins(state)
@@ -511,7 +515,15 @@ def _load_assetkit_scene(
     filepath: str,
     library_path: str = "",
     load_options: LoadOptions | None = None,
-) -> tuple[list[MeshPrimitiveData], list[SceneNodeData], object | None, object | None, dict, list[dict]]:
+) -> tuple[
+    list[MeshPrimitiveData],
+    list[CurveData],
+    list[SceneNodeData],
+    object | None,
+    object | None,
+    dict,
+    list[dict],
+]:
     loaded = native_load_meshes(filepath, load_options) if not library_path else None
     if loaded is None:
         kit = AssetKit(library_path or None)
@@ -520,13 +532,14 @@ def _load_assetkit_scene(
     if isinstance(loaded, AssetKitSceneData):
         return (
             loaded.meshes,
+            list(loaded.curves or []),
             loaded.nodes,
             loaded.doc_extra,
             loaded.scene_extra,
             _scene_info_from_loaded(loaded),
             list(loaded.images or []),
         )
-    return loaded, [], None, None, {}, []
+    return loaded, [], [], None, None, {}, []
 
 
 def _reset_material_profile() -> None:
@@ -801,13 +814,14 @@ def _begin_scene_build(
     dynamic_skin_animation_skip: bool = False,
     create_all_nodes: bool = False,
     required_node_indices: object = _REQUIRED_NODE_INDICES_AUTO,
+    curves: list[CurveData] | None = None,
 ) -> dict:
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     started_at = time.perf_counter() if profile_detail else 0.0
     _set_document_extra_props(collection, doc_extra, scene_extra, scene_info, doc_images)
     doc_ms = (time.perf_counter() - started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
-    coord_root = _create_coord_root(primitives, collection)
+    coord_root = _create_coord_root(primitives, collection, curves)
     coord_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
     node_visibility_animation = False
@@ -832,7 +846,7 @@ def _begin_scene_build(
     if create_all_nodes:
         required_node_indices = None
     elif required_node_indices is _REQUIRED_NODE_INDICES_AUTO:
-        required_node_indices = _required_scene_node_indices(primitives, scene_nodes, node_animation_skip_indices)
+        required_node_indices = _required_scene_node_indices(primitives, scene_nodes, node_animation_skip_indices, curves)
     elif required_node_indices is not None:
         required_node_indices = set(required_node_indices)
     node_objects = _create_scene_nodes(
@@ -2355,6 +2369,7 @@ class _ProgressiveImportJob:
         self.texture_load_mode = _texture_load_mode(load_options)
         self.defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
         self.scene_nodes: list[SceneNodeData] = []
+        self.curves: list[CurveData] = list(getattr(stream, "curves", []) or [])
         self.doc_extra: object | None = getattr(stream, "doc_extra", None)
         self.scene_extra: object | None = getattr(stream, "scene_extra", None)
         self.scene_info: dict = _scene_info_from_loaded(stream)
@@ -2372,6 +2387,7 @@ class _ProgressiveImportJob:
         self.build_started_at = 0.0
         self.first_object_at = 0.0
         self.created_count = 0
+        self.curves_created = False
         self.progress_active = False
         self.profile_detail = _PROFILE_MATERIAL_STATS is not None
         self._queue: queue.SimpleQueue[list[MeshPrimitiveData]] = queue.SimpleQueue()
@@ -2399,6 +2415,7 @@ class _ProgressiveImportJob:
                             f"meshes={stream.mesh_count} nodes={len(stream.nodes)}"
                         )
                     self.scene_nodes = stream.nodes
+                    self.curves = list(stream.curves or [])
                     self.doc_extra = stream.doc_extra
                     self.scene_extra = stream.scene_extra
                     self.doc_images = list(stream.images or [])
@@ -2428,7 +2445,7 @@ class _ProgressiveImportJob:
                     return
 
             fallback_started_at = time.perf_counter() if self.profile_detail else 0.0
-            primitives, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
+            primitives, curves, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
                 self.filepath,
                 self.library_path,
                 self.load_options,
@@ -2437,9 +2454,10 @@ class _ProgressiveImportJob:
                 _profile_log(
                     "producer fallback_load "
                     f"elapsed={(time.perf_counter() - fallback_started_at) * 1000.0:.3f}ms "
-                    f"meshes={len(primitives)} nodes={len(scene_nodes)}"
+                    f"meshes={len(primitives)} curves={len(curves)} nodes={len(scene_nodes)}"
                 )
             self.scene_nodes = scene_nodes
+            self.curves = curves
             self.doc_extra = doc_extra
             self.scene_extra = scene_extra
             self.scene_info = scene_info
@@ -2500,11 +2518,14 @@ class _ProgressiveImportJob:
                     if self.required_node_indices is not None
                     else _REQUIRED_NODE_INDICES_AUTO
                 ),
+                curves=self.curves,
             )
+            self._create_curves_once()
             if self.profile_detail:
                 _profile_log(
                     "begin_scene_build "
                     f"nodes={len(self.scene_nodes)} "
+                    f"curves={len(self.curves)} "
                     f"pending={len(self.pending_primitives)} deferred={len(self.deferred_primitives)} "
                     f"elapsed={(time.perf_counter() - scene_build_started_at) * 1000.0:.3f}ms"
                 )
@@ -2677,6 +2698,25 @@ class _ProgressiveImportJob:
             _log_material_profile("progressive")
         self._finish()
 
+    def _create_curves_once(self) -> None:
+        if self.curves_created or self.state is None:
+            return
+        self.curves_created = True
+        if not self.curves:
+            return
+        started_at = time.perf_counter() if self.profile_detail else 0.0
+        created = _create_curve_objects(self.curves, self.state, self.collection)
+        self.objects.extend(created)
+        self.created_count += len(created)
+        if self.first_object_at == 0.0 and created:
+            self.first_object_at = time.perf_counter()
+        if self.profile_detail:
+            _profile_log(
+                "build_curves "
+                f"created={len(created)} curves={len(self.curves)} "
+                f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+            )
+
     def _finish(self) -> None:
         _reset_material_template_cache()
         self._progress_end()
@@ -2689,7 +2729,8 @@ class _ProgressiveImportJob:
         if self.progress_active:
             return
         try:
-            bpy.context.window_manager.progress_begin(0, max(1, self.mesh_count or len(self.pending_primitives)))
+            total = self.mesh_count or len(self.pending_primitives)
+            bpy.context.window_manager.progress_begin(0, max(1, total + len(self.curves)))
             self.progress_active = True
         except Exception:
             self.progress_active = False
@@ -3839,6 +3880,7 @@ def _required_scene_node_indices(
     primitives: list[MeshPrimitiveData],
     nodes: list[SceneNodeData],
     skipped_animation_indices: set[int] | None = None,
+    curves: list[CurveData] | None = None,
 ) -> set[int] | None:
     if not nodes:
         return None
@@ -3850,6 +3892,12 @@ def _required_scene_node_indices(
         for primitive in primitives
         if int(primitive.node_index) >= 0
     }
+    if curves:
+        primitive_node_indices.update(
+            int(curve.node_index)
+            for curve in curves
+            if int(curve.node_index) >= 0
+        )
     skipped_animation_indices = skipped_animation_indices or set()
     for primitive in primitives:
         node_index = int(primitive.node_index)
@@ -3866,6 +3914,13 @@ def _required_scene_node_indices(
                     count = min(len(joint_nodes), int(primitive.skin_joint_count))
                     for index in range(count):
                         _add_node_ancestors(required, nodes, int(joint_nodes[index]))
+
+    for curve in curves or ():
+        node_index = int(curve.node_index)
+        if _primitive_node_needs_helper(node_index, nodes, child_counts):
+            _add_node_ancestors(required, nodes, node_index)
+        else:
+            _add_node_parent_ancestors(required, nodes, node_index)
 
     for index, node in enumerate(nodes):
         if _scene_node_payload_can_inline(index, node, primitive_node_indices, child_counts):
@@ -4693,9 +4748,23 @@ def _hide_empty_helper_object(obj: bpy.types.Object) -> None:
 def _create_coord_root(
     primitives: list[MeshPrimitiveData],
     collection: bpy.types.Collection,
+    curves: list[CurveData] | None = None,
 ) -> bpy.types.Object | None:
     for primitive in primitives:
         matrix = _matrix_from_buffer(primitive.coord_matrix_f32)
+        if matrix is None:
+            continue
+
+        root = bpy.data.objects.new("AssetKit Coordinates", None)
+        root.empty_display_type = "ARROWS"
+        root.empty_display_size = 0.5
+        root.matrix_local = matrix
+        collection.objects.link(root)
+        _hide_helper_object(root)
+        return root
+
+    for curve in curves or ():
+        matrix = _matrix_from_buffer(curve.coord_matrix_f32)
         if matrix is None:
             continue
 
@@ -4720,6 +4789,59 @@ def _set_parent(obj: bpy.types.Object, parent: bpy.types.Object | None) -> None:
 
 def _apply_matrix(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
     _apply_matrix_buffer(obj, data.matrix_f32)
+
+
+def _create_curve_objects(
+    curves: list[CurveData],
+    state: dict,
+    collection: bpy.types.Collection,
+) -> list[bpy.types.Object]:
+    objects: list[bpy.types.Object] = []
+    for curve in curves:
+        obj = _create_curve_object(curve, state, collection)
+        if obj is not None:
+            objects.append(obj)
+    return objects
+
+
+def _create_curve_object(
+    curve: CurveData,
+    state: dict,
+    collection: bpy.types.Collection,
+) -> bpy.types.Object | None:
+    point_count = int(curve.point_count)
+    points = _buffer_view(curve.points_f32, "f")
+    if point_count <= 0 or points is None or len(points) < point_count * 4:
+        return None
+
+    curve_data = bpy.data.curves.new(curve.name or "AssetKitCurve", type="CURVE")
+    curve_data.dimensions = "3D"
+    curve_data.resolution_u = 12
+
+    spline_type = "NURBS" if int(curve.kind) == _AKB_CURVE_NURBS else "POLY"
+    spline = curve_data.splines.new(spline_type)
+    spline.points.add(point_count - 1)
+    spline.points.foreach_set("co", points)
+    spline.use_cyclic_u = bool(curve.closed)
+    if spline_type == "NURBS":
+        try:
+            spline.order_u = max(2, min(point_count, int(curve.degree) + 1))
+            spline.use_endpoint_u = True
+        except Exception:
+            pass
+
+    obj = bpy.data.objects.new(curve.object_name or curve.name or "AssetKitCurve", curve_data)
+    collection.objects.link(obj)
+    parent, use_node_parent = _mesh_node_parent(state, int(curve.node_index))
+    _set_parent(obj, parent)
+    if not use_node_parent:
+        _apply_matrix_buffer(obj, curve.matrix_f32)
+    _set_assetkit_json_prop(obj, "assetkit_geometry_extra_json", curve.geometry_extra)
+    _set_assetkit_json_prop(obj, "assetkit_curve_extra_json", curve.curve_extra)
+    obj["assetkit_curve_kind"] = int(curve.kind)
+    obj["assetkit_curve_degree"] = int(curve.degree)
+    obj["assetkit_curve_closed"] = bool(curve.closed)
+    return obj
 
 
 def _apply_instancing(

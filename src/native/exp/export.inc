@@ -7,5 +7,6 @@
 #include "scene_payload.inc"
 #include "api.inc"
 #include "pixel_pack.inc"
+#include "curve.inc"
 #include "anim_channel.inc"
 #include "fast_mesh.inc"

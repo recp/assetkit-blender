@@ -255,7 +255,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
                && kind != AKB_EXPORT_ITEM_MESH
                && kind != AKB_EXPORT_ITEM_CAMERA
                && kind != AKB_EXPORT_ITEM_LIGHT
-               && kind != AKB_EXPORT_ITEM_JOINT) {
+               && kind != AKB_EXPORT_ITEM_JOINT
+               && kind != AKB_EXPORT_ITEM_CURVE) {
       PyErr_SetString(PyExc_ValueError, "unknown AssetKit export scene item kind");
       ok = 0;
     } else {
@@ -337,6 +338,12 @@ akb_export_scene(PyObject *self, PyObject *args) {
         break;
       case AKB_EXPORT_ITEM_LIGHT:
         ok = akb_export_add_light_object_to_node(doc,
+                                                 node,
+                                                 node->name,
+                                                 scene_items[i].payload);
+        break;
+      case AKB_EXPORT_ITEM_CURVE:
+        ok = akb_export_add_curve_object_to_node(doc,
                                                  node,
                                                  node->name,
                                                  scene_items[i].payload);

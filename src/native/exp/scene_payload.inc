@@ -35,6 +35,12 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                                            Py_ssize_t  node_count);
 
 static int
+akb_export_add_curve_object_to_node(AkDoc      *doc,
+                                    AkNode     *node,
+                                    const char *name,
+                                    PyObject   *payload_obj);
+
+static int
 akb_export_add_mesh_object_to_node(AkDoc       *doc,
                                    AkNode      *node,
                                    const char  *name,
@@ -1151,4 +1157,3 @@ akb_export_apply_direct_extra(AkDoc    *doc,
   *slot = extra;
   return 1;
 }
-

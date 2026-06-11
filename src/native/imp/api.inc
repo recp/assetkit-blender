@@ -11,6 +11,7 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   PyObject *options_obj = NULL;
   PyObject *out;
   PyObject *mesh_list;
+  PyObject *curve_list;
   PyObject *node_list;
   PyObject *owner;
   PyObject *item;
@@ -160,6 +161,18 @@ akb_load_meshes(PyObject *self, PyObject *args) {
     return NULL;
   }
 
+  curve_list = akb_curve_list_to_py(owner_import, owner);
+  if (!curve_list || PyDict_SetItemString(out, "curves", curve_list) < 0) {
+    Py_XDECREF(curve_list);
+    Py_DECREF(node_list);
+    Py_DECREF(mesh_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(curve_list);
+
   item = akb_tree_to_py(ak_extra(doc));
   if (!item || PyDict_SetItemString(out, "doc_extra", item) < 0) {
     Py_XDECREF(item);
@@ -197,11 +210,12 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   Py_DECREF(mesh_list);
   if (profile) {
     py_ms = akb_now_ms() - py_started_at;
-    akb_profile_log("load_meshes file=\"%s\" result=%d nodes=%zu primitives=%zu ak_load=%.3fms extract=%.3fms py_pack=%.3fms total=%.3fms",
+    akb_profile_log("load_meshes file=\"%s\" result=%d nodes=%zu primitives=%zu curves=%zu ak_load=%.3fms extract=%.3fms py_pack=%.3fms total=%.3fms",
                     filepath,
                     result,
                     owner_import->nodes.count,
                     owner_import->primitives.count,
+                    owner_import->curves.count,
                     load_ms,
                     extract_ms,
                     py_ms,
@@ -224,6 +238,7 @@ akb_open_scene(PyObject *self, PyObject *args) {
   AkbImport *owner_import;
   PyObject *options_obj = NULL;
   PyObject *out;
+  PyObject *curve_list;
   PyObject *node_list;
   PyObject *owner;
   PyObject *item;
@@ -365,6 +380,17 @@ akb_open_scene(PyObject *self, PyObject *args) {
   }
   Py_DECREF(item);
 
+  curve_list = akb_curve_list_to_py(owner_import, owner);
+  if (!curve_list || PyDict_SetItemString(out, "curves", curve_list) < 0) {
+    Py_XDECREF(curve_list);
+    Py_DECREF(node_list);
+    Py_DECREF(out);
+    Py_DECREF(owner);
+    akb_shared_doc_release(doc_owner);
+    return NULL;
+  }
+  Py_DECREF(curve_list);
+
   item = akb_tree_to_py(ak_extra(doc));
   if (!item || PyDict_SetItemString(out, "doc_extra", item) < 0) {
     Py_XDECREF(item);
@@ -409,11 +435,12 @@ akb_open_scene(PyObject *self, PyObject *args) {
   Py_DECREF(node_list);
   if (profile) {
     py_ms = akb_now_ms() - py_started_at;
-    akb_profile_log("open_scene file=\"%s\" result=%d nodes=%zu primitives=%zu ak_load=%.3fms extract=%.3fms py_pack=%.3fms total=%.3fms",
+    akb_profile_log("open_scene file=\"%s\" result=%d nodes=%zu primitives=%zu curves=%zu ak_load=%.3fms extract=%.3fms py_pack=%.3fms total=%.3fms",
                     filepath,
                     result,
                     owner_import->nodes.count,
                     owner_import->primitives.count,
+                    owner_import->curves.count,
                     load_ms,
                     extract_ms,
                     py_ms,
@@ -1255,4 +1282,3 @@ akb_skin_group_assignments(PyObject *self, PyObject *args) {
     return NULL;
   return out;
 }
-
