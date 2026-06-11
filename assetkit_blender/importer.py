@@ -11458,10 +11458,6 @@ def _configure_texture_node(mat: bpy.types.Material, tex, tex_info: TextureRefDa
     tex.interpolation = _texture_interpolation(tex_info)
 
     uv_slot = _texture_uv_slot(tex_info)
-    needs_uv_node = uv_slot > 0 or tex_info.has_transform
-    if not needs_uv_node:
-        return
-
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
     uv = nodes.new("ShaderNodeUVMap")

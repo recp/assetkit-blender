@@ -5,6 +5,11 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int file_type_int;
   PyObject *items_obj;
   PyObject *doc_extra_obj;
+  uintptr_t saved_dae_version;
+  uintptr_t saved_dae_index_mode;
+  uintptr_t saved_authoring_tool;
+  const char *authoring_tool_fragment;
+  char authoring_tool[256];
   Py_ssize_t item_count;
   Py_ssize_t i;
   AkDoc *doc;
@@ -20,18 +25,36 @@ akb_export_scene(PyObject *self, PyObject *args) {
   double core_export_ms;
   int profile;
   int ok;
+  int dae_version;
+  int dae_index_mode;
+  int export_coord_system_id;
+  int export_coord_conversion_id;
+  int set_dae_options;
+  int set_authoring_tool;
+  AkCoordSys *export_coord;
+  uint8_t export_coord_conversion;
 
   (void)self;
   memset(&geometry_cache, 0, sizeof(geometry_cache));
 
   doc_extra_obj = Py_None;
+  dae_version = AK_DAE_EXPORT_VERSION_AUTO;
+  dae_index_mode = AK_DAE_EXPORT_INDEX_AUTO;
+  export_coord_system_id = AKB_LOAD_COORD_Y_UP;
+  export_coord_conversion_id = AKB_COORD_TRANSFORM;
+  authoring_tool_fragment = NULL;
   if (!PyArg_ParseTuple(args,
-                        "sisO|O",
+                        "sisO|Oiiiis",
                         &out_dir,
                         &file_type_int,
                         &name,
                         &items_obj,
-                        &doc_extra_obj))
+                        &doc_extra_obj,
+                        &dae_version,
+                        &dae_index_mode,
+                        &export_coord_system_id,
+                        &export_coord_conversion_id,
+                        &authoring_tool_fragment))
     return NULL;
   if (!PySequence_Check(items_obj)) {
     PyErr_SetString(PyExc_TypeError, "scene items must be a sequence");
@@ -350,14 +373,42 @@ akb_export_scene(PyObject *self, PyObject *args) {
   free(nodes);
 
   Py_BEGIN_ALLOW_THREADS
-  if (doc->coordSys != AK_YUP) {
-    ak_changeCoordSys(doc, AK_YUP);
+  export_coord = akb_coord_from_id(export_coord_system_id);
+  export_coord_conversion = akb_conversion_from_id(export_coord_conversion_id);
+  if (export_coord_conversion != AKB_COORD_RAW
+      && export_coord
+      && doc->coordSys != export_coord) {
+    ak_changeCoordSys(doc, export_coord);
   }
   if (profile) {
     coord_ms = akb_now_ms() - phase_started_at;
     phase_started_at = akb_now_ms();
   }
+  set_dae_options = file_type_int == AK_FILE_TYPE_COLLADA;
+  if (set_dae_options) {
+    saved_dae_version = ak_opt_get(AK_OPT_DAE_EXPORT_VERSION);
+    saved_dae_index_mode = ak_opt_get(AK_OPT_DAE_EXPORT_INDEX_MODE);
+    ak_opt_set(AK_OPT_DAE_EXPORT_VERSION, (uintptr_t)dae_version);
+    ak_opt_set(AK_OPT_DAE_EXPORT_INDEX_MODE, (uintptr_t)dae_index_mode);
+  }
+  saved_authoring_tool = ak_opt_get(AK_OPT_EXPORT_AUTHORING_TOOL);
+  set_authoring_tool = 0;
+  if (authoring_tool_fragment && authoring_tool_fragment[0]) {
+    snprintf(authoring_tool,
+             sizeof(authoring_tool),
+             "%s by %s",
+             AK_AUTHORING_TOOL,
+             authoring_tool_fragment);
+    ak_opt_set(AK_OPT_EXPORT_AUTHORING_TOOL, (uintptr_t)authoring_tool);
+    set_authoring_tool = 1;
+  }
   result = ak_export(doc, out_dir, (AkFileType)file_type_int);
+  if (set_authoring_tool)
+    ak_opt_set(AK_OPT_EXPORT_AUTHORING_TOOL, saved_authoring_tool);
+  if (set_dae_options) {
+    ak_opt_set(AK_OPT_DAE_EXPORT_VERSION, saved_dae_version);
+    ak_opt_set(AK_OPT_DAE_EXPORT_INDEX_MODE, saved_dae_index_mode);
+  }
   if (profile)
     core_export_ms = akb_now_ms() - phase_started_at;
   Py_END_ALLOW_THREADS
@@ -424,4 +475,3 @@ typedef struct AkbExportFastGroup {
   size_t               tableCap;
   size_t               tableCount;
 } AkbExportFastGroup;
-

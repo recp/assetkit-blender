@@ -1632,10 +1632,14 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   int has_tangents;
   int has_skin;
   int has_morph;
+  int flip_uv_v;
   int ok;
 
   if (!doc || !node || !payload_obj)
     return 0;
+  flip_uv_v = doc->inf
+              && (doc->inf->ftype == AK_FILE_TYPE_GLTF
+                  || doc->inf->ftype == AK_FILE_TYPE_GLB);
 
   mesh_py = PyTuple_GET_ITEM(payload_obj, 1);
   uv_layers_obj = PyTuple_GET_ITEM(payload_obj, 2);
@@ -2100,7 +2104,9 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
 
       for (uint32_t i = 0; i < uv_count; i++) {
         uv[i * 2u] = uvs[i][(size_t)loop_index * 2u];
-        uv[i * 2u + 1u] = 1.0f - uvs[i][(size_t)loop_index * 2u + 1u];
+        uv[i * 2u + 1u] = flip_uv_v
+                           ? 1.0f - uvs[i][(size_t)loop_index * 2u + 1u]
+                           : uvs[i][(size_t)loop_index * 2u + 1u];
       }
 
       if (has_tangents) {

@@ -27,6 +27,7 @@
 #include "ak/assetkit.h"
 #include "ak/options.h"
 #include "ak/path.h"
+#include "ak/version.h"
 
 #ifndef PATH_MAX
 #  define PATH_MAX 4096

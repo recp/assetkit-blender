@@ -36,7 +36,7 @@ class AkIndexArray(ctypes.Structure):
         ("count", ctypes.c_size_t),
         ("max", ctypes.c_uint32),
         ("componentType", ctypes.c_int32),
-        ("reserved", ctypes.c_uint32),
+        ("padding", ctypes.c_uint32),
     ]
 
 
@@ -119,9 +119,7 @@ AkMeshPrimitive._fields_ = [
     ("center", ctypes.c_float * 3),
     ("flags", ctypes.c_uint32),
     ("indexStride", ctypes.c_uint32),
-    ("reserved1", ctypes.c_uint32),
-    ("reserved2", ctypes.c_uint32),
-    ("reserved3", ctypes.c_void_p),
+    ("reserved", ctypes.c_void_p),
     ("variantMappings", ctypes.c_void_p),
     ("variantMappingCount", ctypes.c_uint32),
     ("materialBindingCount", ctypes.c_uint32),
@@ -724,7 +722,7 @@ class AssetKit:
         c_type = type_map.get(int(item.componentType))
         if c_type is None:
             return []
-        data_addr = ctypes.addressof(item) + AkIndexArray.reserved.offset + ctypes.sizeof(ctypes.c_uint32)
+        data_addr = ctypes.addressof(item) + AkIndexArray.padding.offset + ctypes.sizeof(ctypes.c_uint32)
         array_type = c_type * count
         return [int(v) for v in ctypes.cast(data_addr, ctypes.POINTER(array_type)).contents]
 

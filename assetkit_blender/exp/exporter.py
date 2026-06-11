@@ -17,6 +17,10 @@ from ..assetkit import (
     _native_module,
 )
 from ..enums import (
+    AK_DAE_EXPORT_INDEX_AUTO,
+    AK_DAE_EXPORT_INDEX_SINGLE,
+    AK_DAE_EXPORT_VERSION_AUTO,
+    AK_FILE_TYPE_DAE,
     AK_FILE_TYPE_GLB,
     AK_FILE_TYPE_GLTF,
     AK_INTERPOLATION_LINEAR,
@@ -39,6 +43,10 @@ from ..enums import (
     AK_TARGET_SCALE,
     AK_TARGET_WEIGHTS,
     AKB_ANIM_VISIBILITY,
+    AKB_LOAD_COORD_RAW,
+    AKB_LOAD_COORD_TRANSFORM,
+    AKB_LOAD_COORD_Y_UP,
+    AKB_LOAD_COORD_Z_UP,
 )
 from .images import _ExportImageStore
 from .materials import _material_tuple
@@ -46,6 +54,7 @@ from .materials import _material_tuple
 EXPORT_FORMATS = (
     ("GLTF", "glTF", "Export .gltf with external .bin/resources", AK_FILE_TYPE_GLTF, ".gltf"),
     ("GLB", "GLB", "Export binary .glb", AK_FILE_TYPE_GLB, ".glb"),
+    ("DAE", "COLLADA (.dae)", "Export COLLADA .dae", AK_FILE_TYPE_DAE, ".dae"),
 )
 
 _AKB_NATIVE_MESH_PAYLOAD = 0x414B4D46
@@ -108,6 +117,10 @@ def export_scene(
     file_type: int,
     *,
     selected_only: bool = False,
+    dae_version: int = AK_DAE_EXPORT_VERSION_AUTO,
+    dae_index_mode: int = AK_DAE_EXPORT_INDEX_SINGLE,
+    coordinate_system: int | None = None,
+    coordinate_conversion: int | None = None,
 ) -> int:
     module = _native_module()
     if module is None:
@@ -145,12 +158,31 @@ def export_scene(
         try:
             native_started_at = time.perf_counter() if profile else 0.0
             doc_extra = _export_document_extra(context)
+            export_coord_system = (
+                AKB_LOAD_COORD_Z_UP
+                if coordinate_system is None and file_type == AK_FILE_TYPE_DAE
+                else AKB_LOAD_COORD_Y_UP
+                if coordinate_system is None
+                else int(coordinate_system)
+            )
+            export_coord_conversion = (
+                AKB_LOAD_COORD_RAW
+                if coordinate_conversion is None and file_type == AK_FILE_TYPE_DAE
+                else AKB_LOAD_COORD_TRANSFORM
+                if coordinate_conversion is None
+                else int(coordinate_conversion)
+            )
             result = int(module.export_scene(
                 os.fspath(path.parent),
                 int(file_type),
                 path.name,
                 items,
                 doc_extra,
+                int(dae_version),
+                int(dae_index_mode),
+                export_coord_system,
+                export_coord_conversion,
+                _assetkit_blender_authoring_tool(),
             ))
             if profile:
                 _profile_log(
@@ -172,6 +204,16 @@ def export_scene(
             f"export_scene total={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
         )
     return result
+
+
+def _assetkit_blender_authoring_tool() -> str:
+    root_name = __package__.split(".", 1)[0]
+    root_mod = sys.modules.get(root_name)
+    info = getattr(root_mod, "bl_info", {}) if root_mod is not None else {}
+    version = info.get("version") if isinstance(info, dict) else None
+    if isinstance(version, tuple) and version:
+        return "AssetKit Blender v" + ".".join(str(part) for part in version)
+    return "AssetKit Blender"
 
 
 def _collect_scene_items(
