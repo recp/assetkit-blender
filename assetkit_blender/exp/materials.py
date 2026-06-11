@@ -8,6 +8,7 @@ import bpy
 
 from ..assetkit import _native_module
 from ..enums import (
+    AK_FILE_TYPE_WAVEFRONT,
     AK_INTERPOLATION_LINEAR,
     AK_INTERPOLATION_STEP,
     AKB_ANIM_MATERIAL_BASE_COLOR,
@@ -81,6 +82,7 @@ def _material_tuple(
     obj: bpy.types.Object | None = None,
     mesh: bpy.types.Mesh | None = None,
     material_index: int = -1,
+    file_type: int = 0,
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
 ) -> tuple | None:
@@ -100,6 +102,14 @@ def _material_tuple(
     roughness_texture = None
     roughness_slot = 0
     roughness_info = None
+    obj_metallic_texture = None
+    obj_metallic_slot = 0
+    obj_metallic_channel = 0
+    obj_metallic_info = None
+    obj_roughness_texture = None
+    obj_roughness_slot = 0
+    obj_roughness_channel = 0
+    obj_roughness_info = None
     normal_texture = None
     normal_slot = 0
     normal_info = None
@@ -338,7 +348,22 @@ def _material_tuple(
     color = array("f", base_color)
     emissive = array("f", emissive_color)
     needs_mr_pack = False
-    if (
+    export_obj = int(file_type or 0) == AK_FILE_TYPE_WAVEFRONT
+    if export_obj:
+        if metallic_image is not None:
+            obj_metallic_texture = image_store.path_for(metallic_image)
+            obj_metallic_slot = metallic_slot
+            obj_metallic_channel = _assetkit_channel_mask(metallic_channel)
+            obj_metallic_info = metallic_info
+        if roughness_image is not None:
+            obj_roughness_texture = image_store.path_for(roughness_image)
+            obj_roughness_slot = roughness_slot
+            obj_roughness_channel = _assetkit_channel_mask(roughness_channel)
+            obj_roughness_info = roughness_info
+        metallic_roughness_texture = None
+        metallic_roughness_slot = roughness_slot if roughness_image is not None else metallic_slot
+        metallic_roughness_info = roughness_info if roughness_image is not None else metallic_info
+    elif (
         metallic_texture is not None
         and metallic_texture == roughness_texture
         and metallic_channel == 2
@@ -411,7 +436,25 @@ def _material_tuple(
         tuple(features),
         animations,
         _assetkit_json_prop(material, "assetkit_material_extra_json"),
+        obj_metallic_texture,
+        int(obj_metallic_slot),
+        int(obj_metallic_channel),
+        obj_metallic_info,
+        obj_roughness_texture,
+        int(obj_roughness_slot),
+        int(obj_roughness_channel),
+        obj_roughness_info,
     )
+
+
+def _assetkit_channel_mask(channel: int) -> int:
+    if int(channel) == 1:
+        return 2
+    if int(channel) == 2:
+        return 4
+    if int(channel) == 3:
+        return 8
+    return 0
 
 
 def _assetkit_json_prop(target: object | None, key: str) -> object | None:

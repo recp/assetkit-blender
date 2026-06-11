@@ -483,6 +483,7 @@ def _collect_scene_items(
                     obj,
                     obj.data,
                     obj.data,
+                    file_type,
                     image_store,
                     material_cache,
                     material_export_mode,
@@ -506,6 +507,7 @@ def _collect_scene_items(
                         obj,
                         obj.data,
                         obj.data,
+                        file_type,
                         image_store,
                         material_cache,
                         material_export_mode,
@@ -529,6 +531,7 @@ def _collect_scene_items(
                             obj,
                             mesh,
                             obj.data if obj.type == "MESH" else None,
+                            file_type,
                             image_store,
                             material_cache,
                             material_export_mode,
@@ -1788,6 +1791,7 @@ def _mesh_payload(
     obj: bpy.types.Object,
     mesh: bpy.types.Mesh,
     source_mesh: bpy.types.Mesh | None,
+    file_type: int,
     image_store: "_ExportImageStore",
     material_cache: dict[tuple, tuple | None],
     material_export_mode: str,
@@ -1827,6 +1831,7 @@ def _mesh_payload(
         uv_names,
         fps,
         context,
+        file_type,
         material_export_mode,
         material_bake_size,
         variant_payload=_material_variant_payload(obj),
@@ -1855,6 +1860,7 @@ def _native_mesh_payload(
     uv_names: tuple[str, ...],
     fps: float,
     context: bpy.types.Context,
+    file_type: int,
     material_export_mode: str,
     material_bake_size: int,
     *,
@@ -1875,6 +1881,7 @@ def _native_mesh_payload(
             obj,
             mesh,
             index,
+            file_type,
             material_export_mode,
             material_bake_size,
         )
@@ -1978,6 +1985,7 @@ def _cached_material_tuple(
     obj: bpy.types.Object,
     mesh: bpy.types.Mesh,
     material_index: int,
+    file_type: int,
     material_export_mode: str,
     material_bake_size: int,
 ) -> tuple | None:
@@ -1992,9 +2000,10 @@ def _cached_material_tuple(
             uv_names,
             material_export_mode,
             int(material_bake_size),
+            int(file_type or 0),
         )
     else:
-        key = (int(material.as_pointer()), uv_names)
+        key = (int(material.as_pointer()), uv_names, int(file_type or 0))
     cached = material_cache.get(key)
     if cached is not None or key in material_cache:
         return cached
@@ -2007,6 +2016,7 @@ def _cached_material_tuple(
         obj=obj,
         mesh=mesh,
         material_index=material_index,
+        file_type=file_type,
         material_export_mode=material_export_mode,
         material_bake_size=material_bake_size,
     )

@@ -50,6 +50,19 @@ akb_export_material_scalar(AkHeap              *heap,
   return input;
 }
 
+static AkTextureChannels
+akb_export_obj_scalar_channels(int channels, AkTextureChannels fallback) {
+  switch (channels) {
+    case AK_TEXTURE_CHANNEL_R:
+    case AK_TEXTURE_CHANNEL_G:
+    case AK_TEXTURE_CHANNEL_B:
+    case AK_TEXTURE_CHANNEL_A:
+      return (AkTextureChannels)channels;
+    default:
+      return fallback;
+  }
+}
+
 static AkTexture *
 akb_export_find_texture_uri(AkDoc       *doc,
                             const char  *uri,
@@ -1235,6 +1248,8 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   PyObject          *base_color_info_obj;
   PyObject          *opacity_info_obj;
   PyObject          *metallic_roughness_info_obj;
+  PyObject          *metallic_info_obj;
+  PyObject          *roughness_info_obj;
   PyObject          *normal_info_obj;
   PyObject          *occlusion_info_obj;
   PyObject          *emissive_info_obj;
@@ -1247,6 +1262,8 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   const char        *base_color_uri;
   const char        *opacity_uri;
   const char        *metallic_roughness_uri;
+  const char        *metallic_uri;
+  const char        *roughness_uri;
   const char        *normal_uri;
   const char        *occlusion_uri;
   const char        *emissive_uri;
@@ -1262,6 +1279,10 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   int                base_color_slot;
   int                opacity_slot;
   int                metallic_roughness_slot;
+  int                metallic_slot;
+  int                roughness_slot;
+  int                metallic_channel;
+  int                roughness_channel;
   int                normal_slot;
   int                occlusion_slot;
   int                emissive_slot;
@@ -1285,12 +1306,16 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   base_color_uri = NULL;
   opacity_uri = NULL;
   metallic_roughness_uri = NULL;
+  metallic_uri = NULL;
+  roughness_uri = NULL;
   normal_uri = NULL;
   occlusion_uri = NULL;
   emissive_uri = NULL;
   base_color_info_obj = Py_None;
   opacity_info_obj = Py_None;
   metallic_roughness_info_obj = Py_None;
+  metallic_info_obj = Py_None;
+  roughness_info_obj = Py_None;
   normal_info_obj = Py_None;
   occlusion_info_obj = Py_None;
   emissive_info_obj = Py_None;
@@ -1303,6 +1328,10 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   base_color_slot = 0;
   opacity_slot = 0;
   metallic_roughness_slot = 0;
+  metallic_slot = 0;
+  roughness_slot = 0;
+  metallic_channel = 0;
+  roughness_channel = 0;
   normal_slot = 0;
   occlusion_slot = 0;
   emissive_slot = 0;
@@ -1312,7 +1341,53 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   memset(&color_view, 0, sizeof(color_view));
   memset(&emissive_color_view, 0, sizeof(emissive_color_view));
   obj_size = PyTuple_Check(obj) ? PyTuple_Size(obj) : -1;
-  if (obj_size == 34) {
+  if (obj_size == 42) {
+    if (!PyArg_ParseTuple(obj,
+                          "sOddidpzizizizidzidOzidOOOOOOiiOOOziiOziiO",
+                          &name,
+                          &color_obj,
+                          &metallic,
+                          &roughness,
+                          &alpha_mode,
+                          &alpha_cutoff,
+                          &double_sided,
+                          &base_color_uri,
+                          &base_color_slot,
+                          &opacity_uri,
+                          &opacity_slot,
+                          &metallic_roughness_uri,
+                          &metallic_roughness_slot,
+                          &normal_uri,
+                          &normal_slot,
+                          &normal_scale,
+                          &occlusion_uri,
+                          &occlusion_slot,
+                          &occlusion_strength,
+                          &emissive_color_obj,
+                          &emissive_uri,
+                          &emissive_slot,
+                          &emissive_strength,
+                          &base_color_info_obj,
+                          &opacity_info_obj,
+                          &metallic_roughness_info_obj,
+                          &normal_info_obj,
+                          &occlusion_info_obj,
+                          &emissive_info_obj,
+                          &material_type,
+                          &opacity_inverted,
+                          &features_obj,
+                          &animations_obj,
+                          &extra_obj,
+                          &metallic_uri,
+                          &metallic_slot,
+                          &metallic_channel,
+                          &metallic_info_obj,
+                          &roughness_uri,
+                          &roughness_slot,
+                          &roughness_channel,
+                          &roughness_info_obj))
+      return NULL;
+  } else if (obj_size == 34) {
     if (!PyArg_ParseTuple(obj,
                           "sOddidpzizizizidzidOzidOOOOOOiiOOO",
                           &name,
@@ -1702,6 +1777,56 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
     }
   }
 
+  if (metallic_uri && metallic_uri[0]) {
+    AkTextureRef *metallic_texture;
+    AkTextureChannels metallic_channels;
+
+    metallic_channels = akb_export_obj_scalar_channels(metallic_channel,
+                                                       AK_TEXTURE_CHANNEL_RGB);
+
+    metallic_texture = akb_export_texref(doc,
+                                         surface->metallic,
+                                         metallic_uri,
+                                         AK_TEXTURE_COLORSPACE_LINEAR,
+                                         metallic_channels,
+                                         (int32_t)metallic_slot,
+                                         metallic_info_obj);
+    if (PyErr_Occurred()) {
+      AKB_EXPORT_MAT_RELEASE_BUFFERS();
+      return NULL;
+    }
+    if (metallic_texture) {
+      surface->metallic->texture = metallic_texture;
+      surface->metallic->source = AK_MATERIAL_INPUT_TEXTURE;
+      surface->metallic->channels = metallic_channels;
+    }
+  }
+
+  if (roughness_uri && roughness_uri[0]) {
+    AkTextureRef *roughness_texture;
+    AkTextureChannels roughness_channels;
+
+    roughness_channels = akb_export_obj_scalar_channels(roughness_channel,
+                                                        AK_TEXTURE_CHANNEL_RGB);
+
+    roughness_texture = akb_export_texref(doc,
+                                          surface->roughness,
+                                          roughness_uri,
+                                          AK_TEXTURE_COLORSPACE_LINEAR,
+                                          roughness_channels,
+                                          (int32_t)roughness_slot,
+                                          roughness_info_obj);
+    if (PyErr_Occurred()) {
+      AKB_EXPORT_MAT_RELEASE_BUFFERS();
+      return NULL;
+    }
+    if (roughness_texture) {
+      surface->roughness->texture = roughness_texture;
+      surface->roughness->source = AK_MATERIAL_INPUT_TEXTURE;
+      surface->roughness->channels = roughness_channels;
+    }
+  }
+
   if (normal_uri && normal_uri[0]) {
     AkTextureRef *normal_texture;
 
@@ -1943,4 +2068,3 @@ akb_export_apply_material_variants(AkDoc           *doc,
   Py_DECREF(variants_seq);
   return 1;
 }
-
