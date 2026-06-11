@@ -195,7 +195,7 @@ class _ExportImageStore:
         material_index: int,
         size: int,
         name: str,
-        uv_key: str = "",
+        uv_name: str = "",
     ) -> str | None:
         if obj.type != "MESH":
             return None
@@ -209,7 +209,7 @@ class _ExportImageStore:
             int(mesh.as_pointer()),
             int(material_index),
             int(size),
-            str(uv_key or ""),
+            str(uv_name or ""),
         )
         if key in self._shader_bake_cache:
             return self._shader_bake_cache[key]
@@ -222,6 +222,7 @@ class _ExportImageStore:
             int(material_index),
             size,
             name,
+            str(uv_name or ""),
         )
         self._shader_bake_cache[key] = path
         return path
@@ -587,6 +588,7 @@ class _ExportImageStore:
         material_index: int,
         size: int,
         name: str,
+        uv_name: str,
     ) -> str | None:
         scene = context.scene
         view_layer = context.view_layer
@@ -608,6 +610,7 @@ class _ExportImageStore:
                 material,
                 material_index,
                 name,
+                uv_name,
             )
             if bake_obj is None:
                 return None
@@ -727,6 +730,7 @@ class _ExportImageStore:
         material: bpy.types.Material,
         material_index: int,
         name: str,
+        uv_name: str,
     ) -> tuple[bpy.types.Object | None, bpy.types.Mesh | None]:
         if mesh is None or material is None or material_index < 0:
             return None, None
@@ -773,6 +777,7 @@ class _ExportImageStore:
             bm.free()
 
         filtered_mesh.update()
+        self._set_bake_uv_layer(filtered_mesh, uv_name)
         filtered_mesh.materials.append(material)
         bake_obj = bpy.data.objects.new(f"##assetkit-bake-object:{name}##", filtered_mesh)
         bake_obj.matrix_world = obj.matrix_world.copy()
@@ -783,6 +788,30 @@ class _ExportImageStore:
         except Exception:
             bpy.context.scene.collection.objects.link(bake_obj)
         return bake_obj, filtered_mesh
+
+    @staticmethod
+    def _set_bake_uv_layer(mesh: bpy.types.Mesh, uv_name: str) -> None:
+        if not uv_name:
+            return
+        uv_layers = getattr(mesh, "uv_layers", None)
+        if uv_layers is None or len(uv_layers) == 0:
+            return
+        for index, layer in enumerate(uv_layers):
+            if layer.name != uv_name:
+                continue
+            try:
+                uv_layers.active_index = index
+            except Exception:
+                pass
+            try:
+                uv_layers.active = layer
+            except Exception:
+                pass
+            try:
+                uv_layers.active_render = layer
+            except Exception:
+                pass
+            return
 
     def _write_rgba_pixels(self, name: str, width: int, height: int, pixels: array) -> str | None:
         path = self._next_path(name, ".png")
