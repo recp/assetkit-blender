@@ -17,6 +17,11 @@ if(NOT ASSETKIT_ROOT AND DEFINED ENV{ASSETKIT_ROOT})
   set(ASSETKIT_ROOT "${ASSETKIT_ROOT_FROM_ENV}" CACHE PATH "AssetKit source or install root" FORCE)
 endif()
 
+if(NOT ASSETKIT_ROOT AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../assetio/include/ak/assetkit.h")
+  get_filename_component(ASSETKIT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../assetio" ABSOLUTE)
+  set(ASSETKIT_ROOT "${ASSETKIT_ROOT}" CACHE PATH "AssetKit source or install root" FORCE)
+endif()
+
 if(NOT ASSETKIT_ROOT AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../assetkit/include/ak/assetkit.h")
   get_filename_component(ASSETKIT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../assetkit" ABSOLUTE)
   set(ASSETKIT_ROOT "${ASSETKIT_ROOT}" CACHE PATH "AssetKit source or install root" FORCE)

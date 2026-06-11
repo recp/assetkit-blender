@@ -16,8 +16,12 @@ AssetKit can be provided as a submodule or an external checkout. The build looks
 
 1. `-DASSETKIT_ROOT=/path/to/assetkit`
 2. `ASSETKIT_ROOT` environment variable
-3. `deps/assetkit`
-4. system install paths
+3. sibling local checkout `../assetio`
+4. sibling local checkout `../assetkit`
+5. `deps/assetkit`
+6. system install paths
+
+For local development next to the AssetKit repository, build `../assetio` once and the Blender bridge will use that checkout by default for both Python 3.13 and 3.14 build directories.
 
 For a fresh clone:
 
