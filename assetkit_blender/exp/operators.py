@@ -42,7 +42,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".gltf"
     filter_glob: bpy.props.StringProperty(
-        default="*.gltf;*.glb;*.dae",
+        default="*.gltf;*.glb;*.dae;*.obj",
         options={"HIDDEN"},
     )
     assetkit_last_filepath: bpy.props.StringProperty(
@@ -71,7 +71,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Mode",
         description="Coordinate handling for AssetKit export",
         items=(
-            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, COLLADA authored coordinates"),
+            ("AUTO", "Auto", "Use format defaults: glTF/GLB/OBJ Y-up, COLLADA authored coordinates"),
             ("TRANSFORM", "Convert Data", "Export in the selected target coordinate system"),
             ("RAW", "Raw", "Do not change AssetKit document coordinates before export"),
         ),

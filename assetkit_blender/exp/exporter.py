@@ -23,6 +23,7 @@ from ..enums import (
     AK_FILE_TYPE_DAE,
     AK_FILE_TYPE_GLB,
     AK_FILE_TYPE_GLTF,
+    AK_FILE_TYPE_WAVEFRONT,
     AK_INTERPOLATION_LINEAR,
     AK_INTERPOLATION_STEP,
     AK_LIGHT_TYPE_DIRECTIONAL,
@@ -56,6 +57,7 @@ EXPORT_FORMATS = (
     ("GLTF", "glTF", "Export .gltf with external .bin/resources", AK_FILE_TYPE_GLTF, ".gltf"),
     ("GLB", "GLB", "Export binary .glb", AK_FILE_TYPE_GLB, ".glb"),
     ("DAE", "COLLADA (.dae)", "Export COLLADA .dae", AK_FILE_TYPE_DAE, ".dae"),
+    ("OBJ", "Wavefront OBJ (.obj)", "Export Wavefront OBJ .obj/.mtl", AK_FILE_TYPE_WAVEFRONT, ".obj"),
 )
 
 _AKB_NATIVE_MESH_PAYLOAD = 0x414B4D46

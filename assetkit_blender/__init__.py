@@ -66,7 +66,7 @@ def menu_func_import(self, _context):
 def menu_func_export(self, _context):
     self.layout.operator(
         ASSETKIT_OT_export_assetkit.bl_idname,
-        text="AssetKit (.gltf, .glb, COLLADA (.dae))",
+        text="AssetKit (.gltf, .glb, .dae, .obj)",
     )
 
 
