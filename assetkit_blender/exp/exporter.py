@@ -171,14 +171,16 @@ def export_scene(
             doc_extra = _export_document_extra(context)
             export_coord_system = (
                 AKB_LOAD_COORD_Z_UP
-                if coordinate_system is None and file_type == AK_FILE_TYPE_DAE
+                if coordinate_system is None
+                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_WAVEFRONT}
                 else AKB_LOAD_COORD_Y_UP
                 if coordinate_system is None
                 else int(coordinate_system)
             )
             export_coord_conversion = (
                 AKB_LOAD_COORD_RAW
-                if coordinate_conversion is None and file_type == AK_FILE_TYPE_DAE
+                if coordinate_conversion is None
+                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_WAVEFRONT}
                 else AKB_LOAD_COORD_TRANSFORM
                 if coordinate_conversion is None
                 else int(coordinate_conversion)

@@ -71,7 +71,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Mode",
         description="Coordinate handling for AssetKit export",
         items=(
-            ("AUTO", "Auto", "Use format defaults: glTF/GLB/OBJ Y-up, COLLADA authored coordinates"),
+            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, OBJ/COLLADA authored coordinates"),
             ("TRANSFORM", "Convert Data", "Export in the selected target coordinate system"),
             ("RAW", "Raw", "Do not change AssetKit document coordinates before export"),
         ),
@@ -182,7 +182,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         coord_conversion = self.coordinate_conversion
         coord_system = self.coordinate_system
         if coord_conversion == "AUTO":
-            if self.export_format == "DAE":
+            if self.export_format in {"DAE", "OBJ"}:
                 coord_conversion = "RAW"
                 coord_system = "Z_UP"
             else:
