@@ -138,6 +138,24 @@ def export_scene(
     coordinate_conversion: int | None = None,
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
+    export_visible: bool = True,
+    export_renderable: bool = True,
+    export_cameras: bool = True,
+    export_lights: bool = True,
+    export_custom_properties: bool = True,
+    export_uv: bool = True,
+    export_normals: bool = True,
+    export_tangents: bool = True,
+    export_vertex_colors: bool = True,
+    export_attributes: bool = True,
+    export_materials: bool = True,
+    export_images: bool = True,
+    export_animations: bool = True,
+    export_skins: bool = True,
+    export_shape_keys: bool = True,
+    export_shape_key_normals: bool = True,
+    export_shape_key_tangents: bool = True,
+    export_shape_key_animations: bool = True,
     apply_modifiers: bool | None = None,
     global_scale: float | None = None,
     use_scene_unit: bool | None = None,
@@ -157,7 +175,7 @@ def export_scene(
     ply_forward_axis: str | None = None,
     ply_up_axis: str | None = None,
     ply_export_uv: bool = True,
-    ply_export_normals: bool = False,
+    ply_export_normals: bool = True,
     ply_export_colors: str = "SRGB",
     ply_export_triangulated_mesh: bool = False,
 ) -> int:
@@ -170,7 +188,9 @@ def export_scene(
     if path.suffix.lower() != suffix:
         path = path.with_suffix(suffix)
     material_export_mode = _material_export_mode_id(material_export_mode)
-    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}:
+    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY} or not export_materials:
+        material_export_mode = "NONE"
+    elif not export_images:
         material_export_mode = "DIRECT"
     material_bake_size = _material_bake_size(material_bake_size)
     stl_export_format = _stl_export_format_id(stl_format)
@@ -215,6 +235,24 @@ def export_scene(
             coordinate_conversion=coordinate_conversion,
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
+            export_visible=bool(export_visible),
+            export_renderable=bool(export_renderable),
+            export_cameras=bool(export_cameras),
+            export_lights=bool(export_lights),
+            export_custom_properties=bool(export_custom_properties),
+            export_uv=bool(export_uv),
+            export_normals=bool(export_normals),
+            export_tangents=bool(export_tangents),
+            export_vertex_colors=bool(export_vertex_colors),
+            export_attributes=bool(export_attributes),
+            export_materials=bool(export_materials),
+            export_images=bool(export_images),
+            export_animations=bool(export_animations),
+            export_skins=bool(export_skins),
+            export_shape_keys=bool(export_shape_keys),
+            export_shape_key_normals=bool(export_shape_key_normals),
+            export_shape_key_tangents=bool(export_shape_key_tangents),
+            export_shape_key_animations=bool(export_shape_key_animations),
             stl_export_format=stl_export_format,
             stl_scale=stl_scale,
             stl_forward_axis=stl_forward,
@@ -244,14 +282,32 @@ def export_scene(
         coordinate_conversion=coordinate_conversion,
         material_export_mode=material_export_mode,
         material_bake_size=material_bake_size,
+        export_visible=bool(export_visible),
+        export_renderable=bool(export_renderable),
+        export_cameras=bool(export_cameras),
+        export_lights=bool(export_lights),
+        export_custom_properties=bool(export_custom_properties),
+        export_uv=bool(export_uv),
+        export_normals=bool(export_normals),
+        export_tangents=bool(export_tangents),
+        export_vertex_colors=bool(export_vertex_colors),
+        export_attributes=bool(export_attributes),
+        export_materials=bool(export_materials),
+        export_images=bool(export_images),
+        export_animations=bool(export_animations),
+        export_skins=bool(export_skins),
+        export_shape_keys=bool(export_shape_keys),
+        export_shape_key_normals=bool(export_shape_key_normals),
+        export_shape_key_tangents=bool(export_shape_key_tangents),
+        export_shape_key_animations=bool(export_shape_key_animations),
         stl_export_format=stl_export_format,
         stl_scale=static_scale,
         stl_forward_axis=static_forward_axis,
         stl_up_axis=static_up_axis,
         ply_export_format=ply_export_format,
-        ply_export_normals=bool(ply_export_normals),
-        ply_export_uv=bool(ply_export_uv),
-        ply_export_color_mode=ply_color_mode,
+        ply_export_normals=bool(ply_export_normals) and bool(export_normals),
+        ply_export_uv=bool(ply_export_uv) and bool(export_uv),
+        ply_export_color_mode=ply_color_mode if export_vertex_colors else AK_PLY_EXPORT_COLOR_NONE,
         ply_export_triangulated=bool(ply_export_triangulated_mesh),
         apply_modifiers=bool(mesh_apply_modifiers),
     )
@@ -271,6 +327,24 @@ def _export_scene_once(
     coordinate_conversion: int | None,
     material_export_mode: str,
     material_bake_size: int,
+    export_visible: bool,
+    export_renderable: bool,
+    export_cameras: bool,
+    export_lights: bool,
+    export_custom_properties: bool,
+    export_uv: bool,
+    export_normals: bool,
+    export_tangents: bool,
+    export_vertex_colors: bool,
+    export_attributes: bool,
+    export_materials: bool,
+    export_images: bool,
+    export_animations: bool,
+    export_skins: bool,
+    export_shape_keys: bool,
+    export_shape_key_normals: bool,
+    export_shape_key_tangents: bool,
+    export_shape_key_animations: bool,
     stl_export_format: int,
     stl_scale: float,
     stl_forward_axis: str,
@@ -302,6 +376,24 @@ def _export_scene_once(
             mesh_cleanup=mesh_cleanup,
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
+            export_visible=export_visible,
+            export_renderable=export_renderable,
+            export_cameras=export_cameras,
+            export_lights=export_lights,
+            export_custom_properties=export_custom_properties,
+            export_uv=export_uv,
+            export_normals=export_normals,
+            export_tangents=export_tangents,
+            export_vertex_colors=export_vertex_colors,
+            export_attributes=export_attributes,
+            export_materials=export_materials,
+            export_images=export_images,
+            export_animations=export_animations,
+            export_skins=export_skins,
+            export_shape_keys=export_shape_keys,
+            export_shape_key_normals=export_shape_key_normals,
+            export_shape_key_tangents=export_shape_key_tangents,
+            export_shape_key_animations=export_shape_key_animations,
             apply_modifiers=apply_modifiers,
             ply_export_normals=bool(ply_export_normals),
             ply_export_uv=bool(ply_export_uv),
@@ -318,7 +410,7 @@ def _export_scene_once(
 
         try:
             native_started_at = time.perf_counter() if profile else 0.0
-            doc_extra = _export_document_extra(context)
+            doc_extra = _export_document_extra(context) if export_custom_properties else None
             export_coord_system = (
                 AKB_LOAD_COORD_Z_UP
                 if coordinate_system is None
@@ -390,6 +482,24 @@ def _export_stl_batch_scene(
     coordinate_conversion: int | None,
     material_export_mode: str,
     material_bake_size: int,
+    export_visible: bool,
+    export_renderable: bool,
+    export_cameras: bool,
+    export_lights: bool,
+    export_custom_properties: bool,
+    export_uv: bool,
+    export_normals: bool,
+    export_tangents: bool,
+    export_vertex_colors: bool,
+    export_attributes: bool,
+    export_materials: bool,
+    export_images: bool,
+    export_animations: bool,
+    export_skins: bool,
+    export_shape_keys: bool,
+    export_shape_key_normals: bool,
+    export_shape_key_tangents: bool,
+    export_shape_key_animations: bool,
     stl_export_format: int,
     stl_scale: float,
     stl_forward_axis: str,
@@ -421,6 +531,24 @@ def _export_stl_batch_scene(
             coordinate_conversion=coordinate_conversion,
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
+            export_visible=export_visible,
+            export_renderable=export_renderable,
+            export_cameras=export_cameras,
+            export_lights=export_lights,
+            export_custom_properties=export_custom_properties,
+            export_uv=export_uv,
+            export_normals=export_normals,
+            export_tangents=export_tangents,
+            export_vertex_colors=export_vertex_colors,
+            export_attributes=export_attributes,
+            export_materials=export_materials,
+            export_images=export_images,
+            export_animations=export_animations,
+            export_skins=export_skins,
+            export_shape_keys=export_shape_keys,
+            export_shape_key_normals=export_shape_key_normals,
+            export_shape_key_tangents=export_shape_key_tangents,
+            export_shape_key_animations=export_shape_key_animations,
             stl_export_format=stl_export_format,
             stl_scale=stl_scale,
             stl_forward_axis=stl_forward_axis,
@@ -447,7 +575,7 @@ def _assetkit_blender_authoring_tool() -> str:
 
 def _material_export_mode_id(value: str | None) -> str:
     mode = (value or "AUTO").upper()
-    if mode not in {"DIRECT", "AUTO", "BAKE"}:
+    if mode not in {"DIRECT", "AUTO", "BAKE", "NONE"}:
         return "AUTO"
     return mode
 
@@ -609,6 +737,24 @@ def _collect_scene_items(
     mesh_cleanup: list,
     material_export_mode: str,
     material_bake_size: int,
+    export_visible: bool,
+    export_renderable: bool,
+    export_cameras: bool,
+    export_lights: bool,
+    export_custom_properties: bool,
+    export_uv: bool,
+    export_normals: bool,
+    export_tangents: bool,
+    export_vertex_colors: bool,
+    export_attributes: bool,
+    export_materials: bool,
+    export_images: bool,
+    export_animations: bool,
+    export_skins: bool,
+    export_shape_keys: bool,
+    export_shape_key_normals: bool,
+    export_shape_key_tangents: bool,
+    export_shape_key_animations: bool,
     apply_modifiers: bool,
     ply_export_normals: bool,
     ply_export_uv: bool,
@@ -625,7 +771,8 @@ def _collect_scene_items(
         obj
         for obj in objects
         if not _is_assetkit_synthetic_helper_object(obj)
-        and not obj.hide_get(view_layer=context.view_layer)
+        and (not export_visible or not obj.hide_get(view_layer=context.view_layer))
+        and (not export_renderable or not bool(getattr(obj, "hide_render", False)))
     }
     if static_mesh_export:
         return _collect_static_mesh_scene_items(
@@ -642,6 +789,18 @@ def _collect_scene_items(
             mesh_cleanup,
             material_export_mode,
             material_bake_size,
+            export_uv,
+            export_normals,
+            export_tangents,
+            export_vertex_colors,
+            export_attributes,
+            export_materials,
+            export_images,
+            export_shape_keys,
+            export_shape_key_normals,
+            export_shape_key_tangents,
+            export_shape_key_animations and export_animations,
+            export_custom_properties,
             apply_modifiers,
             ply_export_normals,
             ply_export_uv,
@@ -685,10 +844,10 @@ def _collect_scene_items(
         if obj in instancing_skips:
             continue
 
-        if not static_mesh_export and obj.type == "CAMERA":
+        if not static_mesh_export and export_cameras and obj.type == "CAMERA":
             payload_kinds[obj] = AKB_EXPORT_ITEM_CAMERA
             include_export_chain(obj)
-        elif not static_mesh_export and obj.type == "LIGHT":
+        elif not static_mesh_export and export_lights and obj.type == "LIGHT":
             payload_kinds[obj] = AKB_EXPORT_ITEM_LIGHT
             include_export_chain(obj)
         elif file_type == AK_FILE_TYPE_DAE and _can_export_native_curve(obj):
@@ -699,7 +858,7 @@ def _collect_scene_items(
             include_export_chain(obj)
             armature = (
                 _mesh_armature_object(obj)
-                if not static_mesh_export and obj.type == "MESH"
+                if export_skins and not static_mesh_export and obj.type == "MESH"
                 else None
             )
             if armature is not None:
@@ -755,7 +914,7 @@ def _collect_scene_items(
 
     animation_payloads = (
         {}
-        if static_mesh_export
+        if static_mesh_export or not export_animations
         else _collect_transform_animations(context, included)
     )
 
@@ -767,7 +926,7 @@ def _collect_scene_items(
 
     bone_animation_payloads = (
         {}
-        if static_mesh_export
+        if static_mesh_export or not export_animations
         else _collect_bone_animations(context, needed_armatures)
     )
 
@@ -825,7 +984,7 @@ def _collect_scene_items(
             None,
             animation_payloads.get(obj),
             _assetkit_instancing_payload(obj, parent, world_matrices, instancing_groups),
-            _assetkit_json_prop(obj, "assetkit_node_extra_json"),
+            _assetkit_json_prop(obj, "assetkit_node_extra_json") if export_custom_properties else None,
             _object_visible_for_export(obj),
         ])
         if obj.type == "ARMATURE" and obj in needed_armatures:
@@ -883,6 +1042,18 @@ def _collect_scene_items(
                     material_export_mode,
                     material_bake_size,
                     skin_setup=skin_setup,
+                    export_uv=export_uv,
+                    export_normals=export_normals,
+                    export_tangents=export_tangents,
+                    export_vertex_colors=export_vertex_colors,
+                    export_attributes=export_attributes,
+                    export_materials=export_materials,
+                    export_images=export_images,
+                    export_shape_keys=export_shape_keys,
+                    export_shape_key_normals=export_shape_key_normals,
+                    export_shape_key_tangents=export_shape_key_tangents,
+                    export_shape_key_animations=export_shape_key_animations and export_animations,
+                    export_custom_properties=export_custom_properties,
                     ply_export_normals=ply_export_normals,
                     ply_export_uv=ply_export_uv,
                     ply_export_colors=ply_export_colors,
@@ -917,6 +1088,18 @@ def _collect_scene_items(
                         material_export_mode,
                         material_bake_size,
                         skin_setup=None,
+                        export_uv=export_uv,
+                        export_normals=export_normals,
+                        export_tangents=export_tangents,
+                        export_vertex_colors=export_vertex_colors,
+                        export_attributes=export_attributes,
+                        export_materials=export_materials,
+                        export_images=export_images,
+                        export_shape_keys=export_shape_keys,
+                        export_shape_key_normals=export_shape_key_normals,
+                        export_shape_key_tangents=export_shape_key_tangents,
+                        export_shape_key_animations=export_shape_key_animations and export_animations,
+                        export_custom_properties=export_custom_properties,
                         ply_export_normals=ply_export_normals,
                         ply_export_uv=ply_export_uv,
                         ply_export_colors=ply_export_colors,
@@ -945,6 +1128,18 @@ def _collect_scene_items(
                             material_export_mode,
                             material_bake_size,
                             skin_setup=None,
+                            export_uv=export_uv,
+                            export_normals=export_normals,
+                            export_tangents=export_tangents,
+                            export_vertex_colors=export_vertex_colors,
+                            export_attributes=export_attributes,
+                            export_materials=export_materials,
+                            export_images=export_images,
+                            export_shape_keys=export_shape_keys,
+                            export_shape_key_normals=export_shape_key_normals,
+                            export_shape_key_tangents=export_shape_key_tangents,
+                            export_shape_key_animations=export_shape_key_animations and export_animations,
+                            export_custom_properties=export_custom_properties,
                             ply_export_normals=ply_export_normals,
                             ply_export_uv=ply_export_uv,
                             ply_export_colors=ply_export_colors,
@@ -988,6 +1183,18 @@ def _collect_static_mesh_scene_items(
     mesh_cleanup: list,
     material_export_mode: str,
     material_bake_size: int,
+    export_uv: bool,
+    export_normals: bool,
+    export_tangents: bool,
+    export_vertex_colors: bool,
+    export_attributes: bool,
+    export_materials: bool,
+    export_images: bool,
+    export_shape_keys: bool,
+    export_shape_key_normals: bool,
+    export_shape_key_tangents: bool,
+    export_shape_key_animations: bool,
+    export_custom_properties: bool,
     apply_modifiers: bool,
     ply_export_normals: bool,
     ply_export_uv: bool,
@@ -1053,6 +1260,18 @@ def _collect_static_mesh_scene_items(
                     material_export_mode,
                     material_bake_size,
                     skin_setup=None,
+                    export_uv=export_uv,
+                    export_normals=export_normals,
+                    export_tangents=export_tangents,
+                    export_vertex_colors=export_vertex_colors,
+                    export_attributes=export_attributes,
+                    export_materials=export_materials,
+                    export_images=export_images,
+                    export_shape_keys=export_shape_keys,
+                    export_shape_key_normals=export_shape_key_normals,
+                    export_shape_key_tangents=export_shape_key_tangents,
+                    export_shape_key_animations=export_shape_key_animations,
+                    export_custom_properties=export_custom_properties,
                     ply_export_normals=ply_export_normals,
                     ply_export_uv=ply_export_uv,
                     ply_export_colors=ply_export_colors,
@@ -1249,7 +1468,7 @@ def _static_mesh_requires_evaluated_mesh(obj: bpy.types.Object, apply_modifiers:
 
 
 def _mesh_material_bake_required(obj: bpy.types.Object, material_export_mode: str) -> bool:
-    if material_export_mode == "DIRECT":
+    if material_export_mode in {"DIRECT", "NONE"}:
         return False
     mesh = obj.data if obj.type == "MESH" else None
     if mesh is None:
@@ -2354,6 +2573,18 @@ def _mesh_payload(
     material_bake_size: int,
     *,
     skin_setup: tuple | None = None,
+    export_uv: bool = True,
+    export_normals: bool = True,
+    export_tangents: bool = True,
+    export_vertex_colors: bool = True,
+    export_attributes: bool = True,
+    export_materials: bool = True,
+    export_images: bool = True,
+    export_shape_keys: bool = True,
+    export_shape_key_normals: bool = True,
+    export_shape_key_tangents: bool = True,
+    export_shape_key_animations: bool = True,
+    export_custom_properties: bool = True,
     ply_export_normals: bool = False,
     ply_export_uv: bool = True,
     ply_export_colors: bool = True,
@@ -2364,12 +2595,13 @@ def _mesh_payload(
     is_stl = file_type == AK_FILE_TYPE_STL
     is_ply = file_type == AK_FILE_TYPE_PLY
     is_static_mesh = file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
-    uv_layers = [] if is_stl or (is_ply and not ply_export_uv) else _uv_layers(mesh)
-    color_layers = [] if is_stl or (is_ply and not ply_export_colors) else _color_attributes(mesh)
+    uv_layers = [] if is_stl or not export_uv or (is_ply and not ply_export_uv) else _uv_layers(mesh)
+    color_layers = [] if is_stl or not export_vertex_colors or (is_ply and not ply_export_colors) else _color_attributes(mesh)
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
 
     if is_static_mesh:
+        export_ply_normals = bool(export_normals and ply_export_normals) if is_ply else False
         native_payload = (
             _AKB_NATIVE_MESH_PAYLOAD,
             mesh,
@@ -2385,8 +2617,10 @@ def _mesh_payload(
             None,
             _mesh_primitive_type_for_export(obj, mesh),
             _mesh_primitive_mode_for_export(obj, mesh),
-            bool(ply_export_normals) if is_ply else False,
+            export_ply_normals,
             bool(ply_export_triangulated) if is_ply else True,
+            bool(export_normals),
+            bool(export_tangents and export_attributes),
         )
         native_payload_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
         if profile:
@@ -2404,11 +2638,11 @@ def _mesh_payload(
     if fps <= 0.0:
         fps = 24.0
 
-    morph_targets = _shape_key_targets(mesh, source_mesh)
-    morph_animation = _shape_key_weight_animation(
-        context,
-        source_mesh,
-        morph_targets,
+    morph_targets = _shape_key_targets(mesh, source_mesh) if export_shape_keys else []
+    morph_animation = (
+        _shape_key_weight_animation(context, source_mesh, morph_targets)
+        if export_shape_key_animations
+        else None
     )
     morph_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
@@ -2433,6 +2667,11 @@ def _mesh_payload(
         morph_animation=morph_animation,
         ply_export_normals=ply_export_normals if is_ply else True,
         ply_export_triangulated=ply_export_triangulated if file_type == AK_FILE_TYPE_PLY else True,
+        export_normals=export_normals,
+        export_tangents=export_tangents and export_attributes,
+        export_materials=export_materials,
+        export_images=export_images,
+        export_custom_properties=export_custom_properties,
     )
     native_payload_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     if profile:
@@ -2465,8 +2704,13 @@ def _native_mesh_payload(
     morph_animation: tuple | None = None,
     ply_export_normals: bool = True,
     ply_export_triangulated: bool = True,
+    export_normals: bool = True,
+    export_tangents: bool = True,
+    export_materials: bool = True,
+    export_images: bool = True,
+    export_custom_properties: bool = True,
 ):
-    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}:
+    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY} or not export_materials or material_export_mode == "NONE":
         material_payloads = ()
         variant_payload = None
     else:
@@ -2485,6 +2729,7 @@ def _native_mesh_payload(
                 file_type,
                 material_export_mode,
                 material_bake_size,
+                export_images,
             )
             for index in range(len(mesh.materials))
         )
@@ -2508,13 +2753,15 @@ def _native_mesh_payload(
         skin_payload,
         morph_payload,
         variant_payload,
-        _assetkit_json_prop(obj, "assetkit_mesh_extra_json"),
-        _assetkit_json_prop(obj, "assetkit_geometry_extra_json"),
-        _assetkit_json_prop(obj, "assetkit_primitive_extra_json"),
+        _assetkit_json_prop(obj, "assetkit_mesh_extra_json") if export_custom_properties else None,
+        _assetkit_json_prop(obj, "assetkit_geometry_extra_json") if export_custom_properties else None,
+        _assetkit_json_prop(obj, "assetkit_primitive_extra_json") if export_custom_properties else None,
         _mesh_primitive_type_for_export(obj, mesh),
         _mesh_primitive_mode_for_export(obj, mesh),
         bool(ply_export_normals),
         bool(ply_export_triangulated),
+        bool(export_normals),
+        bool(export_tangents),
     )
 
 
@@ -2591,6 +2838,7 @@ def _cached_material_tuple(
     file_type: int,
     material_export_mode: str,
     material_bake_size: int,
+    export_images: bool = True,
 ) -> tuple | None:
     if material is None:
         return None
@@ -2604,9 +2852,10 @@ def _cached_material_tuple(
             material_export_mode,
             int(material_bake_size),
             int(file_type or 0),
+            bool(export_images),
         )
     else:
-        key = (int(material.as_pointer()), uv_names, int(file_type or 0))
+        key = (int(material.as_pointer()), uv_names, int(file_type or 0), bool(export_images))
     cached = material_cache.get(key)
     if cached is not None or key in material_cache:
         return cached
@@ -2622,6 +2871,7 @@ def _cached_material_tuple(
         file_type=file_type,
         material_export_mode=material_export_mode,
         material_bake_size=material_bake_size,
+        export_images=export_images,
     )
     material_cache[key] = cached
     return cached

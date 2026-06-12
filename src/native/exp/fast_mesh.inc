@@ -969,6 +969,7 @@ static uint64_t
 akb_export_fast_vertex_hash(const float position[3],
                             uint32_t vertex_index,
                             const float normal[3],
+                            int has_normals,
                             const float tangent[4],
                             int has_tangents,
                             const float *uv,
@@ -985,7 +986,8 @@ akb_export_fast_vertex_hash(const float position[3],
   if (has_morph)
     h = akb_export_hash_bytes(h, &vertex_index, sizeof(vertex_index));
   h = akb_export_hash_bytes(h, position, sizeof(float) * 3u);
-  h = akb_export_hash_bytes(h, normal, sizeof(float) * 3u);
+  if (has_normals)
+    h = akb_export_hash_bytes(h, normal, sizeof(float) * 3u);
   if (has_tangents)
     h = akb_export_hash_bytes(h, tangent, sizeof(float) * 4u);
   h = akb_export_hash_bytes(h, uv, sizeof(float) * (size_t)uv_count * 2u);
@@ -1002,6 +1004,7 @@ akb_export_fast_vertex_eq(const AkbExportFastVertex *entry,
                           const float position[3],
                           uint32_t vertex_index,
                           const float normal[3],
+                          int has_normals,
                           const float tangent[4],
                           int has_tangents,
                           const float *uv,
@@ -1015,7 +1018,7 @@ akb_export_fast_vertex_eq(const AkbExportFastVertex *entry,
   return entry->used
          && (!has_morph || entry->vertexIndex == vertex_index)
          && memcmp(entry->position, position, sizeof(float) * 3u) == 0
-         && memcmp(entry->normal, normal, sizeof(float) * 3u) == 0
+         && (!has_normals || memcmp(entry->normal, normal, sizeof(float) * 3u) == 0)
          && (!has_tangents || memcmp(entry->tangent, tangent, sizeof(float) * 4u) == 0)
          && memcmp(entry->uv, uv, sizeof(float) * (size_t)uv_count * 2u) == 0
          && memcmp(entry->color, color, sizeof(float) * (size_t)color_count * 4u) == 0
@@ -1056,6 +1059,7 @@ akb_export_fast_group_reserve_vertices(AkbExportFastGroup *group,
                                        uint32_t uv_count,
                                        uint32_t color_count,
                                        uint32_t morph_count,
+                                       int has_normals,
                                        int has_tangents,
                                        int has_skin,
                                        size_t needed) {
@@ -1080,12 +1084,14 @@ akb_export_fast_group_reserve_vertices(AkbExportFastGroup *group,
   }
   group->positions = new_positions;
 
-  new_normals = (float *)realloc(group->normals, new_cap * 3u * sizeof(float));
-  if (!new_normals) {
-    PyErr_NoMemory();
-    return 0;
+  if (has_normals) {
+    new_normals = (float *)realloc(group->normals, new_cap * 3u * sizeof(float));
+    if (!new_normals) {
+      PyErr_NoMemory();
+      return 0;
+    }
+    group->normals = new_normals;
   }
-  group->normals = new_normals;
 
   if (has_tangents) {
     new_tangents = (float *)realloc(group->tangents, new_cap * 4u * sizeof(float));
@@ -1183,6 +1189,7 @@ akb_export_fast_group_table_reserve(AkbExportFastGroup *group,
                                     uint32_t uv_count,
                                     uint32_t color_count,
                                     uint32_t morph_count,
+                                    int has_normals,
                                     int has_tangents,
                                     int has_skin,
                                     size_t needed);
@@ -1192,6 +1199,7 @@ akb_export_fast_group_table_insert_existing(AkbExportFastGroup *group,
                                             uint32_t uv_count,
                                             uint32_t color_count,
                                             uint32_t morph_count,
+                                            int has_normals,
                                             int has_tangents,
                                             int has_skin,
                                             const AkbExportFastVertex *src) {
@@ -1202,6 +1210,7 @@ akb_export_fast_group_table_insert_existing(AkbExportFastGroup *group,
   h = akb_export_fast_vertex_hash(src->position,
                                   src->vertexIndex,
                                   src->normal,
+                                  has_normals,
                                   src->tangent,
                                   has_tangents,
                                   src->uv,
@@ -1231,6 +1240,7 @@ akb_export_fast_group_table_reserve(AkbExportFastGroup *group,
                                     uint32_t uv_count,
                                     uint32_t color_count,
                                     uint32_t morph_count,
+                                    int has_normals,
                                     int has_tangents,
                                     int has_skin,
                                     size_t needed) {
@@ -1265,6 +1275,7 @@ akb_export_fast_group_table_reserve(AkbExportFastGroup *group,
                                                        uv_count,
                                                        color_count,
                                                        morph_count,
+                                                       has_normals,
                                                        has_tangents,
                                                        has_skin,
                                                        &old_table[i])) {
@@ -1284,6 +1295,7 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
                              uint32_t uv_count,
                              uint32_t color_count,
                              uint32_t morph_count,
+                             int has_normals,
                              int has_tangents,
                              int has_skin,
                              const float *src_positions,
@@ -1309,6 +1321,7 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
                                            uv_count,
                                            color_count,
                                            morph_count,
+                                           has_normals,
                                            has_tangents,
                                            has_skin,
                                            group->tableCount + 1u))
@@ -1317,6 +1330,7 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
   h = akb_export_fast_vertex_hash(position,
                                   vertex_index,
                                   normal,
+                                  has_normals,
                                   tangent,
                                   has_tangents,
                                   uv,
@@ -1339,6 +1353,7 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
                                   position,
                                   vertex_index,
                                   normal,
+                                  has_normals,
                                   tangent,
                                   has_tangents,
                                   uv,
@@ -1363,6 +1378,7 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
                                               uv_count,
                                               color_count,
                                               morph_count,
+                                              has_normals,
                                               has_tangents,
                                               has_skin,
                                               group->vertexCount + 1u))
@@ -1370,7 +1386,8 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
 
   *out_index = (uint32_t)group->vertexCount;
   memcpy(&group->positions[group->vertexCount * 3u], position, sizeof(float) * 3u);
-  memcpy(&group->normals[group->vertexCount * 3u], normal, sizeof(float) * 3u);
+  if (has_normals)
+    memcpy(&group->normals[group->vertexCount * 3u], normal, sizeof(float) * 3u);
   if (has_tangents)
     memcpy(&group->tangents[group->vertexCount * 4u], tangent, sizeof(float) * 4u);
   if (has_skin) {
@@ -1401,7 +1418,8 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
   group->table[slot].vertexIndex = vertex_index;
   group->table[slot].outIndex = *out_index;
   memcpy(group->table[slot].position, position, sizeof(float) * 3u);
-  memcpy(group->table[slot].normal, normal, sizeof(float) * 3u);
+  if (has_normals)
+    memcpy(group->table[slot].normal, normal, sizeof(float) * 3u);
   if (has_tangents)
     memcpy(group->table[slot].tangent, tangent, sizeof(float) * 4u);
   if (has_skin) {
@@ -1653,6 +1671,7 @@ akb_export_add_native_group_primitive(AkDoc              *doc,
                                       AkbExportFastGroup *group,
                                       uint32_t            uv_count,
                                       uint32_t            color_count,
+                                      int                 has_normals,
                                       int                 has_tangents,
                                       int                 has_skin,
                                       AkMaterial         *material) {
@@ -1709,18 +1728,19 @@ akb_export_add_native_group_primitive(AkDoc              *doc,
                                    0))
     return NULL;
 
-  if (!akb_export_add_input_buffer(heap,
-                                   doc,
-                                   prim,
-                                   group->normals,
-                                   (size_t)vertex_count * 3u * sizeof(float),
-                                   vertex_count,
-                                   AK_COMPONENT_SIZE_VEC3,
-                                   AKT_FLOAT,
-                                   3,
-                                   AK_INPUT_NORMAL,
-                                   "NORMAL",
-                                   0))
+  if (has_normals
+      && !akb_export_add_input_buffer(heap,
+                                      doc,
+                                      prim,
+                                      group->normals,
+                                      (size_t)vertex_count * 3u * sizeof(float),
+                                      vertex_count,
+                                      AK_COMPONENT_SIZE_VEC3,
+                                      AKT_FLOAT,
+                                      3,
+                                      AK_INPUT_NORMAL,
+                                      "NORMAL",
+                                      0))
     return NULL;
 
   if (has_tangents && group->tangents) {
@@ -2054,6 +2074,7 @@ akb_export_add_ply_compact_poly_mesh_payload_to_node(AkDoc                      
                                         uv_count,
                                         color_count,
                                         0,
+                                        has_normals,
                                         0,
                                         0,
                                         positions,
@@ -2668,6 +2689,9 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   int is_ply_export;
   int ply_export_normals;
   int ply_export_triangulated;
+  int export_normals;
+  int export_tangents;
+  int want_normals;
   int use_ply_polygons;
   int flip_uv_v;
   int ok;
@@ -2729,6 +2753,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   has_morph = morph_obj != Py_None;
   ply_export_normals = 1;
   ply_export_triangulated = 1;
+  export_normals = 1;
+  export_tangents = 1;
   if (payload_size >= 15) {
     ply_export_normals = PyObject_IsTrue(PyTuple_GET_ITEM(payload_obj, 14));
     if (ply_export_normals < 0)
@@ -2739,6 +2765,21 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     if (ply_export_triangulated < 0)
       return 0;
   }
+  if (payload_size >= 17) {
+    export_normals = PyObject_IsTrue(PyTuple_GET_ITEM(payload_obj, 16));
+    if (export_normals < 0)
+      return 0;
+  }
+  if (payload_size >= 18) {
+    export_tangents = PyObject_IsTrue(PyTuple_GET_ITEM(payload_obj, 17));
+    if (export_tangents < 0)
+      return 0;
+  }
+  want_normals = !is_stl_export
+                 && export_normals
+                 && !(is_ply_export && !ply_export_normals);
+  if (is_ply_export)
+    export_tangents = 0;
   use_ply_polygons = is_ply_export && !ply_export_triangulated;
 
   if (!use_ply_polygons
@@ -2829,9 +2870,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   loops_obj = akb_export_attr_obj(mesh_py, "loops");
   polygons_obj = use_ply_polygons ? akb_export_attr_obj(mesh_py, "polygons") : Py_NewRef(Py_None);
   loop_tris_obj = use_ply_polygons ? Py_NewRef(Py_None) : akb_export_attr_obj(mesh_py, "loop_triangles");
-  corner_normals_obj = (is_stl_export || (is_ply_export && !ply_export_normals))
-                       ? Py_NewRef(Py_None)
-                       : akb_export_attr_obj(mesh_py, "corner_normals");
+  corner_normals_obj = want_normals ? akb_export_attr_obj(mesh_py, "corner_normals") : Py_NewRef(Py_None);
   if (!vertices_obj || !loops_obj || !polygons_obj || !loop_tris_obj || !corner_normals_obj) {
     Py_XDECREF(vertices_obj);
     Py_XDECREF(loops_obj);
@@ -2905,9 +2944,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(colors, 0, sizeof(colors));
   memset(color_domains, 0, sizeof(color_domains));
   positions_buf = akb_export_array_new("f", vertex_count * 3);
-  normals_buf = (is_stl_export || (is_ply_export && !ply_export_normals))
-                ? NULL
-                : akb_export_array_new("f", loop_count * 3);
+  normals_buf = want_normals ? akb_export_array_new("f", loop_count * 3) : NULL;
   tangents_buf = NULL;
   loop_vertices_buf = akb_export_array_new("i", loop_count);
   poly_loop_starts_buf = use_ply_polygons ? akb_export_array_new("i", polygon_count) : NULL;
@@ -2931,7 +2968,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   ok = 1;
 
   if (!positions_buf
-      || (!is_stl_export && !(is_ply_export && !ply_export_normals) && !normals_buf)
+      || (want_normals && !normals_buf)
       || !loop_vertices_buf
       || (use_ply_polygons && (!poly_loop_starts_buf || !poly_loop_totals_buf))
       || (!use_ply_polygons && !tri_loops_buf)
@@ -2941,9 +2978,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     goto done_native;
   }
   if (PyObject_GetBuffer(positions_buf, &positions_view, PyBUF_SIMPLE) < 0
-      || (!is_stl_export
-          && !(is_ply_export && !ply_export_normals)
-          && PyObject_GetBuffer(normals_buf, &normals_view, PyBUF_SIMPLE) < 0)
+      || (want_normals && PyObject_GetBuffer(normals_buf, &normals_view, PyBUF_SIMPLE) < 0)
       || PyObject_GetBuffer(loop_vertices_buf, &loop_vertices_view, PyBUF_SIMPLE) < 0
       || (use_ply_polygons
           && (PyObject_GetBuffer(poly_loop_starts_buf, &poly_loop_starts_view, PyBUF_SIMPLE) < 0
@@ -2955,9 +2990,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   }
 
   positions = (float *)positions_view.buf;
-  normals = (is_stl_export || (is_ply_export && !ply_export_normals))
-            ? NULL
-            : (float *)normals_view.buf;
+  normals = want_normals ? (float *)normals_view.buf : NULL;
   tangents = NULL;
   loop_vertices = (int32_t *)loop_vertices_view.buf;
   poly_loop_starts = use_ply_polygons ? (int32_t *)poly_loop_starts_view.buf : NULL;
@@ -2965,7 +2998,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   tri_loops = use_ply_polygons ? NULL : (int32_t *)tri_loops_view.buf;
   tri_materials = NULL;
   if (!positions
-      || (!is_stl_export && !(is_ply_export && !ply_export_normals) && !normals)
+      || (want_normals && !normals)
       || !loop_vertices
       || (use_ply_polygons && (!poly_loop_starts || !poly_loop_totals))
       || (!use_ply_polygons && !tri_loops)) {
@@ -3111,7 +3144,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     goto done_native;
   }
 
-  if (!(is_ply_export && !ply_export_normals)) {
+  if (want_normals) {
     ok = akb_export_foreach_get_buffer(corner_normals_obj, "vector", normals_buf, "f");
     if (!ok)
       goto done_native;
@@ -3171,7 +3204,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                                                               poly_loop_totals,
                                                               polygon_count,
                                                               normals,
-                                                              ply_export_normals,
+                                                              want_normals,
                                                               uvs,
                                                               uv_count,
                                                               colors,
@@ -3188,6 +3221,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       && !has_skin
       && !has_morph
       && color_count == 0
+      && want_normals
       && uv_count <= 1u) {
     int compact_material_index;
 
@@ -3241,14 +3275,18 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       goto done_native;
     }
 
-    if (!akb_export_fast_read_tangents(mesh_py,
-                                       loop_count,
-                                       &tangents_buf,
-                                       &tangents_view,
-                                       &tangents,
-                                       &has_tangents)) {
-      ok = 0;
-      goto done_native;
+    if (!export_tangents) {
+      has_tangents = 0;
+    } else {
+      if (!akb_export_fast_read_tangents(mesh_py,
+                                         loop_count,
+                                         &tangents_buf,
+                                         &tangents_view,
+                                         &tangents,
+                                         &has_tangents)) {
+        ok = 0;
+        goto done_native;
+      }
     }
   }
 
@@ -3354,6 +3392,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                                         uv_count,
                                         color_count,
                                         morph_count,
+                                        want_normals,
                                         has_tangents,
                                         has_skin,
                                         positions,
@@ -3445,6 +3484,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                                                  group,
                                                  uv_count,
                                                  color_count,
+                                                 want_normals,
                                                  has_tangents,
                                                  has_skin,
                                                  material);

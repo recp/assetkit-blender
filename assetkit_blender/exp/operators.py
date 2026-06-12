@@ -36,6 +36,10 @@ _FORMAT_BY_SUFFIX = {
 
 _MESH_TRANSFORM_FORMATS = {"OBJ", "STL", "PLY"}
 _APPLY_MODIFIER_FORMATS = {"GLTF", "GLB", "DAE", "OBJ", "STL", "PLY"}
+_SCENE_DATA_FORMATS = {"GLTF", "GLB", "DAE"}
+_MATERIAL_FORMATS = {"GLTF", "GLB", "DAE", "OBJ"}
+_MESH_DATA_FORMATS = {"GLTF", "GLB", "DAE", "OBJ", "PLY"}
+_ANIMATION_FORMATS = {"GLTF", "GLB", "DAE"}
 
 _FORWARD_AXIS_ITEMS = (
     ("X", "X", "Use +X as forward"),
@@ -57,11 +61,48 @@ _UP_AXIS_ITEMS = (
 
 
 def _format_default_apply_modifiers(export_format: str) -> bool:
-    return export_format in _MESH_TRANSFORM_FORMATS
+    return export_format in _APPLY_MODIFIER_FORMATS
 
 
 def _on_export_format_changed(self, _context) -> None:
     self.apply_modifiers = _format_default_apply_modifiers(self.export_format)
+
+
+def _draw_panel(layout, panel_id: str, title: str, *, default_closed: bool = True):
+    panel = getattr(layout, "panel", None)
+    if panel is None:
+        box = layout.box()
+        box.label(text=title)
+        return box
+
+    header, body = panel(panel_id, default_closed=default_closed)
+    header.label(text=title)
+    return body
+
+
+def _draw_toggle_panel(
+    layout,
+    operator,
+    panel_id: str,
+    prop_name: str,
+    title: str,
+    *,
+    default_closed: bool = True,
+):
+    panel = getattr(layout, "panel", None)
+    if panel is None:
+        box = layout.box()
+        box.prop(operator, prop_name)
+        box.active = bool(getattr(operator, prop_name))
+        return box
+
+    header, body = panel(panel_id, default_closed=default_closed)
+    header.use_property_split = False
+    header.prop(operator, prop_name, text="")
+    header.label(text=title)
+    if body:
+        body.active = bool(getattr(operator, prop_name))
+    return body
 
 
 class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
@@ -97,10 +138,100 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         description="Export only selected objects",
         default=False,
     )
+    export_visible: bpy.props.BoolProperty(
+        name="Visible Objects",
+        description="Export visible objects",
+        default=True,
+    )
+    export_renderable: bpy.props.BoolProperty(
+        name="Renderable Objects",
+        description="Export renderable objects",
+        default=True,
+    )
+    export_cameras: bpy.props.BoolProperty(
+        name="Cameras",
+        description="Export cameras",
+        default=True,
+    )
+    export_lights: bpy.props.BoolProperty(
+        name="Lights",
+        description="Export lights",
+        default=True,
+    )
+    export_custom_properties: bpy.props.BoolProperty(
+        name="Custom Properties",
+        description="Export AssetKit custom property payloads",
+        default=True,
+    )
     apply_modifiers: bpy.props.BoolProperty(
         name="Apply Modifiers",
         description="Apply object modifiers before mesh export",
-        default=False,
+        default=True,
+    )
+    export_uv: bpy.props.BoolProperty(
+        name="UVs",
+        description="Export mesh UV coordinates",
+        default=True,
+    )
+    export_normals: bpy.props.BoolProperty(
+        name="Normals",
+        description="Export mesh normals",
+        default=True,
+    )
+    export_tangents: bpy.props.BoolProperty(
+        name="Tangents",
+        description="Export mesh tangents when available",
+        default=True,
+    )
+    export_vertex_colors: bpy.props.BoolProperty(
+        name="Vertex Colors",
+        description="Export mesh vertex colors",
+        default=True,
+    )
+    export_attributes: bpy.props.BoolProperty(
+        name="Attributes",
+        description="Export AssetKit-supported mesh attributes",
+        default=True,
+    )
+    export_materials: bpy.props.BoolProperty(
+        name="Materials",
+        description="Export materials",
+        default=True,
+    )
+    export_images: bpy.props.BoolProperty(
+        name="Images",
+        description="Export material image textures",
+        default=True,
+    )
+    export_animations: bpy.props.BoolProperty(
+        name="Animations",
+        description="Export transform, bone, material, and morph animations",
+        default=True,
+    )
+    export_skins: bpy.props.BoolProperty(
+        name="Skinning",
+        description="Export armature skinning data",
+        default=True,
+    )
+    export_shape_keys: bpy.props.BoolProperty(
+        name="Shape Keys",
+        description="Export shape keys as morph targets",
+        default=True,
+    )
+    export_shape_key_normals: bpy.props.BoolProperty(
+        name="Shape Key Normals",
+        description="Export shape key normals when supported",
+        default=True,
+    )
+    export_shape_key_tangents: bpy.props.BoolProperty(
+        name="Shape Key Tangents",
+        description="Export shape key tangents when supported",
+        default=True,
+    )
+    export_shape_key_animations: bpy.props.BoolProperty(
+        name="Shape Key Animations",
+        description="Export shape key weight animations",
+        default=True,
     )
     global_scale: bpy.props.FloatProperty(
         name="Scale",
@@ -278,7 +409,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
     ply_export_normals: bpy.props.BoolProperty(
         name="Normals",
         description="Export PLY normals when available",
-        default=False,
+        default=True,
     )
     ply_export_colors: bpy.props.EnumProperty(
         name="Colors",
@@ -298,52 +429,135 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
 
     def draw(self, _context):
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
         layout.prop(self, "export_format")
-        include = layout.box()
-        include.label(text="Include")
-        include.prop(self, "selected_only")
-        if self.export_format not in {"STL", "PLY"}:
-            materials = layout.box()
-            materials.label(text="Materials")
-            materials.prop(self, "material_export_mode")
-            if self.material_export_mode != "DIRECT":
-                materials.prop(self, "material_bake_size")
-        if self.export_format in _MESH_TRANSFORM_FORMATS:
-            transform = layout.box()
-            transform.label(text="Transform")
-            transform.prop(self, "apply_modifiers")
-            transform.prop(self, "global_scale")
-            transform.prop(self, "use_scene_unit")
-            transform.prop(self, "forward_axis")
-            transform.prop(self, "up_axis")
-        else:
-            if self.export_format in _APPLY_MODIFIER_FORMATS:
-                mesh = layout.box()
-                mesh.label(text="Mesh")
-                mesh.prop(self, "apply_modifiers")
-            coords = layout.box()
-            coords.label(text="Coordinates")
-            coords.prop(self, "coordinate_conversion")
-            if self.coordinate_conversion == "TRANSFORM":
-                coords.prop(self, "coordinate_system")
+
+        self._draw_format_settings(layout)
+        self._draw_coordinates_settings(layout)
+        self._draw_include_settings(layout)
+        self._draw_data_settings(layout)
+        self._draw_animation_settings(layout)
+
+    def _draw_format_settings(self, layout):
         if self.export_format == "DAE":
-            dae = layout.box()
-            dae.label(text="COLLADA")
-            dae.prop(self, "dae_version")
-            dae.prop(self, "dae_index_mode")
-        if self.export_format == "STL":
-            stl = layout.box()
-            stl.label(text="STL")
-            stl.prop(self, "stl_format")
-            stl.prop(self, "stl_batch_mode")
-        if self.export_format == "PLY":
-            ply = layout.box()
-            ply.label(text="PLY")
-            ply.prop(self, "ply_format")
-            ply.prop(self, "ply_export_uv")
-            ply.prop(self, "ply_export_normals")
-            ply.prop(self, "ply_export_colors")
-            ply.prop(self, "ply_export_triangulated_mesh")
+            dae = _draw_panel(layout, "ASSETKIT_export_collada", "COLLADA", default_closed=False)
+            if dae:
+                dae.prop(self, "dae_version")
+                dae.prop(self, "dae_index_mode")
+        elif self.export_format == "STL":
+            stl = _draw_panel(layout, "ASSETKIT_export_stl", "STL", default_closed=False)
+            if stl:
+                stl.prop(self, "stl_format")
+                stl.prop(self, "stl_batch_mode")
+        elif self.export_format == "PLY":
+            ply = _draw_panel(layout, "ASSETKIT_export_ply", "PLY", default_closed=False)
+            if ply:
+                ply.prop(self, "ply_format")
+                ply.prop(self, "ply_export_triangulated_mesh")
+
+    def _draw_coordinates_settings(self, layout):
+        if self.export_format in _MESH_TRANSFORM_FORMATS:
+            transform = _draw_panel(layout, "ASSETKIT_export_coordinates", "Coordinates", default_closed=False)
+            if transform:
+                transform.prop(self, "apply_modifiers")
+                transform.prop(self, "global_scale")
+                transform.prop(self, "use_scene_unit")
+                transform.prop(self, "forward_axis")
+                transform.prop(self, "up_axis")
+        else:
+            coords = _draw_panel(layout, "ASSETKIT_export_coordinates", "Coordinates", default_closed=False)
+            if coords:
+                coords.prop(self, "coordinate_conversion")
+                if self.coordinate_conversion == "TRANSFORM":
+                    coords.prop(self, "coordinate_system")
+                if self.export_format in _APPLY_MODIFIER_FORMATS:
+                    coords.prop(self, "apply_modifiers")
+
+    def _draw_include_settings(self, layout):
+        include = _draw_panel(layout, "ASSETKIT_export_include", "Include", default_closed=True)
+        if not include:
+            return
+
+        limit = include.column(heading="Limit to", align=True)
+        limit.prop(self, "selected_only")
+        limit.prop(self, "export_visible")
+        limit.prop(self, "export_renderable")
+        if self.export_format in _SCENE_DATA_FORMATS:
+            data = include.column(heading="Scene Data", align=True)
+            data.prop(self, "export_cameras")
+            data.prop(self, "export_lights")
+            data.prop(self, "export_custom_properties")
+
+    def _draw_data_settings(self, layout):
+        has_mesh_settings = self.export_format in _MESH_DATA_FORMATS
+        has_material_settings = self.export_format not in {"STL", "PLY"}
+        has_shape_key_settings = self.export_format in _ANIMATION_FORMATS
+        if not has_mesh_settings and not has_material_settings and not has_shape_key_settings:
+            return
+
+        data = _draw_panel(layout, "ASSETKIT_export_data", "Data", default_closed=True)
+        if not data:
+            return
+
+        if has_mesh_settings:
+            mesh = _draw_panel(data, "ASSETKIT_export_data_mesh", "Mesh", default_closed=True)
+            if mesh:
+                mesh.prop(self, "export_uv")
+                mesh.prop(self, "export_normals")
+                if self.export_format != "PLY":
+                    tangent = mesh.column()
+                    tangent.active = self.export_normals
+                    tangent.prop(self, "export_tangents")
+                mesh.prop(self, "export_vertex_colors")
+                mesh.prop(self, "export_attributes")
+
+        if has_material_settings:
+            materials = _draw_toggle_panel(
+                data,
+                self,
+                "ASSETKIT_export_data_materials",
+                "export_materials",
+                "Materials",
+                default_closed=True,
+            )
+            if materials:
+                materials.prop(self, "export_images")
+                materials.prop(self, "material_export_mode")
+                if self.material_export_mode != "DIRECT":
+                    materials.prop(self, "material_bake_size")
+
+        if has_shape_key_settings:
+            skinning = _draw_panel(data, "ASSETKIT_export_data_skinning", "Skinning", default_closed=True)
+            if skinning:
+                skinning.prop(self, "export_skins")
+
+            shape_keys = _draw_toggle_panel(
+                data,
+                self,
+                "ASSETKIT_export_data_shape_keys",
+                "export_shape_keys",
+                "Shape Keys",
+                default_closed=True,
+            )
+            if shape_keys:
+                shape_keys.prop(self, "export_shape_key_normals")
+                tangent = shape_keys.column()
+                tangent.active = self.export_shape_key_normals
+                tangent.prop(self, "export_shape_key_tangents")
+
+    def _draw_animation_settings(self, layout):
+        if self.export_format in _ANIMATION_FORMATS:
+            animation = _draw_toggle_panel(
+                layout,
+                self,
+                "ASSETKIT_export_animation",
+                "export_animations",
+                "Animation",
+                default_closed=True,
+            )
+            if animation and self.export_shape_keys:
+                animation.prop(self, "export_shape_key_animations")
 
     def check(self, _context):
         path_changed = self.filepath != self.assetkit_last_filepath
@@ -408,6 +622,32 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 coordinate_conversion=_coord_conversion_id(coord_conversion),
                 material_export_mode=self.material_export_mode,
                 material_bake_size=int(self.material_bake_size),
+                export_visible=self.export_visible,
+                export_renderable=self.export_renderable,
+                export_cameras=self.export_cameras if self.export_format in _SCENE_DATA_FORMATS else True,
+                export_lights=self.export_lights if self.export_format in _SCENE_DATA_FORMATS else True,
+                export_custom_properties=(
+                    self.export_custom_properties if self.export_format in _SCENE_DATA_FORMATS else True
+                ),
+                export_uv=self.export_uv if self.export_format in _MESH_DATA_FORMATS else True,
+                export_normals=self.export_normals if self.export_format in _MESH_DATA_FORMATS else True,
+                export_tangents=self.export_tangents if self.export_format in _MESH_DATA_FORMATS else True,
+                export_vertex_colors=self.export_vertex_colors if self.export_format in _MESH_DATA_FORMATS else True,
+                export_attributes=self.export_attributes if self.export_format in _MESH_DATA_FORMATS else True,
+                export_materials=self.export_materials if self.export_format in _MATERIAL_FORMATS else True,
+                export_images=self.export_images if self.export_format in _MATERIAL_FORMATS else True,
+                export_animations=self.export_animations if self.export_format in _ANIMATION_FORMATS else True,
+                export_skins=self.export_skins if self.export_format in _ANIMATION_FORMATS else True,
+                export_shape_keys=self.export_shape_keys if self.export_format in _ANIMATION_FORMATS else True,
+                export_shape_key_normals=(
+                    self.export_shape_key_normals if self.export_format in _ANIMATION_FORMATS else True
+                ),
+                export_shape_key_tangents=(
+                    self.export_shape_key_tangents if self.export_format in _ANIMATION_FORMATS else True
+                ),
+                export_shape_key_animations=(
+                    self.export_shape_key_animations if self.export_format in _ANIMATION_FORMATS else True
+                ),
                 apply_modifiers=self.apply_modifiers if use_apply_modifiers else None,
                 global_scale=self.global_scale if use_mesh_transform else None,
                 use_scene_unit=self.use_scene_unit if use_mesh_transform else None,
@@ -426,9 +666,11 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 ply_use_scene_unit=self.ply_use_scene_unit,
                 ply_forward_axis=self.ply_forward_axis,
                 ply_up_axis=self.ply_up_axis,
-                ply_export_uv=self.ply_export_uv,
-                ply_export_normals=self.ply_export_normals,
-                ply_export_colors=self.ply_export_colors,
+                ply_export_uv=self.export_uv if self.export_format == "PLY" else self.ply_export_uv,
+                ply_export_normals=self.export_normals if self.export_format == "PLY" else self.ply_export_normals,
+                ply_export_colors=(
+                    "SRGB" if self.export_format == "PLY" and self.export_vertex_colors else self.ply_export_colors
+                ),
                 ply_export_triangulated_mesh=self.ply_export_triangulated_mesh,
             )
         except AssetKitError as exc:

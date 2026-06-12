@@ -85,6 +85,7 @@ def _material_tuple(
     file_type: int = 0,
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
+    export_images: bool = True,
 ) -> tuple | None:
     if material is None:
         return None
@@ -93,6 +94,8 @@ def _material_tuple(
     metallic = 0.0
     roughness = 1.0
     alpha = base_color[3] if len(base_color) > 3 else 1.0
+    base_color_image = None
+    base_color_channel = 0
     base_color_texture = None
     base_color_slot = 0
     base_color_info = None
@@ -134,6 +137,8 @@ def _material_tuple(
     occlusion_info = None
     occlusion_strength = 1.0
     emissive_color = [0.0, 0.0, 0.0, 1.0]
+    emissive_image = None
+    emissive_channel = 0
     emissive_texture = None
     emissive_slot = 0
     emissive_info = None
@@ -150,6 +155,7 @@ def _material_tuple(
         and obj is not None
         and mesh is not None
         and material_index >= 0
+        and export_images
         and _material_bake_required(material, material_export_mode)
     ):
         baked_visual_only = not _material_surface_extractable(material)
@@ -168,62 +174,63 @@ def _material_tuple(
         bsdf = _principled_bsdf(material)
         unlit_emission = _unlit_emission_node(material)
         if bsdf is not None:
-            base_color_image, base_color_channel, base_color_slot, base_color_info = _linked_texture_info(
-                bsdf.inputs.get("Base Color"),
-                uv_slot_by_name,
-            )
-            alpha_image, alpha_channel, alpha_slot, alpha_info = _linked_texture_info(
-                bsdf.inputs.get("Alpha"),
-                uv_slot_by_name,
-            )
-            metallic_image, metallic_channel, metallic_slot, metallic_info = _linked_texture_info(
-                bsdf.inputs.get("Metallic"),
-                uv_slot_by_name,
-            )
-            roughness_image, roughness_channel, roughness_slot, roughness_info = _linked_texture_info(
-                bsdf.inputs.get("Roughness"),
-                uv_slot_by_name,
-            )
-            emissive_image, emissive_channel, emissive_slot, emissive_info = _linked_texture_info(
-                bsdf.inputs.get("Emission Color"),
-                uv_slot_by_name,
-            )
-            if alpha_image is not None and (alpha_image != base_color_image or opacity_inverted):
-                base_color_texture = image_store.base_color_alpha_path(
-                    base_color_image,
-                    base_color_channel,
-                    alpha_image,
-                    alpha_channel,
-                    material.name,
-                    opacity_inverted,
+            if export_images:
+                base_color_image, base_color_channel, base_color_slot, base_color_info = _linked_texture_info(
+                    bsdf.inputs.get("Base Color"),
+                    uv_slot_by_name,
                 )
-                opacity_baked = True
-                base_color_info = base_color_info or alpha_info
-            elif base_color_image is not None:
-                if base_color_channel != 0:
-                    base_color_texture = image_store.rgb_channel_path(
+                alpha_image, alpha_channel, alpha_slot, alpha_info = _linked_texture_info(
+                    bsdf.inputs.get("Alpha"),
+                    uv_slot_by_name,
+                )
+                metallic_image, metallic_channel, metallic_slot, metallic_info = _linked_texture_info(
+                    bsdf.inputs.get("Metallic"),
+                    uv_slot_by_name,
+                )
+                roughness_image, roughness_channel, roughness_slot, roughness_info = _linked_texture_info(
+                    bsdf.inputs.get("Roughness"),
+                    uv_slot_by_name,
+                )
+                emissive_image, emissive_channel, emissive_slot, emissive_info = _linked_texture_info(
+                    bsdf.inputs.get("Emission Color"),
+                    uv_slot_by_name,
+                )
+                if alpha_image is not None and (alpha_image != base_color_image or opacity_inverted):
+                    base_color_texture = image_store.base_color_alpha_path(
                         base_color_image,
                         base_color_channel,
-                        f"{material.name}_baseColor",
+                        alpha_image,
+                        alpha_channel,
+                        material.name,
+                        opacity_inverted,
                     )
-                else:
-                    base_color_texture = image_store.path_for(base_color_image)
-            metallic_texture = image_store.path_for(metallic_image) if metallic_image else None
-            roughness_texture = image_store.path_for(roughness_image) if roughness_image else None
-            normal_texture, normal_slot, normal_scale, normal_info = _normal_texture_info(
-                bsdf.inputs.get("Normal"),
-                image_store,
-                uv_slot_by_name,
-            )
-            if emissive_image is not None:
-                if emissive_channel != 0:
-                    emissive_texture = image_store.rgb_channel_path(
-                        emissive_image,
-                        emissive_channel,
-                        f"{material.name}_emissive",
-                    )
-                else:
-                    emissive_texture = image_store.path_for(emissive_image)
+                    opacity_baked = True
+                    base_color_info = base_color_info or alpha_info
+                elif base_color_image is not None:
+                    if base_color_channel != 0:
+                        base_color_texture = image_store.rgb_channel_path(
+                            base_color_image,
+                            base_color_channel,
+                            f"{material.name}_baseColor",
+                        )
+                    else:
+                        base_color_texture = image_store.path_for(base_color_image)
+                metallic_texture = image_store.path_for(metallic_image) if metallic_image else None
+                roughness_texture = image_store.path_for(roughness_image) if roughness_image else None
+                normal_texture, normal_slot, normal_scale, normal_info = _normal_texture_info(
+                    bsdf.inputs.get("Normal"),
+                    image_store,
+                    uv_slot_by_name,
+                )
+                if emissive_image is not None:
+                    if emissive_channel != 0:
+                        emissive_texture = image_store.rgb_channel_path(
+                            emissive_image,
+                            emissive_channel,
+                            f"{material.name}_emissive",
+                        )
+                    else:
+                        emissive_texture = image_store.path_for(emissive_image)
             color = _socket_default(bsdf, "Base Color")
             if color is not None:
                 base_color = [float(c) for c in color[:4]]
@@ -262,12 +269,14 @@ def _material_tuple(
                 roughness = float(roughness_value)
             elif roughness_image is not None:
                 roughness = 1.0
-            features = _material_feature_tuples(bsdf, material, image_store, uv_slot_by_name)
+            if export_images:
+                features = _material_feature_tuples(bsdf, material, image_store, uv_slot_by_name)
         elif unlit_emission is not None:
-            base_color_image, base_color_channel, base_color_slot, base_color_info = _linked_texture_info(
-                unlit_emission.inputs.get("Color"),
-                uv_slot_by_name,
-            )
+            if export_images:
+                base_color_image, base_color_channel, base_color_slot, base_color_info = _linked_texture_info(
+                    unlit_emission.inputs.get("Color"),
+                    uv_slot_by_name,
+                )
             if base_color_image is not None:
                 if base_color_channel != 0:
                     base_color_texture = image_store.rgb_channel_path(
@@ -291,20 +300,21 @@ def _material_tuple(
 
         occlusion_socket = _material_input_socket(material, "Occlusion")
         if occlusion_socket is not None:
-            occlusion_image, occlusion_channel, occlusion_slot, occlusion_info = _linked_texture_info(
-                occlusion_socket,
-                uv_slot_by_name,
-            )
-            if occlusion_image is not None:
-                if occlusion_channel == 0:
-                    occlusion_texture = image_store.path_for(occlusion_image)
-                else:
-                    occlusion_texture = image_store.channel_path(
-                        occlusion_image,
-                        occlusion_channel,
-                        0,
-                        f"{material.name}_occlusion",
-                    )
+            if export_images:
+                occlusion_image, occlusion_channel, occlusion_slot, occlusion_info = _linked_texture_info(
+                    occlusion_socket,
+                    uv_slot_by_name,
+                )
+                if occlusion_image is not None:
+                    if occlusion_channel == 0:
+                        occlusion_texture = image_store.path_for(occlusion_image)
+                    else:
+                        occlusion_texture = image_store.channel_path(
+                            occlusion_image,
+                            occlusion_channel,
+                            0,
+                            f"{material.name}_occlusion",
+                        )
             value = getattr(occlusion_socket, "default_value", None)
             if value is not None and not occlusion_socket.is_linked:
                 occlusion_strength = _clamp01(float(value))
@@ -524,7 +534,7 @@ def _material_type(material: bpy.types.Material, bsdf, unlit_emission) -> int:
 
 def _material_bake_required(material: bpy.types.Material | None, material_export_mode: str) -> bool:
     mode = (material_export_mode or "AUTO").upper()
-    if mode == "DIRECT":
+    if mode in {"DIRECT", "NONE"}:
         return False
     if material is None or not material.use_nodes or not material.node_tree:
         return False
