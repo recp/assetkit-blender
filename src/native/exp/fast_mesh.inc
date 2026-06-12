@@ -482,6 +482,40 @@ akb_export_obj_single_material_index(const int32_t *tri_materials,
 }
 
 static int
+akb_export_read_tri_materials(PyObject  *loop_tris_obj,
+                              Py_ssize_t tri_count,
+                              PyObject **buf_out,
+                              Py_buffer *view_out,
+                              int32_t  **tri_materials_out) {
+  PyObject *buf;
+
+  if (!loop_tris_obj || tri_count <= 0 || !buf_out || !view_out
+      || !tri_materials_out)
+    return 0;
+  if (*tri_materials_out)
+    return 1;
+
+  buf = akb_export_array_new("i", tri_count);
+  if (!buf)
+    return 0;
+  if (PyObject_GetBuffer(buf, view_out, PyBUF_SIMPLE) < 0) {
+    Py_DECREF(buf);
+    return 0;
+  }
+  if (!view_out->buf
+      || !akb_export_foreach_get_buffer(loop_tris_obj, "material_index", buf, "i")) {
+    PyBuffer_Release(view_out);
+    memset(view_out, 0, sizeof(*view_out));
+    Py_DECREF(buf);
+    return 0;
+  }
+
+  *buf_out = buf;
+  *tri_materials_out = (int32_t *)view_out->buf;
+  return 1;
+}
+
+static int
 akb_export_add_obj_compact_tri_mesh_payload_to_node(AkDoc       *doc,
                                                     AkNode      *node,
                                                     const char  *name,
@@ -490,11 +524,11 @@ akb_export_add_obj_compact_tri_mesh_payload_to_node(AkDoc       *doc,
                                                     const float *normals,
                                                     const int32_t *loop_vertices,
                                                     const int32_t *tri_loops,
-                                                    const int32_t *tri_materials,
                                                     Py_ssize_t   loop_count,
                                                     Py_ssize_t   tri_count,
                                                     const float *uvs,
                                                     uint32_t     uv_count,
+                                                    int          material_index,
                                                     PyObject    *materials_seq,
                                                     PyObject    *variants_obj,
                                                     PyObject    *mesh_extra_obj,
@@ -517,21 +551,18 @@ akb_export_add_obj_compact_tri_mesh_payload_to_node(AkDoc       *doc,
   uint32_t         uv_offset;
   uint32_t         norm_offset;
   uint32_t         max_index;
-  int              material_index;
   int              ok;
 
   if (!doc || !node || !positions || !normals || !loop_vertices || !tri_loops
-      || !tri_materials || !materials_seq || vertex_count <= 0
+      || !materials_seq || vertex_count <= 0
       || loop_count <= 0 || tri_count <= 0 || uv_count > 1u)
     return 0;
   if (vertex_count > UINT32_MAX || tri_count > UINT32_MAX) {
     PyErr_SetString(PyExc_OverflowError, "OBJ mesh is too large");
     return 0;
   }
-  if (!akb_export_obj_single_material_index(tri_materials,
-                                            tri_count,
-                                            PySequence_Fast_GET_SIZE(materials_seq),
-                                            &material_index))
+  if (material_index < -1
+      || material_index >= PySequence_Fast_GET_SIZE(materials_seq))
     return 0;
 
   memset(&uv_table, 0, sizeof(uv_table));
@@ -548,6 +579,16 @@ akb_export_add_obj_compact_tri_mesh_payload_to_node(AkDoc       *doc,
   raw_indices = (uint32_t *)malloc(raw_count * sizeof(*raw_indices));
   if (!raw_indices) {
     PyErr_NoMemory();
+    return 0;
+  }
+  if ((uv_count
+       && (!akb_export_obj_vec_table_reserve(&uv_table, (size_t)loop_count)
+           || !akb_export_obj_vec_reserve_values(&uv_table, (size_t)loop_count)))
+      || !akb_export_obj_vec_table_reserve(&norm_table, (size_t)loop_count)
+      || !akb_export_obj_vec_reserve_values(&norm_table, (size_t)loop_count)) {
+    free(raw_indices);
+    akb_export_obj_vec_table_free(&uv_table);
+    akb_export_obj_vec_table_free(&norm_table);
     return 0;
   }
 
@@ -2334,7 +2375,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   tangents_buf = NULL;
   loop_vertices_buf = akb_export_array_new("i", loop_count);
   tri_loops_buf = akb_export_array_new("i", tri_count * 3);
-  tri_materials_buf = akb_export_array_new("i", tri_count);
+  tri_materials_buf = NULL;
   morph_deltas = NULL;
   morph_bufs = NULL;
   morph_views = NULL;
@@ -2351,7 +2392,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(&morph_build, 0, sizeof(morph_build));
   ok = 1;
 
-  if (!positions_buf || !normals_buf || !loop_vertices_buf || !tri_loops_buf || !tri_materials_buf
+  if (!positions_buf || !normals_buf || !loop_vertices_buf || !tri_loops_buf
       || (has_morph && (!morph_deltas || !morph_bufs || !morph_views || !morph_data_objs))) {
     PyErr_NoMemory();
     ok = 0;
@@ -2360,8 +2401,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   if (PyObject_GetBuffer(positions_buf, &positions_view, PyBUF_SIMPLE) < 0
       || PyObject_GetBuffer(normals_buf, &normals_view, PyBUF_SIMPLE) < 0
       || PyObject_GetBuffer(loop_vertices_buf, &loop_vertices_view, PyBUF_SIMPLE) < 0
-      || PyObject_GetBuffer(tri_loops_buf, &tri_loops_view, PyBUF_SIMPLE) < 0
-      || PyObject_GetBuffer(tri_materials_buf, &tri_materials_view, PyBUF_SIMPLE) < 0) {
+      || PyObject_GetBuffer(tri_loops_buf, &tri_loops_view, PyBUF_SIMPLE) < 0) {
     ok = 0;
     goto done_native;
   }
@@ -2371,8 +2411,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   tangents = NULL;
   loop_vertices = (int32_t *)loop_vertices_view.buf;
   tri_loops = (int32_t *)tri_loops_view.buf;
-  tri_materials = (int32_t *)tri_materials_view.buf;
-  if (!positions || !normals || !loop_vertices || !tri_loops || !tri_materials) {
+  tri_materials = NULL;
+  if (!positions || !normals || !loop_vertices || !tri_loops) {
     PyErr_NoMemory();
     ok = 0;
     goto done_native;
@@ -2485,7 +2525,6 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   ok = ok
        && akb_export_foreach_get_buffer(loops_obj, "vertex_index", loop_vertices_buf, "i")
        && akb_export_foreach_get_buffer(loop_tris_obj, "loops", tri_loops_buf, "i")
-       && akb_export_foreach_get_buffer(loop_tris_obj, "material_index", tri_materials_buf, "i")
        && akb_export_foreach_get_buffer(corner_normals_obj, "vector", normals_buf, "f");
   if (!ok)
     goto done_native;
@@ -2540,11 +2579,22 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       && uv_count <= 1u) {
     int compact_material_index;
 
-    if (akb_export_obj_single_material_index(tri_materials,
+    compact_material_index = -2;
+    if (material_count_py <= 1) {
+      compact_material_index = material_count_py == 1 ? 0 : -1;
+    } else if (akb_export_read_tri_materials(loop_tris_obj,
                                              tri_count,
-                                             material_count_py,
-                                             &compact_material_index)) {
-      (void)compact_material_index;
+                                             &tri_materials_buf,
+                                             &tri_materials_view,
+                                             &tri_materials)
+               && akb_export_obj_single_material_index(tri_materials,
+                                                       tri_count,
+                                                       material_count_py,
+                                                       &compact_material_index)) {
+      /* handled below */
+    }
+
+    if (compact_material_index >= -1) {
       ok = akb_export_add_obj_compact_tri_mesh_payload_to_node(doc,
                                                                node,
                                                                name,
@@ -2553,11 +2603,11 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                                                                normals,
                                                                loop_vertices,
                                                                tri_loops,
-                                                               tri_materials,
                                                                loop_count,
                                                                tri_count,
                                                                uv_count ? uvs[0] : NULL,
                                                                uv_count,
+                                                               compact_material_index,
                                                                materials_seq,
                                                                variants_obj,
                                                                mesh_extra_obj,
@@ -2565,6 +2615,15 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                                                                primitive_extra_obj);
       goto done_native;
     }
+  }
+
+  if (!akb_export_read_tri_materials(loop_tris_obj,
+                                     tri_count,
+                                     &tri_materials_buf,
+                                     &tri_materials_view,
+                                     &tri_materials)) {
+    ok = 0;
+    goto done_native;
   }
 
   if (!akb_export_fast_read_tangents(mesh_py,
