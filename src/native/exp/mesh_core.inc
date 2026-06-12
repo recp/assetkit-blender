@@ -92,21 +92,23 @@ akb_export_input(AkHeap          *heap,
 }
 
 static int
-akb_export_add_input_buffer(AkHeap          *heap,
-                            AkDoc           *doc,
-                            AkMeshPrimitive *prim,
-                            const void      *data,
-                            size_t           length,
-                            uint32_t         vertex_count,
-                            AkComponentSize  component_size,
-                            AkTypeId         component_type,
-                            uint32_t         component_count,
-                            AkInputSemantic  semantic,
-                            const char      *semantic_raw,
-                            uint32_t         set) {
+akb_export_add_input_buffer_with_offset(AkHeap          *heap,
+                                        AkDoc           *doc,
+                                        AkMeshPrimitive *prim,
+                                        const void      *data,
+                                        size_t           length,
+                                        uint32_t         vertex_count,
+                                        AkComponentSize  component_size,
+                                        AkTypeId         component_type,
+                                        uint32_t         component_count,
+                                        AkInputSemantic  semantic,
+                                        const char      *semantic_raw,
+                                        uint32_t         set,
+                                        uint32_t         index_offset) {
   AkTypeDesc *type_desc;
   AkBuffer   *buff;
   AkAccessor *acc;
+  AkInput    *input;
   size_t      required;
 
   if (!heap || !doc || !prim || !data || vertex_count == 0 || component_count == 0)
@@ -130,10 +132,40 @@ akb_export_add_input_buffer(AkHeap          *heap,
                              component_type,
                              component_count,
                              vertex_count);
-  if (!akb_export_input(heap, prim, acc, semantic, semantic_raw, set))
+  input = akb_export_input(heap, prim, acc, semantic, semantic_raw, set);
+  if (!input)
     return 0;
+  input->indexOffset = index_offset;
 
   return 1;
+}
+
+static int
+akb_export_add_input_buffer(AkHeap          *heap,
+                            AkDoc           *doc,
+                            AkMeshPrimitive *prim,
+                            const void      *data,
+                            size_t           length,
+                            uint32_t         vertex_count,
+                            AkComponentSize  component_size,
+                            AkTypeId         component_type,
+                            uint32_t         component_count,
+                            AkInputSemantic  semantic,
+                            const char      *semantic_raw,
+                            uint32_t         set) {
+  return akb_export_add_input_buffer_with_offset(heap,
+                                                 doc,
+                                                 prim,
+                                                 data,
+                                                 length,
+                                                 vertex_count,
+                                                 component_size,
+                                                 component_type,
+                                                 component_count,
+                                                 semantic,
+                                                 semantic_raw,
+                                                 set,
+                                                 0);
 }
 
 static int
@@ -589,14 +621,13 @@ akb_export_morph_add_primitive_buffers(AkDoc               *doc,
 }
 
 static AkIndexArray *
-akb_export_index_array_from_u32(AkHeap          *heap,
-                                AkMeshPrimitive *prim,
-                                const uint32_t  *src,
-                                size_t           count,
-                                uint32_t         vertex_count) {
+akb_export_index_array_from_u32_max(AkHeap          *heap,
+                                    AkMeshPrimitive *prim,
+                                    const uint32_t  *src,
+                                    size_t           count,
+                                    uint32_t         max_index) {
   AkIndexArray *indices;
   AkTypeId      component_type;
-  uint32_t      max_index;
   size_t        i;
 
   if (!heap || !prim || !src || count == 0)
@@ -604,19 +635,6 @@ akb_export_index_array_from_u32(AkHeap          *heap,
   if (count > UINT32_MAX) {
     PyErr_SetString(PyExc_OverflowError, "mesh index count is too large");
     return NULL;
-  }
-
-  max_index = 0;
-  for (i = 0; i < count; i++) {
-    uint32_t value;
-
-    value = src[i];
-    if (value >= vertex_count) {
-      PyErr_SetString(PyExc_ValueError, "mesh index references a missing vertex");
-      return NULL;
-    }
-    if (value > max_index)
-      max_index = value;
   }
 
   component_type = ak_indexComponentTypeForMax(max_index);
@@ -657,6 +675,38 @@ akb_export_index_array_from_u32(AkHeap          *heap,
   }
 
   return indices;
+}
+
+static AkIndexArray *
+akb_export_index_array_from_u32(AkHeap          *heap,
+                                AkMeshPrimitive *prim,
+                                const uint32_t  *src,
+                                size_t           count,
+                                uint32_t         vertex_count) {
+  uint32_t max_index;
+  size_t   i;
+
+  if (!heap || !prim || !src || count == 0)
+    return NULL;
+  if (count > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "mesh index count is too large");
+    return NULL;
+  }
+
+  max_index = 0;
+  for (i = 0; i < count; i++) {
+    uint32_t value;
+
+    value = src[i];
+    if (value >= vertex_count) {
+      PyErr_SetString(PyExc_ValueError, "mesh index references a missing vertex");
+      return NULL;
+    }
+    if (value > max_index)
+      max_index = value;
+  }
+
+  return akb_export_index_array_from_u32_max(heap, prim, src, count, max_index);
 }
 
 static AkIndexArray *
@@ -708,4 +758,3 @@ akb_export_indices_from_u32(AkHeap          *heap,
   }
   return akb_export_index_array_from_u32(heap, prim, src, count, vertex_count);
 }
-

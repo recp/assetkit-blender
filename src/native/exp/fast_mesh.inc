@@ -275,6 +275,493 @@ akb_export_hash_bytes(uint64_t h, const void *data, size_t len) {
   return h;
 }
 
+typedef struct AkbExportObjVecEntry {
+  uint8_t  used;
+  uint32_t index;
+  float    value[3];
+} AkbExportObjVecEntry;
+
+typedef struct AkbExportObjVecTable {
+  float                *values;
+  AkbExportObjVecEntry *table;
+  size_t                valueCount;
+  size_t                valueCap;
+  size_t                tableCap;
+  size_t                tableCount;
+  uint32_t              componentCount;
+} AkbExportObjVecTable;
+
+static void
+akb_export_obj_vec_table_free(AkbExportObjVecTable *vec) {
+  if (!vec)
+    return;
+  free(vec->values);
+  free(vec->table);
+  memset(vec, 0, sizeof(*vec));
+}
+
+static uint64_t
+akb_export_obj_vec_hash(const float *value, uint32_t component_count) {
+  return akb_export_hash_bytes(1469598103934665603ull,
+                               value,
+                               sizeof(float) * (size_t)component_count);
+}
+
+static int
+akb_export_obj_vec_reserve_values(AkbExportObjVecTable *vec, size_t needed) {
+  size_t new_cap;
+  float *new_values;
+
+  if (needed <= vec->valueCap)
+    return 1;
+  new_cap = vec->valueCap ? vec->valueCap * 2u : 256u;
+  while (new_cap < needed)
+    new_cap *= 2u;
+  if (vec->componentCount == 0
+      || new_cap > SIZE_MAX / vec->componentCount
+      || new_cap * vec->componentCount > SIZE_MAX / sizeof(float)) {
+    PyErr_SetString(PyExc_OverflowError, "OBJ attribute table is too large");
+    return 0;
+  }
+
+  new_values = (float *)realloc(vec->values,
+                                new_cap * vec->componentCount * sizeof(float));
+  if (!new_values) {
+    PyErr_NoMemory();
+    return 0;
+  }
+  vec->values = new_values;
+  vec->valueCap = new_cap;
+  return 1;
+}
+
+static int
+akb_export_obj_vec_table_insert_entry(AkbExportObjVecTable       *vec,
+                                      const AkbExportObjVecEntry *src) {
+  uint64_t h;
+  size_t   mask;
+  size_t   slot;
+
+  h = akb_export_obj_vec_hash(src->value, vec->componentCount);
+  mask = vec->tableCap - 1u;
+  slot = (size_t)h & mask;
+  for (;;) {
+    AkbExportObjVecEntry *entry;
+
+    entry = &vec->table[slot];
+    if (!entry->used) {
+      *entry = *src;
+      vec->tableCount++;
+      return 1;
+    }
+    slot = (slot + 1u) & mask;
+  }
+}
+
+static int
+akb_export_obj_vec_table_reserve(AkbExportObjVecTable *vec, size_t needed) {
+  AkbExportObjVecEntry *old_table;
+  size_t                old_cap;
+  size_t                new_cap;
+
+  if (needed > SIZE_MAX / 2u) {
+    PyErr_SetString(PyExc_OverflowError, "OBJ attribute table is too large");
+    return 0;
+  }
+  if (vec->tableCap && needed * 2u <= vec->tableCap)
+    return 1;
+
+  new_cap = vec->tableCap ? vec->tableCap * 2u : 512u;
+  while (needed * 2u > new_cap)
+    new_cap *= 2u;
+
+  old_table = vec->table;
+  old_cap = vec->tableCap;
+  vec->table = (AkbExportObjVecEntry *)calloc(new_cap, sizeof(*vec->table));
+  if (!vec->table) {
+    vec->table = old_table;
+    PyErr_NoMemory();
+    return 0;
+  }
+  vec->tableCap = new_cap;
+  vec->tableCount = 0;
+
+  if (old_table) {
+    for (size_t i = 0; i < old_cap; i++) {
+      if (old_table[i].used
+          && !akb_export_obj_vec_table_insert_entry(vec, &old_table[i])) {
+        free(old_table);
+        return 0;
+      }
+    }
+    free(old_table);
+  }
+
+  return 1;
+}
+
+static int
+akb_export_obj_vec_intern(AkbExportObjVecTable *vec,
+                          const float          *value,
+                          uint32_t             *index_out) {
+  uint64_t h;
+  size_t   mask;
+  size_t   slot;
+
+  if (!vec || !value || !index_out || vec->componentCount == 0)
+    return 0;
+  if (!akb_export_obj_vec_table_reserve(vec, vec->tableCount + 1u))
+    return 0;
+
+  h = akb_export_obj_vec_hash(value, vec->componentCount);
+  mask = vec->tableCap - 1u;
+  slot = (size_t)h & mask;
+  for (;;) {
+    AkbExportObjVecEntry *entry;
+
+    entry = &vec->table[slot];
+    if (!entry->used)
+      break;
+    if (memcmp(entry->value,
+               value,
+               sizeof(float) * (size_t)vec->componentCount) == 0) {
+      *index_out = entry->index;
+      return 1;
+    }
+    slot = (slot + 1u) & mask;
+  }
+
+  if (vec->valueCount > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "OBJ attribute table is too large");
+    return 0;
+  }
+  if (!akb_export_obj_vec_reserve_values(vec, vec->valueCount + 1u))
+    return 0;
+
+  *index_out = (uint32_t)vec->valueCount;
+  memcpy(&vec->values[vec->valueCount * vec->componentCount],
+         value,
+         sizeof(float) * (size_t)vec->componentCount);
+  vec->valueCount++;
+
+  vec->table[slot].used = 1;
+  vec->table[slot].index = *index_out;
+  memset(vec->table[slot].value, 0, sizeof(vec->table[slot].value));
+  memcpy(vec->table[slot].value,
+         value,
+         sizeof(float) * (size_t)vec->componentCount);
+  vec->tableCount++;
+  return 1;
+}
+
+static int
+akb_export_obj_single_material_index(const int32_t *tri_materials,
+                                     Py_ssize_t     tri_count,
+                                     Py_ssize_t     material_count,
+                                     int           *material_index_out) {
+  int material_index;
+
+  if (!tri_materials || tri_count <= 0 || !material_index_out)
+    return 0;
+
+  material_index = tri_materials[0] >= 0 && tri_materials[0] < material_count
+                   ? tri_materials[0]
+                   : -1;
+  for (Py_ssize_t i = 1; i < tri_count; i++) {
+    int value;
+
+    value = tri_materials[i] >= 0 && tri_materials[i] < material_count
+            ? tri_materials[i]
+            : -1;
+    if (value != material_index)
+      return 0;
+  }
+
+  *material_index_out = material_index;
+  return 1;
+}
+
+static int
+akb_export_add_obj_compact_tri_mesh_payload_to_node(AkDoc       *doc,
+                                                    AkNode      *node,
+                                                    const char  *name,
+                                                    const float *positions,
+                                                    Py_ssize_t   vertex_count,
+                                                    const float *normals,
+                                                    const int32_t *loop_vertices,
+                                                    const int32_t *tri_loops,
+                                                    const int32_t *tri_materials,
+                                                    Py_ssize_t   loop_count,
+                                                    Py_ssize_t   tri_count,
+                                                    const float *uvs,
+                                                    uint32_t     uv_count,
+                                                    PyObject    *materials_seq,
+                                                    PyObject    *variants_obj,
+                                                    PyObject    *mesh_extra_obj,
+                                                    PyObject    *geometry_extra_obj,
+                                                    PyObject    *primitive_extra_obj) {
+  AkbExportObjVecTable uv_table;
+  AkbExportObjVecTable norm_table;
+  AkHeap          *heap;
+  AkGeometry      *geom;
+  AkObject        *mesh_obj;
+  AkMesh          *mesh;
+  AkTriangles     *tri;
+  AkMeshPrimitive *prim;
+  AkMaterial      *material;
+  PyObject        *material_obj;
+  uint32_t        *raw_indices;
+  size_t           raw_count;
+  size_t           raw_i;
+  uint32_t         stride;
+  uint32_t         uv_offset;
+  uint32_t         norm_offset;
+  uint32_t         max_index;
+  int              material_index;
+  int              ok;
+
+  if (!doc || !node || !positions || !normals || !loop_vertices || !tri_loops
+      || !tri_materials || !materials_seq || vertex_count <= 0
+      || loop_count <= 0 || tri_count <= 0 || uv_count > 1u)
+    return 0;
+  if (vertex_count > UINT32_MAX || tri_count > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "OBJ mesh is too large");
+    return 0;
+  }
+  if (!akb_export_obj_single_material_index(tri_materials,
+                                            tri_count,
+                                            PySequence_Fast_GET_SIZE(materials_seq),
+                                            &material_index))
+    return 0;
+
+  memset(&uv_table, 0, sizeof(uv_table));
+  memset(&norm_table, 0, sizeof(norm_table));
+  uv_table.componentCount = 2u;
+  norm_table.componentCount = 3u;
+  raw_indices = NULL;
+  if ((size_t)tri_count > SIZE_MAX / 3u
+      || (size_t)tri_count * 3u > SIZE_MAX / (uv_count ? 3u : 2u)) {
+    PyErr_SetString(PyExc_OverflowError, "OBJ index buffer is too large");
+    return 0;
+  }
+  raw_count = (size_t)tri_count * 3u * (uv_count ? 3u : 2u);
+  raw_indices = (uint32_t *)malloc(raw_count * sizeof(*raw_indices));
+  if (!raw_indices) {
+    PyErr_NoMemory();
+    return 0;
+  }
+
+  stride = uv_count ? 3u : 2u;
+  uv_offset = uv_count ? 1u : 0u;
+  norm_offset = uv_count ? 2u : 1u;
+  max_index = 0;
+  raw_i = 0;
+  ok = 1;
+
+  for (Py_ssize_t tri_index = 0; tri_index < tri_count && ok; tri_index++) {
+    for (uint32_t corner = 0; corner < 3u; corner++) {
+      int32_t  loop_index_i;
+      int32_t  vertex_index_i;
+      uint32_t loop_index;
+      uint32_t vertex_index;
+      uint32_t norm_index;
+      float    normal[3];
+
+      loop_index_i = tri_loops[(size_t)tri_index * 3u + corner];
+      if (loop_index_i < 0 || loop_index_i >= loop_count) {
+        PyErr_SetString(PyExc_ValueError, "loop triangle references a missing mesh loop");
+        ok = 0;
+        break;
+      }
+      loop_index = (uint32_t)loop_index_i;
+      vertex_index_i = loop_vertices[loop_index];
+      if (vertex_index_i < 0 || vertex_index_i >= vertex_count) {
+        PyErr_SetString(PyExc_ValueError, "mesh loop references a missing vertex");
+        ok = 0;
+        break;
+      }
+      vertex_index = (uint32_t)vertex_index_i;
+      raw_indices[raw_i++] = vertex_index;
+      if (vertex_index > max_index)
+        max_index = vertex_index;
+
+      if (uv_count) {
+        uint32_t uv_index;
+
+        if (!akb_export_obj_vec_intern(&uv_table,
+                                       &uvs[(size_t)loop_index * 2u],
+                                       &uv_index)) {
+          ok = 0;
+          break;
+        }
+        raw_indices[raw_i++] = uv_index;
+        if (uv_index > max_index)
+          max_index = uv_index;
+      }
+
+      normal[0] = normals[(size_t)loop_index * 3u];
+      normal[1] = normals[(size_t)loop_index * 3u + 1u];
+      normal[2] = normals[(size_t)loop_index * 3u + 2u];
+      if (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]
+          <= 0.00000001f) {
+        normal[0] = 0.0f;
+        normal[1] = 0.0f;
+        normal[2] = 1.0f;
+      }
+      if (!akb_export_obj_vec_intern(&norm_table, normal, &norm_index)) {
+        ok = 0;
+        break;
+      }
+      raw_indices[raw_i++] = norm_index;
+      if (norm_index > max_index)
+        max_index = norm_index;
+    }
+  }
+
+  if (!ok)
+    goto done;
+
+  heap = ak_heap_getheap(doc);
+  if (!heap) {
+    PyErr_SetString(PyExc_RuntimeError, "AssetKit export heap is unavailable");
+    ok = 0;
+    goto done;
+  }
+
+  geom = (AkGeometry *)ak_heap_calloc(heap, doc, sizeof(*geom));
+  if (!geom) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done;
+  }
+  geom->name = name && name[0] ? name : NULL;
+  ak_setypeid(geom, AKT_GEOMETRY);
+
+  mesh_obj = ak_objAlloc(heap, geom, sizeof(*mesh), AK_GEOMETRY_MESH, true);
+  if (!mesh_obj) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done;
+  }
+  geom->gdata = mesh_obj;
+  mesh = (AkMesh *)ak_objGet(mesh_obj);
+  mesh->geom = geom;
+  mesh->name = name && name[0] ? name : NULL;
+  if (!akb_export_apply_direct_extra(doc, geom, &mesh->extra, mesh_extra_obj)
+      || !akb_export_apply_direct_extra(doc, geom, &geom->extra, geometry_extra_obj)) {
+    ok = 0;
+    goto done;
+  }
+
+  material_obj = material_index >= 0
+                 ? PySequence_Fast_GET_ITEM(materials_seq, material_index)
+                 : Py_None;
+  material = akb_export_material(doc, material_obj);
+  if (PyErr_Occurred()) {
+    ok = 0;
+    goto done;
+  }
+
+  tri = (AkTriangles *)ak_heap_calloc(heap, mesh_obj, sizeof(*tri));
+  if (!tri) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done;
+  }
+  tri->mode = AK_TRIANGLES;
+  prim = &tri->base;
+  prim->mesh = mesh;
+  prim->type = AK_PRIMITIVE_TRIANGLES;
+  prim->material = material;
+  prim->nPolygons = (uint32_t)tri_count;
+  prim->indexStride = stride;
+  prim->indices = akb_export_index_array_from_u32_max(heap,
+                                                      prim,
+                                                      raw_indices,
+                                                      raw_count,
+                                                      max_index);
+  if (!prim->indices) {
+    ok = 0;
+    goto done;
+  }
+
+  if (!akb_export_add_input_buffer_with_offset(heap,
+                                               doc,
+                                               prim,
+                                               positions,
+                                               (size_t)vertex_count * 3u * sizeof(float),
+                                               (uint32_t)vertex_count,
+                                               AK_COMPONENT_SIZE_VEC3,
+                                               AKT_FLOAT,
+                                               3,
+                                               AK_INPUT_POSITION,
+                                               "POSITION",
+                                               0,
+                                               0)) {
+    ok = 0;
+    goto done;
+  }
+
+  if (uv_count
+      && !akb_export_add_input_buffer_with_offset(heap,
+                                                  doc,
+                                                  prim,
+                                                  uv_table.values,
+                                                  uv_table.valueCount * 2u * sizeof(float),
+                                                  (uint32_t)uv_table.valueCount,
+                                                  AK_COMPONENT_SIZE_VEC2,
+                                                  AKT_FLOAT,
+                                                  2,
+                                                  AK_INPUT_TEXCOORD,
+                                                  "TEXCOORD",
+                                                  0,
+                                                  uv_offset)) {
+    ok = 0;
+    goto done;
+  }
+
+  if (!akb_export_add_input_buffer_with_offset(heap,
+                                               doc,
+                                               prim,
+                                               norm_table.values,
+                                               norm_table.valueCount * 3u * sizeof(float),
+                                               (uint32_t)norm_table.valueCount,
+                                               AK_COMPONENT_SIZE_VEC3,
+                                               AKT_FLOAT,
+                                               3,
+                                               AK_INPUT_NORMAL,
+                                               "NORMAL",
+                                               0,
+                                               norm_offset)) {
+    ok = 0;
+    goto done;
+  }
+
+  if (!akb_export_apply_direct_extra(doc, geom, &prim->extra, primitive_extra_obj)
+      || !akb_export_apply_material_variants(doc,
+                                             prim,
+                                             variants_obj,
+                                             material_index,
+                                             materials_seq)) {
+    ok = 0;
+    goto done;
+  }
+
+  mesh->primitive = prim;
+  mesh->primitiveCount = 1u;
+  AKB_LIB_APPEND(doc->lib.geometries, geom, next);
+  if (!ak_nodeAttachGeometry(node, geom))
+    ok = 0;
+  if (!ok && !PyErr_Occurred())
+    PyErr_SetString(PyExc_RuntimeError, "failed to attach OBJ mesh geometry");
+
+done:
+  free(raw_indices);
+  akb_export_obj_vec_table_free(&uv_table);
+  akb_export_obj_vec_table_free(&norm_table);
+  return ok;
+}
+
 static uint64_t
 akb_export_fast_vertex_hash(const float position[3],
                             uint32_t vertex_index,
@@ -2041,6 +2528,41 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   for (uint32_t i = 0; i < color_count; i++) {
     if (!akb_export_foreach_get_buffer(color_data_objs[i], "color", color_bufs[i], "f")) {
       ok = 0;
+      goto done_native;
+    }
+  }
+
+  if (doc->inf
+      && doc->inf->ftype == AK_FILE_TYPE_WAVEFRONT
+      && !has_skin
+      && !has_morph
+      && color_count == 0
+      && uv_count <= 1u) {
+    int compact_material_index;
+
+    if (akb_export_obj_single_material_index(tri_materials,
+                                             tri_count,
+                                             material_count_py,
+                                             &compact_material_index)) {
+      (void)compact_material_index;
+      ok = akb_export_add_obj_compact_tri_mesh_payload_to_node(doc,
+                                                               node,
+                                                               name,
+                                                               positions,
+                                                               vertex_count,
+                                                               normals,
+                                                               loop_vertices,
+                                                               tri_loops,
+                                                               tri_materials,
+                                                               loop_count,
+                                                               tri_count,
+                                                               uv_count ? uvs[0] : NULL,
+                                                               uv_count,
+                                                               materials_seq,
+                                                               variants_obj,
+                                                               mesh_extra_obj,
+                                                               geometry_extra_obj,
+                                                               primitive_extra_obj);
       goto done_native;
     }
   }
