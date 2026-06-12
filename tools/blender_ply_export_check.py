@@ -215,7 +215,7 @@ def run_checks(out_root: Path) -> None:
     no_mod_path = out_root / "modifier_off.ply"
     mod_path = out_root / "modifier_on.ply"
     export_scene(bpy.context, no_mod_path, AK_FILE_TYPE_PLY, ply_apply_modifiers=False)
-    export_scene(bpy.context, mod_path, AK_FILE_TYPE_PLY, ply_apply_modifiers=True)
+    export_scene(bpy.context, mod_path, AK_FILE_TYPE_PLY, apply_modifiers=True)
     no_mod_faces = ply_header_count(no_mod_path, "face")
     mod_faces = ply_header_count(mod_path, "face")
     assert_equal(no_mod_faces, 1, "modifier-off plane polygon")
@@ -230,9 +230,9 @@ def run_checks(out_root: Path) -> None:
         scaled_path,
         AK_FILE_TYPE_PLY,
         ply_format="ASCII",
-        ply_global_scale=2.0,
-        ply_forward_axis="X",
-        ply_up_axis="Z",
+        global_scale=2.0,
+        forward_axis="X",
+        up_axis="Z",
     )
     vertices = ascii_vertices(scaled_path)
     expected = [(0.0, 0.0, 0.0), (0.0, -2.0, 0.0), (2.0, 0.0, 0.0)]

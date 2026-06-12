@@ -477,7 +477,9 @@ akb_export_scene(PyObject *self, PyObject *args) {
 
   free(nodes);
 
-  if ((file_type_int == AK_FILE_TYPE_STL || file_type_int == AK_FILE_TYPE_PLY)
+  if ((file_type_int == AK_FILE_TYPE_STL
+       || file_type_int == AK_FILE_TYPE_PLY
+       || file_type_int == AK_FILE_TYPE_WAVEFRONT)
       && (stl_global_scale != 1.0
           || strcmp(stl_forward_axis ? stl_forward_axis : "Y", "Y") != 0
           || strcmp(stl_up_axis ? stl_up_axis : "Z", "Z") != 0)) {
@@ -486,7 +488,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
                                             stl_up_axis,
                                             stl_root_matrix)) {
       ak_free(doc);
-      PyErr_SetString(PyExc_ValueError, "invalid static mesh forward/up axis options");
+      PyErr_SetString(PyExc_ValueError, "invalid mesh forward/up axis options");
       return NULL;
     }
     ak_nodeSetTransformMatrix(doc->scene->node, stl_root_matrix);

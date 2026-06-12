@@ -138,19 +138,24 @@ def export_scene(
     coordinate_conversion: int | None = None,
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
+    apply_modifiers: bool | None = None,
+    global_scale: float | None = None,
+    use_scene_unit: bool | None = None,
+    forward_axis: str | None = None,
+    up_axis: str | None = None,
     stl_format: str = "BINARY",
     stl_batch_mode: bool = False,
-    stl_global_scale: float = 1.0,
-    stl_use_scene_unit: bool = False,
-    stl_forward_axis: str = "Y",
-    stl_up_axis: str = "Z",
-    stl_apply_modifiers: bool = True,
+    stl_global_scale: float | None = None,
+    stl_use_scene_unit: bool | None = None,
+    stl_forward_axis: str | None = None,
+    stl_up_axis: str | None = None,
+    stl_apply_modifiers: bool | None = None,
     ply_format: str = "BINARY",
-    ply_apply_modifiers: bool = True,
-    ply_global_scale: float = 1.0,
-    ply_use_scene_unit: bool = False,
-    ply_forward_axis: str = "Y",
-    ply_up_axis: str = "Z",
+    ply_apply_modifiers: bool | None = None,
+    ply_global_scale: float | None = None,
+    ply_use_scene_unit: bool | None = None,
+    ply_forward_axis: str | None = None,
+    ply_up_axis: str | None = None,
     ply_export_uv: bool = True,
     ply_export_normals: bool = False,
     ply_export_colors: str = "SRGB",
@@ -169,19 +174,33 @@ def export_scene(
         material_export_mode = "DIRECT"
     material_bake_size = _material_bake_size(material_bake_size)
     stl_export_format = _stl_export_format_id(stl_format)
+    mesh_apply_modifiers = _resolve_apply_modifiers(
+        file_type,
+        apply_modifiers,
+        stl_apply_modifiers,
+        ply_apply_modifiers,
+    )
+    stl_scale_value = _resolve_format_float(global_scale, stl_global_scale, 1.0)
+    stl_scene_unit = _resolve_format_bool(use_scene_unit, stl_use_scene_unit, False)
+    stl_forward = _resolve_format_text(forward_axis, stl_forward_axis, "Y")
+    stl_up = _resolve_format_text(up_axis, stl_up_axis, "Z")
     stl_scale = _static_mesh_effective_scale(
         context,
         file_type,
-        stl_global_scale,
-        stl_use_scene_unit,
+        stl_scale_value,
+        stl_scene_unit,
     )
     ply_export_format = _ply_export_format_id(ply_format)
     ply_color_mode = _ply_export_color_mode_id(ply_export_colors)
+    ply_scale_value = _resolve_format_float(global_scale, ply_global_scale, 1.0)
+    ply_scene_unit = _resolve_format_bool(use_scene_unit, ply_use_scene_unit, False)
+    ply_forward = _resolve_format_text(forward_axis, ply_forward_axis, "Y")
+    ply_up = _resolve_format_text(up_axis, ply_up_axis, "Z")
     ply_scale = _static_mesh_effective_scale(
         context,
         file_type,
-        ply_global_scale,
-        ply_use_scene_unit,
+        ply_scale_value,
+        ply_scene_unit,
     )
 
     if file_type == AK_FILE_TYPE_STL and stl_batch_mode:
@@ -198,24 +217,19 @@ def export_scene(
             material_bake_size=material_bake_size,
             stl_export_format=stl_export_format,
             stl_scale=stl_scale,
-            stl_forward_axis=stl_forward_axis,
-            stl_up_axis=stl_up_axis,
+            stl_forward_axis=stl_forward,
+            stl_up_axis=stl_up,
             ply_export_format=AK_PLY_EXPORT_BINARY_LITTLE,
             ply_export_normals=False,
             ply_export_uv=False,
             ply_export_color_mode=AK_PLY_EXPORT_COLOR_NONE,
             ply_export_triangulated=False,
-            apply_modifiers=bool(stl_apply_modifiers),
+            apply_modifiers=bool(mesh_apply_modifiers),
         )
 
-    static_apply_modifiers = (
-        bool(ply_apply_modifiers)
-        if file_type == AK_FILE_TYPE_PLY
-        else bool(stl_apply_modifiers)
-    )
     static_scale = ply_scale if file_type == AK_FILE_TYPE_PLY else stl_scale
-    static_forward_axis = ply_forward_axis if file_type == AK_FILE_TYPE_PLY else stl_forward_axis
-    static_up_axis = ply_up_axis if file_type == AK_FILE_TYPE_PLY else stl_up_axis
+    static_forward_axis = ply_forward if file_type == AK_FILE_TYPE_PLY else stl_forward
+    static_up_axis = ply_up if file_type == AK_FILE_TYPE_PLY else stl_up
 
     return _export_scene_once(
         module,
@@ -239,7 +253,7 @@ def export_scene(
         ply_export_uv=bool(ply_export_uv),
         ply_export_color_mode=ply_color_mode,
         ply_export_triangulated=bool(ply_export_triangulated_mesh),
-        apply_modifiers=static_apply_modifiers,
+        apply_modifiers=bool(mesh_apply_modifiers),
     )
 
 
@@ -459,13 +473,52 @@ def _ply_export_color_mode_id(value: str | None) -> int:
     return AK_PLY_EXPORT_COLOR_SRGB
 
 
+def _resolve_apply_modifiers(
+    file_type: int,
+    value: bool | None,
+    stl_value: bool | None,
+    ply_value: bool | None,
+) -> bool:
+    if value is not None:
+        return bool(value)
+    if file_type == AK_FILE_TYPE_STL and stl_value is not None:
+        return bool(stl_value)
+    if file_type == AK_FILE_TYPE_PLY and ply_value is not None:
+        return bool(ply_value)
+    return file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT}
+
+
+def _resolve_format_bool(value: bool | None, legacy_value: bool | None, default: bool) -> bool:
+    if value is not None:
+        return bool(value)
+    if legacy_value is not None:
+        return bool(legacy_value)
+    return bool(default)
+
+
+def _resolve_format_float(value: float | None, legacy_value: float | None, default: float) -> float:
+    if value is not None:
+        return value
+    if legacy_value is not None:
+        return legacy_value
+    return default
+
+
+def _resolve_format_text(value: str | None, legacy_value: str | None, default: str) -> str:
+    if value:
+        return str(value)
+    if legacy_value:
+        return str(legacy_value)
+    return default
+
+
 def _static_mesh_effective_scale(
     context: bpy.types.Context,
     file_type: int,
     global_scale: float,
     use_scene_unit: bool,
 ) -> float:
-    if file_type not in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}:
+    if file_type not in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT}:
         return 1.0
 
     try:
@@ -846,7 +899,7 @@ def _collect_scene_items(
                     )
                     else _shared_mesh_payload_key(
                         obj,
-                        ignore_modifiers=static_mesh_export and not apply_modifiers,
+                        ignore_modifiers=not apply_modifiers,
                     )
                 )
                 if shared_key is not None and shared_key in mesh_payload_cache:

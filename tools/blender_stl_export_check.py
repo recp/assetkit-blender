@@ -174,7 +174,7 @@ def run_checks(out_root: Path) -> None:
     no_mod_path = out_root / "modifier_off.stl"
     mod_path = out_root / "modifier_on.stl"
     export_scene(bpy.context, no_mod_path, AK_FILE_TYPE_STL, stl_apply_modifiers=False)
-    export_scene(bpy.context, mod_path, AK_FILE_TYPE_STL, stl_apply_modifiers=True)
+    export_scene(bpy.context, mod_path, AK_FILE_TYPE_STL, apply_modifiers=True)
     no_mod_count = binary_triangle_count(no_mod_path)
     mod_count = binary_triangle_count(mod_path)
     assert_equal(no_mod_count, 2, "modifier-off plane triangles")
@@ -188,9 +188,9 @@ def run_checks(out_root: Path) -> None:
         bpy.context,
         scaled_path,
         AK_FILE_TYPE_STL,
-        stl_global_scale=2.0,
-        stl_forward_axis="X",
-        stl_up_axis="Z",
+        global_scale=2.0,
+        forward_axis="X",
+        up_axis="Z",
     )
     vertices = first_binary_triangle_vertices(scaled_path)
     expected = [(0.0, 0.0, 0.0), (0.0, -2.0, 0.0), (2.0, 0.0, 0.0)]
