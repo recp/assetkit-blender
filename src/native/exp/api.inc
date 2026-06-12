@@ -1,3 +1,65 @@
+static int
+akb_export_axis_vector(const char *axis, float out[3]) {
+  float sign;
+  char  name;
+
+  if (!axis || !axis[0])
+    axis = "Y";
+
+  sign = 1.0f;
+  if (axis[0] == '-') {
+    sign = -1.0f;
+    axis++;
+  }
+
+  name = axis[0];
+  if ((name != 'X' && name != 'Y' && name != 'Z') || axis[1] != '\0')
+    return 0;
+
+  out[0] = 0.0f;
+  out[1] = 0.0f;
+  out[2] = 0.0f;
+  out[name == 'X' ? 0 : name == 'Y' ? 1 : 2] = sign;
+  return 1;
+}
+
+static int
+akb_export_stl_axis_matrix(float        scale,
+                           const char  *forward_axis,
+                           const char  *up_axis,
+                           float        matrix[16]) {
+  float forward[3];
+  float up[3];
+  float right[3];
+
+  if (!isfinite(scale) || scale <= 0.0f)
+    scale = 1.0f;
+
+  if (!akb_export_axis_vector(forward_axis, forward)
+      || !akb_export_axis_vector(up_axis, up))
+    return 0;
+  if ((forward[0] != 0.0f && up[0] != 0.0f)
+      || (forward[1] != 0.0f && up[1] != 0.0f)
+      || (forward[2] != 0.0f && up[2] != 0.0f))
+    return 0;
+
+  glm_vec3_cross(forward, up, right);
+  glm_mat4_identity(AKB_MAT4(matrix));
+
+  matrix[0]  = right[0] * scale;
+  matrix[1]  = right[1] * scale;
+  matrix[2]  = right[2] * scale;
+
+  matrix[4]  = forward[0] * scale;
+  matrix[5]  = forward[1] * scale;
+  matrix[6]  = forward[2] * scale;
+
+  matrix[8]  = up[0] * scale;
+  matrix[9]  = up[1] * scale;
+  matrix[10] = up[2] * scale;
+  return 1;
+}
+
 static PyObject *
 akb_export_scene(PyObject *self, PyObject *args) {
   const char *out_dir;
@@ -10,6 +72,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
   uintptr_t saved_stl_export_format;
   uintptr_t saved_authoring_tool;
   const char *authoring_tool_fragment;
+  const char *stl_forward_axis;
+  const char *stl_up_axis;
   char authoring_tool[256];
   Py_ssize_t item_count;
   Py_ssize_t i;
@@ -34,8 +98,10 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int set_dae_options;
   int set_stl_options;
   int set_authoring_tool;
+  double stl_global_scale;
   AkCoordSys *export_coord;
   uint8_t export_coord_conversion;
+  float stl_root_matrix[16];
 
   (void)self;
   memset(&geometry_cache, 0, sizeof(geometry_cache));
@@ -47,8 +113,11 @@ akb_export_scene(PyObject *self, PyObject *args) {
   export_coord_system_id = AKB_LOAD_COORD_Y_UP;
   export_coord_conversion_id = AKB_COORD_TRANSFORM;
   authoring_tool_fragment = NULL;
+  stl_global_scale = 1.0;
+  stl_forward_axis = "Y";
+  stl_up_axis = "Z";
   if (!PyArg_ParseTuple(args,
-                        "sisO|Oiiiiis",
+                        "sisO|Oiiiiisdss",
                         &out_dir,
                         &file_type_int,
                         &name,
@@ -59,7 +128,10 @@ akb_export_scene(PyObject *self, PyObject *args) {
                         &export_coord_system_id,
                         &export_coord_conversion_id,
                         &stl_export_format,
-                        &authoring_tool_fragment))
+                        &authoring_tool_fragment,
+                        &stl_global_scale,
+                        &stl_forward_axis,
+                        &stl_up_axis))
     return NULL;
   if (!PySequence_Check(items_obj)) {
     PyErr_SetString(PyExc_TypeError, "scene items must be a sequence");
@@ -383,6 +455,21 @@ akb_export_scene(PyObject *self, PyObject *args) {
   }
 
   free(nodes);
+
+  if (file_type_int == AK_FILE_TYPE_STL
+      && (stl_global_scale != 1.0
+          || strcmp(stl_forward_axis ? stl_forward_axis : "Y", "Y") != 0
+          || strcmp(stl_up_axis ? stl_up_axis : "Z", "Z") != 0)) {
+    if (!akb_export_stl_axis_matrix((float)stl_global_scale,
+                                    stl_forward_axis,
+                                    stl_up_axis,
+                                    stl_root_matrix)) {
+      ak_free(doc);
+      PyErr_SetString(PyExc_ValueError, "invalid STL forward/up axis options");
+      return NULL;
+    }
+    ak_nodeSetTransformMatrix(doc->scene->node, stl_root_matrix);
+  }
 
   Py_BEGIN_ALLOW_THREADS
   export_coord = akb_coord_from_id(export_coord_system_id);

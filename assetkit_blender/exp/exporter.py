@@ -132,6 +132,12 @@ def export_scene(
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
     stl_format: str = "BINARY",
+    stl_batch_mode: bool = False,
+    stl_global_scale: float = 1.0,
+    stl_use_scene_unit: bool = False,
+    stl_forward_axis: str = "Y",
+    stl_up_axis: str = "Z",
+    stl_apply_modifiers: bool = True,
 ) -> int:
     module = _native_module()
     if module is None:
@@ -146,6 +152,73 @@ def export_scene(
         material_export_mode = "DIRECT"
     material_bake_size = _material_bake_size(material_bake_size)
     stl_export_format = _stl_export_format_id(stl_format)
+    stl_scale = _stl_effective_scale(
+        context,
+        file_type,
+        stl_global_scale,
+        stl_use_scene_unit,
+    )
+
+    if file_type == AK_FILE_TYPE_STL and stl_batch_mode:
+        return _export_stl_batch_scene(
+            module,
+            context,
+            path,
+            selected_only=selected_only,
+            dae_version=dae_version,
+            dae_index_mode=dae_index_mode,
+            coordinate_system=coordinate_system,
+            coordinate_conversion=coordinate_conversion,
+            material_export_mode=material_export_mode,
+            material_bake_size=material_bake_size,
+            stl_export_format=stl_export_format,
+            stl_scale=stl_scale,
+            stl_forward_axis=stl_forward_axis,
+            stl_up_axis=stl_up_axis,
+            apply_modifiers=bool(stl_apply_modifiers),
+        )
+
+    return _export_scene_once(
+        module,
+        context,
+        path,
+        file_type,
+        selected_only=selected_only,
+        object_filter=None,
+        dae_version=dae_version,
+        dae_index_mode=dae_index_mode,
+        coordinate_system=coordinate_system,
+        coordinate_conversion=coordinate_conversion,
+        material_export_mode=material_export_mode,
+        material_bake_size=material_bake_size,
+        stl_export_format=stl_export_format,
+        stl_scale=stl_scale,
+        stl_forward_axis=stl_forward_axis,
+        stl_up_axis=stl_up_axis,
+        apply_modifiers=bool(stl_apply_modifiers),
+    )
+
+
+def _export_scene_once(
+    module,
+    context: bpy.types.Context,
+    path: Path,
+    file_type: int,
+    *,
+    selected_only: bool,
+    object_filter: set[bpy.types.Object] | None,
+    dae_version: int,
+    dae_index_mode: int,
+    coordinate_system: int | None,
+    coordinate_conversion: int | None,
+    material_export_mode: str,
+    material_bake_size: int,
+    stl_export_format: int,
+    stl_scale: float,
+    stl_forward_axis: str,
+    stl_up_axis: str,
+    apply_modifiers: bool,
+) -> int:
 
     profile = _profile_enabled()
     started_at = time.perf_counter() if profile else 0.0
@@ -159,12 +232,14 @@ def export_scene(
             context,
             file_type=file_type,
             selected_only=selected_only,
+            object_filter=object_filter,
             image_store=image_store,
             material_cache=material_cache,
             mesh_payload_cache=mesh_payload_cache,
             mesh_cleanup=mesh_cleanup,
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
+            apply_modifiers=apply_modifiers,
         )
         if not items:
             raise AssetKitError("No exportable scene objects found")
@@ -205,6 +280,9 @@ def export_scene(
                 export_coord_conversion,
                 stl_export_format,
                 _assetkit_blender_authoring_tool(),
+                float(stl_scale),
+                str(stl_forward_axis or "Y"),
+                str(stl_up_axis or "Z"),
             ))
             if profile:
                 _profile_log(
@@ -226,6 +304,53 @@ def export_scene(
             f"export_scene total={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
         )
     return result
+
+
+def _export_stl_batch_scene(
+    module,
+    context: bpy.types.Context,
+    path: Path,
+    *,
+    selected_only: bool,
+    dae_version: int,
+    dae_index_mode: int,
+    coordinate_system: int | None,
+    coordinate_conversion: int | None,
+    material_export_mode: str,
+    material_bake_size: int,
+    stl_export_format: int,
+    stl_scale: float,
+    stl_forward_axis: str,
+    stl_up_axis: str,
+    apply_modifiers: bool,
+) -> int:
+    objects = _stl_batch_objects(context, selected_only)
+    if not objects:
+        raise AssetKitError("No exportable scene objects found")
+
+    used: set[str] = set()
+    for obj in objects:
+        batch_path = _stl_batch_path(path, obj.name, used)
+        _export_scene_once(
+            module,
+            context,
+            batch_path,
+            AK_FILE_TYPE_STL,
+            selected_only=False,
+            object_filter={obj},
+            dae_version=dae_version,
+            dae_index_mode=dae_index_mode,
+            coordinate_system=coordinate_system,
+            coordinate_conversion=coordinate_conversion,
+            material_export_mode=material_export_mode,
+            material_bake_size=material_bake_size,
+            stl_export_format=stl_export_format,
+            stl_scale=stl_scale,
+            stl_forward_axis=stl_forward_axis,
+            stl_up_axis=stl_up_axis,
+            apply_modifiers=apply_modifiers,
+        )
+    return AK_OK
 
 
 def _assetkit_blender_authoring_tool() -> str:
@@ -251,6 +376,77 @@ def _stl_export_format_id(value: str | None) -> int:
     return AK_STL_EXPORT_BINARY
 
 
+def _stl_effective_scale(
+    context: bpy.types.Context,
+    file_type: int,
+    global_scale: float,
+    use_scene_unit: bool,
+) -> float:
+    if file_type != AK_FILE_TYPE_STL:
+        return 1.0
+
+    try:
+        scale = float(global_scale)
+    except (TypeError, ValueError):
+        scale = 1.0
+    if not math.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+
+    if use_scene_unit:
+        unit_settings = getattr(getattr(context, "scene", None), "unit_settings", None)
+        try:
+            unit_scale = float(getattr(unit_settings, "scale_length", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            unit_scale = 1.0
+        if math.isfinite(unit_scale) and unit_scale > 0.0:
+            scale *= unit_scale
+
+    return scale
+
+
+def _stl_batch_objects(context: bpy.types.Context, selected_only: bool) -> list[bpy.types.Object]:
+    selected = set(context.selected_objects) if selected_only else None
+    objects: list[bpy.types.Object] = []
+    for obj in context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        if _is_assetkit_synthetic_helper_object(obj):
+            continue
+        if obj.hide_get(view_layer=context.view_layer):
+            continue
+        if selected is not None and obj not in selected:
+            continue
+        objects.append(obj)
+    return objects
+
+
+def _stl_batch_path(path: Path, object_name: str, used: set[str]) -> Path:
+    safe_name = _safe_filename_fragment(object_name) or "Object"
+    stem = path.stem or "untitled"
+    suffix = path.suffix or ".stl"
+
+    index = 0
+    while True:
+        extra = "" if index == 0 else f"_{index:03d}"
+        candidate = path.with_name(f"{stem}_{safe_name}{extra}{suffix}")
+        key = os.path.normcase(os.path.abspath(os.fspath(candidate)))
+        if key not in used:
+            used.add(key)
+            return candidate
+        index += 1
+
+
+def _safe_filename_fragment(value: str) -> str:
+    text = str(value or "").strip()
+    out = []
+    for char in text:
+        if char in {"/", "\\", ":", "\0"} or ord(char) < 32:
+            out.append("_")
+        else:
+            out.append(char)
+    return "".join(out).strip(" .")
+
+
 def _material_bake_size(value: int | str | None) -> int:
     try:
         size = int(value or 1024)
@@ -270,12 +466,14 @@ def _collect_scene_items(
     *,
     file_type: int,
     selected_only: bool,
+    object_filter: set[bpy.types.Object] | None,
     image_store: "_ExportImageStore",
     material_cache: dict[tuple, tuple | None],
     mesh_payload_cache: dict[tuple[int, tuple[int, ...]], tuple | None],
     mesh_cleanup: list,
     material_export_mode: str,
     material_bake_size: int,
+    apply_modifiers: bool,
 ) -> list[tuple]:
     profile = _profile_enabled()
     phase_started_at = time.perf_counter() if profile else 0.0
@@ -292,11 +490,14 @@ def _collect_scene_items(
     mesh_armatures: dict[bpy.types.Object, bpy.types.Object] = {}
     included: set[bpy.types.Object] = set()
     world_matrices = {}
-    instancing_groups, instancing_skips = _assetkit_instancing_groups(
-        objects,
-        exportable,
-        selected,
-    )
+    if object_filter is None:
+        instancing_groups, instancing_skips = _assetkit_instancing_groups(
+            objects,
+            exportable,
+            selected,
+        )
+    else:
+        instancing_groups, instancing_skips = {}, set()
 
     def include_export_chain(obj: bpy.types.Object) -> None:
         node = obj
@@ -313,6 +514,8 @@ def _collect_scene_items(
     for obj in objects:
         if obj not in exportable:
             continue
+        if object_filter is not None and obj not in object_filter:
+            continue
         if selected is not None and obj not in selected:
             continue
         if obj in instancing_skips:
@@ -327,7 +530,7 @@ def _collect_scene_items(
         elif file_type == AK_FILE_TYPE_DAE and _can_export_native_curve(obj):
             payload_kinds[obj] = AKB_EXPORT_ITEM_CURVE
             include_export_chain(obj)
-        elif obj.type in _MESH_EXPORT_OBJECT_TYPES:
+        elif _object_type_exports_as_mesh(obj, file_type):
             payload_kinds[obj] = AKB_EXPORT_ITEM_MESH
             include_export_chain(obj)
             armature = (
@@ -524,9 +727,12 @@ def _collect_scene_items(
                     None
                     if (
                         _mesh_material_bake_required(obj, material_export_mode)
-                        or (file_type == AK_FILE_TYPE_STL and _stl_requires_evaluated_mesh(obj))
+                        or (file_type == AK_FILE_TYPE_STL and _stl_requires_evaluated_mesh(obj, apply_modifiers))
                     )
-                    else _shared_mesh_payload_key(obj)
+                    else _shared_mesh_payload_key(
+                        obj,
+                        ignore_modifiers=file_type == AK_FILE_TYPE_STL and not apply_modifiers,
+                    )
                 )
                 if shared_key is not None and shared_key in mesh_payload_cache:
                     payload = mesh_payload_cache[shared_key]
@@ -633,6 +839,12 @@ def _can_export_native_curve(obj: bpy.types.Object) -> bool:
     return True
 
 
+def _object_type_exports_as_mesh(obj: bpy.types.Object, file_type: int) -> bool:
+    if file_type == AK_FILE_TYPE_STL:
+        return obj.type == "MESH"
+    return obj.type in _MESH_EXPORT_OBJECT_TYPES
+
+
 def _curve_payload(obj: bpy.types.Object) -> tuple | None:
     curve = getattr(obj, "data", None)
     if curve is None:
@@ -699,11 +911,15 @@ def _assetkit_instancing_groups(
     return reps, skips
 
 
-def _shared_mesh_payload_key(obj: bpy.types.Object) -> tuple[int, tuple[int, ...]] | None:
+def _shared_mesh_payload_key(
+    obj: bpy.types.Object,
+    *,
+    ignore_modifiers: bool = False,
+) -> tuple[int, tuple[int, ...]] | None:
     mesh = obj.data if obj.type == "MESH" else None
     if mesh is None:
         return None
-    if obj.modifiers:
+    if obj.modifiers and not ignore_modifiers:
         return None
     if _material_variant_payload(obj) is not None:
         return None
@@ -722,7 +938,9 @@ def _shared_mesh_payload_key(obj: bpy.types.Object) -> tuple[int, tuple[int, ...
     return int(mesh.as_pointer()), materials
 
 
-def _stl_requires_evaluated_mesh(obj: bpy.types.Object) -> bool:
+def _stl_requires_evaluated_mesh(obj: bpy.types.Object, apply_modifiers: bool) -> bool:
+    if not apply_modifiers and obj.type == "MESH":
+        return False
     if obj.type != "MESH":
         return True
     if getattr(obj, "modifiers", None):

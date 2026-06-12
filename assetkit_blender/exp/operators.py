@@ -136,6 +136,55 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="BINARY",
     )
+    stl_batch_mode: bpy.props.BoolProperty(
+        name="Batch Mode",
+        description="Export each mesh object to a separate STL file",
+        default=False,
+    )
+    stl_apply_modifiers: bpy.props.BoolProperty(
+        name="Apply Modifiers",
+        description="Apply object modifiers before STL export",
+        default=True,
+    )
+    stl_global_scale: bpy.props.FloatProperty(
+        name="Scale",
+        description="Scale factor for STL export",
+        default=1.0,
+        min=0.000001,
+        soft_min=0.01,
+        soft_max=1000.0,
+    )
+    stl_use_scene_unit: bpy.props.BoolProperty(
+        name="Scene Unit",
+        description="Apply the scene unit scale to STL export",
+        default=False,
+    )
+    stl_forward_axis: bpy.props.EnumProperty(
+        name="Forward Axis",
+        description="Forward axis for STL export",
+        items=(
+            ("X", "X", "Use +X as forward"),
+            ("Y", "Y", "Use +Y as forward"),
+            ("Z", "Z", "Use +Z as forward"),
+            ("-X", "-X", "Use -X as forward"),
+            ("-Y", "-Y", "Use -Y as forward"),
+            ("-Z", "-Z", "Use -Z as forward"),
+        ),
+        default="Y",
+    )
+    stl_up_axis: bpy.props.EnumProperty(
+        name="Up Axis",
+        description="Up axis for STL export",
+        items=(
+            ("X", "X", "Use +X as up"),
+            ("Y", "Y", "Use +Y as up"),
+            ("Z", "Z", "Use +Z as up"),
+            ("-X", "-X", "Use -X as up"),
+            ("-Y", "-Y", "Use -Y as up"),
+            ("-Z", "-Z", "Use -Z as up"),
+        ),
+        default="Z",
+    )
 
     def draw(self, _context):
         layout = self.layout
@@ -147,11 +196,12 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             materials.prop(self, "material_export_mode")
             if self.material_export_mode != "DIRECT":
                 materials.prop(self, "material_bake_size")
-        coords = layout.box()
-        coords.label(text="Coordinates")
-        coords.prop(self, "coordinate_conversion")
-        if self.coordinate_conversion == "TRANSFORM":
-            coords.prop(self, "coordinate_system")
+        if self.export_format != "STL":
+            coords = layout.box()
+            coords.label(text="Coordinates")
+            coords.prop(self, "coordinate_conversion")
+            if self.coordinate_conversion == "TRANSFORM":
+                coords.prop(self, "coordinate_system")
         if self.export_format == "DAE":
             dae = layout.box()
             dae.label(text="COLLADA")
@@ -161,6 +211,12 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             stl = layout.box()
             stl.label(text="STL")
             stl.prop(self, "stl_format")
+            stl.prop(self, "stl_batch_mode")
+            stl.prop(self, "stl_apply_modifiers")
+            stl.prop(self, "stl_global_scale")
+            stl.prop(self, "stl_use_scene_unit")
+            stl.prop(self, "stl_forward_axis")
+            stl.prop(self, "stl_up_axis")
 
     def check(self, _context):
         path_changed = self.filepath != self.assetkit_last_filepath
@@ -195,7 +251,13 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         file_type = file_type_from_format(self.export_format)
         coord_conversion = self.coordinate_conversion
         coord_system = self.coordinate_system
-        if coord_conversion == "AUTO":
+        if self.export_format == "STL":
+            if self.stl_forward_axis.lstrip("-") == self.stl_up_axis.lstrip("-"):
+                self.report({"ERROR"}, "STL forward and up axes must be different")
+                return {"CANCELLED"}
+            coord_conversion = "RAW"
+            coord_system = "Z_UP"
+        elif coord_conversion == "AUTO":
             if self.export_format in {"DAE", "OBJ", "STL"}:
                 coord_conversion = "RAW"
                 coord_system = "Z_UP"
@@ -218,6 +280,12 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 material_export_mode=self.material_export_mode,
                 material_bake_size=int(self.material_bake_size),
                 stl_format=self.stl_format,
+                stl_batch_mode=self.stl_batch_mode,
+                stl_apply_modifiers=self.stl_apply_modifiers,
+                stl_global_scale=self.stl_global_scale,
+                stl_use_scene_unit=self.stl_use_scene_unit,
+                stl_forward_axis=self.stl_forward_axis,
+                stl_up_axis=self.stl_up_axis,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
