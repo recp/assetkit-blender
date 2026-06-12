@@ -574,6 +574,29 @@ def _collect_scene_items(
         if not _is_assetkit_synthetic_helper_object(obj)
         and not obj.hide_get(view_layer=context.view_layer)
     }
+    if static_mesh_export:
+        return _collect_static_mesh_scene_items(
+            context,
+            depsgraph,
+            objects,
+            exportable,
+            selected,
+            object_filter,
+            file_type,
+            image_store,
+            material_cache,
+            mesh_payload_cache,
+            mesh_cleanup,
+            material_export_mode,
+            material_bake_size,
+            apply_modifiers,
+            ply_export_normals,
+            ply_export_uv,
+            ply_export_colors,
+            ply_export_triangulated,
+            profile,
+            phase_started_at,
+        )
     payload_kinds: dict[bpy.types.Object, int] = {}
     mesh_armatures: dict[bpy.types.Object, bpy.types.Object] = {}
     included: set[bpy.types.Object] = set()
@@ -896,6 +919,117 @@ def _collect_scene_items(
         )
 
     return [tuple(item) for item in out]
+
+
+def _collect_static_mesh_scene_items(
+    context: bpy.types.Context,
+    depsgraph,
+    objects: list[bpy.types.Object],
+    exportable: set[bpy.types.Object],
+    selected: set[bpy.types.Object] | None,
+    object_filter: set[bpy.types.Object] | None,
+    file_type: int,
+    image_store: "_ExportImageStore",
+    material_cache: dict[tuple, tuple | None],
+    mesh_payload_cache: dict[tuple[int, tuple[int, ...]], tuple | None],
+    mesh_cleanup: list,
+    material_export_mode: str,
+    material_bake_size: int,
+    apply_modifiers: bool,
+    ply_export_normals: bool,
+    ply_export_uv: bool,
+    ply_export_colors: bool,
+    ply_export_triangulated: bool,
+    profile: bool,
+    started_at: float,
+) -> list[tuple]:
+    out: list[tuple] = []
+    mesh_payload_ms = 0.0
+    to_mesh_ms = 0.0
+    candidate_count = 0
+
+    for obj in objects:
+        if obj not in exportable:
+            continue
+        if object_filter is not None and obj not in object_filter:
+            continue
+        if selected is not None and obj not in selected:
+            continue
+        if not _object_type_exports_as_mesh(obj, file_type):
+            continue
+
+        candidate_count += 1
+        payload = None
+        source_mesh = obj.data if obj.type == "MESH" else None
+        shared_key = (
+            None
+            if (
+                _mesh_material_bake_required(obj, material_export_mode)
+                or _static_mesh_requires_evaluated_mesh(obj, apply_modifiers)
+            )
+            else _shared_mesh_payload_key(
+                obj,
+                ignore_modifiers=not apply_modifiers,
+            )
+        )
+
+        if shared_key is not None and shared_key in mesh_payload_cache:
+            payload = mesh_payload_cache[shared_key]
+        else:
+            mesh = source_mesh
+            obj_eval = None
+            if shared_key is None:
+                obj_eval = obj.evaluated_get(depsgraph)
+                to_mesh_started_at = time.perf_counter() if profile else 0.0
+                mesh = obj_eval.to_mesh()
+                if profile:
+                    to_mesh_ms += (time.perf_counter() - to_mesh_started_at) * 1000.0
+                if mesh is not None:
+                    mesh_cleanup.append(obj_eval)
+
+            if mesh is not None:
+                mesh_payload_started_at = time.perf_counter() if profile else 0.0
+                payload = _mesh_payload(
+                    context,
+                    obj,
+                    mesh,
+                    source_mesh,
+                    file_type,
+                    image_store,
+                    material_cache,
+                    material_export_mode,
+                    material_bake_size,
+                    skin_setup=None,
+                    ply_export_normals=ply_export_normals,
+                    ply_export_uv=ply_export_uv,
+                    ply_export_colors=ply_export_colors,
+                    ply_export_triangulated=ply_export_triangulated,
+                )
+                if profile:
+                    mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
+            if shared_key is not None:
+                mesh_payload_cache[shared_key] = payload
+
+        if payload is None:
+            continue
+
+        out.append((
+            AKB_EXPORT_ITEM_MESH,
+            obj.name,
+            _matrix_bytes(_object_world_matrix(obj, depsgraph)),
+            -1,
+            payload,
+            None,
+        ))
+
+    if profile:
+        _profile_log(
+            f"collect_static_mesh candidates={candidate_count} items={len(out)} "
+            f"to_mesh={to_mesh_ms:.3f}ms mesh_payload={mesh_payload_ms:.3f}ms "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+
+    return out
 
 
 def _can_export_native_curve(obj: bpy.types.Object) -> bool:
@@ -2178,26 +2312,50 @@ def _mesh_payload(
     is_ply = file_type == AK_FILE_TYPE_PLY
     is_static_mesh = file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
     uv_layers = [] if is_stl or (is_ply and not ply_export_uv) else _uv_layers(mesh)
-    uv_names = tuple(layer.name for layer in uv_layers)
-    uv_slot_by_name = {name: index for index, name in enumerate(uv_names)}
     color_layers = [] if is_stl or (is_ply and not ply_export_colors) else _color_attributes(mesh)
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
-    fps = 24.0
-    if not is_static_mesh:
-        fps = float(context.scene.render.fps) / float(context.scene.render.fps_base or 1.0)
-        if fps <= 0.0:
-            fps = 24.0
 
-    morph_targets = [] if is_static_mesh else _shape_key_targets(mesh, source_mesh)
-    morph_animation = (
-        None
-        if is_static_mesh
-        else _shape_key_weight_animation(
-            context,
-            source_mesh,
-            morph_targets,
+    if is_static_mesh:
+        native_payload = (
+            _AKB_NATIVE_MESH_PAYLOAD,
+            mesh,
+            tuple(uv_layers),
+            tuple(color_layers),
+            (),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            _mesh_primitive_type_for_export(obj, mesh),
+            _mesh_primitive_mode_for_export(obj, mesh),
+            bool(ply_export_normals) if is_ply else False,
+            bool(ply_export_triangulated) if is_ply else True,
         )
+        native_payload_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
+        if profile:
+            _profile_log(
+                f"mesh_payload name={mesh.name!r} loops={len(mesh.loops)} "
+                f"layers={layer_ms:.3f}ms "
+                f"morph=0.000ms native_tuple={native_payload_ms:.3f}ms"
+            )
+        return native_payload
+
+    uv_names = tuple(layer.name for layer in uv_layers)
+    uv_slot_by_name = {name: index for index, name in enumerate(uv_names)}
+    fps = 24.0
+    fps = float(context.scene.render.fps) / float(context.scene.render.fps_base or 1.0)
+    if fps <= 0.0:
+        fps = 24.0
+
+    morph_targets = _shape_key_targets(mesh, source_mesh)
+    morph_animation = _shape_key_weight_animation(
+        context,
+        source_mesh,
+        morph_targets,
     )
     morph_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
