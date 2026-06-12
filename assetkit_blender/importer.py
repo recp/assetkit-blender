@@ -558,6 +558,16 @@ def _reset_material_profile() -> None:
         "props_ms": 0.0,
         "settings_ms": 0.0,
         "textures_ms": 0.0,
+        "texture_node_calls": 0,
+        "texture_node_cache_hits": 0,
+        "texture_node_create_ms": 0.0,
+        "texture_image_cache_hits": 0,
+        "texture_image_refs": 0,
+        "texture_image_loads": 0,
+        "texture_image_find_ms": 0.0,
+        "texture_image_ref_ms": 0.0,
+        "texture_image_load_ms": 0.0,
+        "texture_image_register_ms": 0.0,
         "animation_ms": 0.0,
         "total_ms": 0.0,
         "mesh_calls": 0,
@@ -633,6 +643,16 @@ def _log_material_profile(label: str) -> None:
             f"props={float(stats['props_ms']):.3f}ms "
             f"settings={float(stats['settings_ms']):.3f}ms "
             f"textures={float(stats['textures_ms']):.3f}ms "
+            f"tex_nodes={int(stats.get('texture_node_calls', 0) or 0)} "
+            f"tex_node_hits={int(stats.get('texture_node_cache_hits', 0) or 0)} "
+            f"tex_node_create={float(stats.get('texture_node_create_ms', 0.0) or 0.0):.3f}ms "
+            f"image_hits={int(stats.get('texture_image_cache_hits', 0) or 0)} "
+            f"image_refs={int(stats.get('texture_image_refs', 0) or 0)} "
+            f"image_loads={int(stats.get('texture_image_loads', 0) or 0)} "
+            f"image_find={float(stats.get('texture_image_find_ms', 0.0) or 0.0):.3f}ms "
+            f"image_ref={float(stats.get('texture_image_ref_ms', 0.0) or 0.0):.3f}ms "
+            f"image_load={float(stats.get('texture_image_load_ms', 0.0) or 0.0):.3f}ms "
+            f"image_register={float(stats.get('texture_image_register_ms', 0.0) or 0.0):.3f}ms "
             f"animation={float(stats['animation_ms']):.3f}ms "
             f"total={float(stats['total_ms']):.3f}ms"
         )
@@ -11143,11 +11163,17 @@ def _image_texture_node(
     colorspace: str,
     tex_info: TextureRefData | None = None,
 ):
+    stats = _PROFILE_MATERIAL_STATS
+    profile_started_at = time.perf_counter() if stats is not None else 0.0
+    if stats is not None:
+        stats["texture_node_calls"] = int(stats.get("texture_node_calls", 0) or 0) + 1
     colorspace = _texture_color_space(tex_info, colorspace)
     cache_key = _texture_node_cache_key(path, colorspace, tex_info)
     if _ACTIVE_TEXTURE_NODE_CACHE is not None and cache_key is not None:
         tex = _ACTIVE_TEXTURE_NODE_CACHE.get(cache_key)
         if _node_is_alive(mat, tex):
+            if stats is not None:
+                stats["texture_node_cache_hits"] = int(stats.get("texture_node_cache_hits", 0) or 0) + 1
             _append_texture_node_role(tex, tex_info)
             return tex
 
@@ -11183,6 +11209,11 @@ def _image_texture_node(
     _configure_texture_node(mat, tex, tex_info)
     if _ACTIVE_TEXTURE_NODE_CACHE is not None and cache_key is not None:
         _ACTIVE_TEXTURE_NODE_CACHE[cache_key] = tex
+    if stats is not None:
+        stats["texture_node_create_ms"] = (
+            float(stats.get("texture_node_create_ms", 0.0) or 0.0)
+            + (time.perf_counter() - profile_started_at) * 1000.0
+        )
     return tex
 
 
@@ -11338,8 +11369,17 @@ def _load_texture_image(path: str, colorspace: str):
 
 def _load_texture_image_immediate(path: str, colorspace: str):
     source_path = _texture_abs_path(path)
+    stats = _PROFILE_MATERIAL_STATS
+    started_at = time.perf_counter() if stats is not None else 0.0
     image = _find_texture_image(source_path, colorspace)
+    if stats is not None:
+        stats["texture_image_find_ms"] = (
+            float(stats.get("texture_image_find_ms", 0.0) or 0.0)
+            + (time.perf_counter() - started_at) * 1000.0
+        )
     if image:
+        if stats is not None:
+            stats["texture_image_cache_hits"] = int(stats.get("texture_image_cache_hits", 0) or 0) + 1
         return image
 
     if _is_ktx2_path(path):
@@ -11347,14 +11387,40 @@ def _load_texture_image_immediate(path: str, colorspace: str):
         if image:
             return image
 
+    if not _is_ktx2_path(path):
+        ref_started_at = time.perf_counter() if stats is not None else 0.0
+        image = _create_texture_image_file_reference(source_path, colorspace)
+        if stats is not None:
+            stats["texture_image_ref_ms"] = (
+                float(stats.get("texture_image_ref_ms", 0.0) or 0.0)
+                + (time.perf_counter() - ref_started_at) * 1000.0
+            )
+        if image:
+            if stats is not None:
+                stats["texture_image_refs"] = int(stats.get("texture_image_refs", 0) or 0) + 1
+            return image
+
     image = None
+    load_started_at = time.perf_counter() if stats is not None else 0.0
     try:
         image = bpy.data.images.load(source_path, check_existing=False)
     except RuntimeError:
         image = None
+    if stats is not None:
+        stats["texture_image_load_ms"] = (
+            float(stats.get("texture_image_load_ms", 0.0) or 0.0)
+            + (time.perf_counter() - load_started_at) * 1000.0
+        )
 
     if image:
+        register_started_at = time.perf_counter() if stats is not None else 0.0
         _register_texture_image(image, source_path, colorspace)
+        if stats is not None:
+            stats["texture_image_register_ms"] = (
+                float(stats.get("texture_image_register_ms", 0.0) or 0.0)
+                + (time.perf_counter() - register_started_at) * 1000.0
+            )
+            stats["texture_image_loads"] = int(stats.get("texture_image_loads", 0) or 0) + 1
         return image
 
     if image and _is_ktx2_path(path):
@@ -11369,6 +11435,27 @@ def _load_texture_image_immediate(path: str, colorspace: str):
             return image
 
     return None
+
+
+def _create_texture_image_file_reference(source_path: str, colorspace: str):
+    if not os.path.isfile(source_path):
+        return None
+
+    image = None
+    try:
+        image = bpy.data.images.new(os.path.basename(source_path) or "Texture", width=1, height=1, alpha=True)
+        image.source = "FILE"
+        image.filepath_raw = source_path
+        _register_texture_image(image, source_path, colorspace)
+        image["assetkit_lazy_file_reference"] = True
+        return image
+    except Exception:
+        if image is not None:
+            try:
+                bpy.data.images.remove(image)
+            except Exception:
+                pass
+        return None
 
 
 def _find_texture_image(path: str, colorspace: str):
