@@ -42,7 +42,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".gltf"
     filter_glob: bpy.props.StringProperty(
-        default="*.gltf;*.glb;*.dae;*.obj;*.stl",
+        default="*.gltf;*.glb;*.dae;*.obj;*.stl;*.ply",
         options={"HIDDEN"},
     )
     assetkit_last_filepath: bpy.props.StringProperty(
@@ -71,7 +71,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Mode",
         description="Coordinate handling for AssetKit export",
         items=(
-            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, OBJ/COLLADA/STL authored coordinates"),
+            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, OBJ/COLLADA/STL/PLY authored coordinates"),
             ("TRANSFORM", "Convert Data", "Export in the selected target coordinate system"),
             ("RAW", "Raw", "Do not change AssetKit document coordinates before export"),
         ),
@@ -185,18 +185,96 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="Z",
     )
+    ply_format: bpy.props.EnumProperty(
+        name="Format",
+        description="PLY file encoding",
+        items=(
+            ("BINARY", "Binary", "Export compact binary little-endian PLY"),
+            ("ASCII", "ASCII", "Export text PLY"),
+        ),
+        default="BINARY",
+    )
+    ply_apply_modifiers: bpy.props.BoolProperty(
+        name="Apply Modifiers",
+        description="Apply object modifiers before PLY export",
+        default=True,
+    )
+    ply_global_scale: bpy.props.FloatProperty(
+        name="Scale",
+        description="Scale factor for PLY export",
+        default=1.0,
+        min=0.000001,
+        soft_min=0.01,
+        soft_max=1000.0,
+    )
+    ply_use_scene_unit: bpy.props.BoolProperty(
+        name="Scene Unit",
+        description="Apply the scene unit scale to PLY export",
+        default=False,
+    )
+    ply_forward_axis: bpy.props.EnumProperty(
+        name="Forward Axis",
+        description="Forward axis for PLY export",
+        items=(
+            ("X", "X", "Use +X as forward"),
+            ("Y", "Y", "Use +Y as forward"),
+            ("Z", "Z", "Use +Z as forward"),
+            ("-X", "-X", "Use -X as forward"),
+            ("-Y", "-Y", "Use -Y as forward"),
+            ("-Z", "-Z", "Use -Z as forward"),
+        ),
+        default="Y",
+    )
+    ply_up_axis: bpy.props.EnumProperty(
+        name="Up Axis",
+        description="Up axis for PLY export",
+        items=(
+            ("X", "X", "Use +X as up"),
+            ("Y", "Y", "Use +Y as up"),
+            ("Z", "Z", "Use +Z as up"),
+            ("-X", "-X", "Use -X as up"),
+            ("-Y", "-Y", "Use -Y as up"),
+            ("-Z", "-Z", "Use -Z as up"),
+        ),
+        default="Z",
+    )
+    ply_export_uv: bpy.props.BoolProperty(
+        name="UV",
+        description="Export first PLY UV layer as s/t vertex properties",
+        default=True,
+    )
+    ply_export_normals: bpy.props.BoolProperty(
+        name="Normals",
+        description="Export PLY normals when available",
+        default=False,
+    )
+    ply_export_colors: bpy.props.EnumProperty(
+        name="Colors",
+        description="PLY vertex color export mode",
+        items=(
+            ("SRGB", "sRGB", "Write colors as uchar sRGB values"),
+            ("LINEAR", "Linear", "Write colors as uchar linear values"),
+            ("NONE", "None", "Do not export vertex colors"),
+        ),
+        default="SRGB",
+    )
+    ply_export_triangulated_mesh: bpy.props.BoolProperty(
+        name="Triangulated Mesh",
+        description="Triangulate polygon faces for PLY export",
+        default=False,
+    )
 
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "export_format")
         layout.prop(self, "selected_only")
-        if self.export_format != "STL":
+        if self.export_format not in {"STL", "PLY"}:
             materials = layout.box()
             materials.label(text="Materials")
             materials.prop(self, "material_export_mode")
             if self.material_export_mode != "DIRECT":
                 materials.prop(self, "material_bake_size")
-        if self.export_format != "STL":
+        if self.export_format not in {"STL", "PLY"}:
             coords = layout.box()
             coords.label(text="Coordinates")
             coords.prop(self, "coordinate_conversion")
@@ -217,6 +295,19 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             stl.prop(self, "stl_use_scene_unit")
             stl.prop(self, "stl_forward_axis")
             stl.prop(self, "stl_up_axis")
+        if self.export_format == "PLY":
+            ply = layout.box()
+            ply.label(text="PLY")
+            ply.prop(self, "ply_format")
+            ply.prop(self, "ply_apply_modifiers")
+            ply.prop(self, "ply_global_scale")
+            ply.prop(self, "ply_use_scene_unit")
+            ply.prop(self, "ply_forward_axis")
+            ply.prop(self, "ply_up_axis")
+            ply.prop(self, "ply_export_uv")
+            ply.prop(self, "ply_export_normals")
+            ply.prop(self, "ply_export_colors")
+            ply.prop(self, "ply_export_triangulated_mesh")
 
     def check(self, _context):
         path_changed = self.filepath != self.assetkit_last_filepath
@@ -257,8 +348,14 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 return {"CANCELLED"}
             coord_conversion = "RAW"
             coord_system = "Z_UP"
+        elif self.export_format == "PLY":
+            if self.ply_forward_axis.lstrip("-") == self.ply_up_axis.lstrip("-"):
+                self.report({"ERROR"}, "PLY forward and up axes must be different")
+                return {"CANCELLED"}
+            coord_conversion = "RAW"
+            coord_system = "Z_UP"
         elif coord_conversion == "AUTO":
-            if self.export_format in {"DAE", "OBJ", "STL"}:
+            if self.export_format in {"DAE", "OBJ", "STL", "PLY"}:
                 coord_conversion = "RAW"
                 coord_system = "Z_UP"
             else:
@@ -286,6 +383,16 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 stl_use_scene_unit=self.stl_use_scene_unit,
                 stl_forward_axis=self.stl_forward_axis,
                 stl_up_axis=self.stl_up_axis,
+                ply_format=self.ply_format,
+                ply_apply_modifiers=self.ply_apply_modifiers,
+                ply_global_scale=self.ply_global_scale,
+                ply_use_scene_unit=self.ply_use_scene_unit,
+                ply_forward_axis=self.ply_forward_axis,
+                ply_up_axis=self.ply_up_axis,
+                ply_export_uv=self.ply_export_uv,
+                ply_export_normals=self.ply_export_normals,
+                ply_export_colors=self.ply_export_colors,
+                ply_export_triangulated_mesh=self.ply_export_triangulated_mesh,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))

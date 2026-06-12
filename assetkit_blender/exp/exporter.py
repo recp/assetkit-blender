@@ -23,8 +23,14 @@ from ..enums import (
     AK_FILE_TYPE_DAE,
     AK_FILE_TYPE_GLB,
     AK_FILE_TYPE_GLTF,
+    AK_FILE_TYPE_PLY,
     AK_FILE_TYPE_STL,
     AK_FILE_TYPE_WAVEFRONT,
+    AK_PLY_EXPORT_ASCII,
+    AK_PLY_EXPORT_BINARY_LITTLE,
+    AK_PLY_EXPORT_COLOR_LINEAR,
+    AK_PLY_EXPORT_COLOR_NONE,
+    AK_PLY_EXPORT_COLOR_SRGB,
     AK_STL_EXPORT_ASCII,
     AK_STL_EXPORT_BINARY,
     AK_INTERPOLATION_LINEAR,
@@ -62,6 +68,7 @@ EXPORT_FORMATS = (
     ("DAE", "COLLADA (.dae)", "Export COLLADA .dae", AK_FILE_TYPE_DAE, ".dae"),
     ("OBJ", "Wavefront OBJ (.obj)", "Export Wavefront OBJ .obj/.mtl", AK_FILE_TYPE_WAVEFRONT, ".obj"),
     ("STL", "STL (.stl)", "Export STL triangle mesh", AK_FILE_TYPE_STL, ".stl"),
+    ("PLY", "PLY (.ply)", "Export Polygon File Format mesh", AK_FILE_TYPE_PLY, ".ply"),
 )
 
 _AKB_NATIVE_MESH_PAYLOAD = 0x414B4D46
@@ -138,6 +145,16 @@ def export_scene(
     stl_forward_axis: str = "Y",
     stl_up_axis: str = "Z",
     stl_apply_modifiers: bool = True,
+    ply_format: str = "BINARY",
+    ply_apply_modifiers: bool = True,
+    ply_global_scale: float = 1.0,
+    ply_use_scene_unit: bool = False,
+    ply_forward_axis: str = "Y",
+    ply_up_axis: str = "Z",
+    ply_export_uv: bool = True,
+    ply_export_normals: bool = False,
+    ply_export_colors: str = "SRGB",
+    ply_export_triangulated_mesh: bool = False,
 ) -> int:
     module = _native_module()
     if module is None:
@@ -148,15 +165,23 @@ def export_scene(
     if path.suffix.lower() != suffix:
         path = path.with_suffix(suffix)
     material_export_mode = _material_export_mode_id(material_export_mode)
-    if file_type == AK_FILE_TYPE_STL:
+    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}:
         material_export_mode = "DIRECT"
     material_bake_size = _material_bake_size(material_bake_size)
     stl_export_format = _stl_export_format_id(stl_format)
-    stl_scale = _stl_effective_scale(
+    stl_scale = _static_mesh_effective_scale(
         context,
         file_type,
         stl_global_scale,
         stl_use_scene_unit,
+    )
+    ply_export_format = _ply_export_format_id(ply_format)
+    ply_color_mode = _ply_export_color_mode_id(ply_export_colors)
+    ply_scale = _static_mesh_effective_scale(
+        context,
+        file_type,
+        ply_global_scale,
+        ply_use_scene_unit,
     )
 
     if file_type == AK_FILE_TYPE_STL and stl_batch_mode:
@@ -175,8 +200,22 @@ def export_scene(
             stl_scale=stl_scale,
             stl_forward_axis=stl_forward_axis,
             stl_up_axis=stl_up_axis,
+            ply_export_format=AK_PLY_EXPORT_BINARY_LITTLE,
+            ply_export_normals=False,
+            ply_export_uv=False,
+            ply_export_color_mode=AK_PLY_EXPORT_COLOR_NONE,
+            ply_export_triangulated=False,
             apply_modifiers=bool(stl_apply_modifiers),
         )
+
+    static_apply_modifiers = (
+        bool(ply_apply_modifiers)
+        if file_type == AK_FILE_TYPE_PLY
+        else bool(stl_apply_modifiers)
+    )
+    static_scale = ply_scale if file_type == AK_FILE_TYPE_PLY else stl_scale
+    static_forward_axis = ply_forward_axis if file_type == AK_FILE_TYPE_PLY else stl_forward_axis
+    static_up_axis = ply_up_axis if file_type == AK_FILE_TYPE_PLY else stl_up_axis
 
     return _export_scene_once(
         module,
@@ -192,10 +231,15 @@ def export_scene(
         material_export_mode=material_export_mode,
         material_bake_size=material_bake_size,
         stl_export_format=stl_export_format,
-        stl_scale=stl_scale,
-        stl_forward_axis=stl_forward_axis,
-        stl_up_axis=stl_up_axis,
-        apply_modifiers=bool(stl_apply_modifiers),
+        stl_scale=static_scale,
+        stl_forward_axis=static_forward_axis,
+        stl_up_axis=static_up_axis,
+        ply_export_format=ply_export_format,
+        ply_export_normals=bool(ply_export_normals),
+        ply_export_uv=bool(ply_export_uv),
+        ply_export_color_mode=ply_color_mode,
+        ply_export_triangulated=bool(ply_export_triangulated_mesh),
+        apply_modifiers=static_apply_modifiers,
     )
 
 
@@ -217,6 +261,11 @@ def _export_scene_once(
     stl_scale: float,
     stl_forward_axis: str,
     stl_up_axis: str,
+    ply_export_format: int,
+    ply_export_normals: bool,
+    ply_export_uv: bool,
+    ply_export_color_mode: int,
+    ply_export_triangulated: bool,
     apply_modifiers: bool,
 ) -> int:
 
@@ -240,6 +289,10 @@ def _export_scene_once(
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
             apply_modifiers=apply_modifiers,
+            ply_export_normals=bool(ply_export_normals),
+            ply_export_uv=bool(ply_export_uv),
+            ply_export_colors=ply_export_color_mode != AK_PLY_EXPORT_COLOR_NONE,
+            ply_export_triangulated=bool(ply_export_triangulated),
         )
         if not items:
             raise AssetKitError("No exportable scene objects found")
@@ -255,7 +308,7 @@ def _export_scene_once(
             export_coord_system = (
                 AKB_LOAD_COORD_Z_UP
                 if coordinate_system is None
-                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
+                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
                 else AKB_LOAD_COORD_Y_UP
                 if coordinate_system is None
                 else int(coordinate_system)
@@ -263,7 +316,7 @@ def _export_scene_once(
             export_coord_conversion = (
                 AKB_LOAD_COORD_RAW
                 if coordinate_conversion is None
-                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
+                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
                 else AKB_LOAD_COORD_TRANSFORM
                 if coordinate_conversion is None
                 else int(coordinate_conversion)
@@ -279,6 +332,11 @@ def _export_scene_once(
                 export_coord_system,
                 export_coord_conversion,
                 stl_export_format,
+                int(ply_export_format),
+                int(bool(ply_export_normals)),
+                int(bool(ply_export_uv)),
+                int(ply_export_color_mode),
+                int(bool(ply_export_triangulated)),
                 _assetkit_blender_authoring_tool(),
                 float(stl_scale),
                 str(stl_forward_axis or "Y"),
@@ -322,6 +380,11 @@ def _export_stl_batch_scene(
     stl_scale: float,
     stl_forward_axis: str,
     stl_up_axis: str,
+    ply_export_format: int,
+    ply_export_normals: bool,
+    ply_export_uv: bool,
+    ply_export_color_mode: int,
+    ply_export_triangulated: bool,
     apply_modifiers: bool,
 ) -> int:
     objects = _stl_batch_objects(context, selected_only)
@@ -348,6 +411,11 @@ def _export_stl_batch_scene(
             stl_scale=stl_scale,
             stl_forward_axis=stl_forward_axis,
             stl_up_axis=stl_up_axis,
+            ply_export_format=ply_export_format,
+            ply_export_normals=ply_export_normals,
+            ply_export_uv=ply_export_uv,
+            ply_export_color_mode=ply_export_color_mode,
+            ply_export_triangulated=ply_export_triangulated,
             apply_modifiers=apply_modifiers,
         )
     return AK_OK
@@ -376,13 +444,28 @@ def _stl_export_format_id(value: str | None) -> int:
     return AK_STL_EXPORT_BINARY
 
 
-def _stl_effective_scale(
+def _ply_export_format_id(value: str | None) -> int:
+    if value == "ASCII":
+        return AK_PLY_EXPORT_ASCII
+    return AK_PLY_EXPORT_BINARY_LITTLE
+
+
+def _ply_export_color_mode_id(value: str | None) -> int:
+    mode = (value or "SRGB").upper()
+    if mode == "NONE":
+        return AK_PLY_EXPORT_COLOR_NONE
+    if mode == "LINEAR":
+        return AK_PLY_EXPORT_COLOR_LINEAR
+    return AK_PLY_EXPORT_COLOR_SRGB
+
+
+def _static_mesh_effective_scale(
     context: bpy.types.Context,
     file_type: int,
     global_scale: float,
     use_scene_unit: bool,
 ) -> float:
-    if file_type != AK_FILE_TYPE_STL:
+    if file_type not in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}:
         return 1.0
 
     try:
@@ -474,8 +557,13 @@ def _collect_scene_items(
     material_export_mode: str,
     material_bake_size: int,
     apply_modifiers: bool,
+    ply_export_normals: bool,
+    ply_export_uv: bool,
+    ply_export_colors: bool,
+    ply_export_triangulated: bool,
 ) -> list[tuple]:
     profile = _profile_enabled()
+    static_mesh_export = file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
     phase_started_at = time.perf_counter() if profile else 0.0
     depsgraph = context.evaluated_depsgraph_get()
     selected = set(context.selected_objects) if selected_only else None
@@ -521,10 +609,10 @@ def _collect_scene_items(
         if obj in instancing_skips:
             continue
 
-        if file_type != AK_FILE_TYPE_STL and obj.type == "CAMERA":
+        if not static_mesh_export and obj.type == "CAMERA":
             payload_kinds[obj] = AKB_EXPORT_ITEM_CAMERA
             include_export_chain(obj)
-        elif file_type != AK_FILE_TYPE_STL and obj.type == "LIGHT":
+        elif not static_mesh_export and obj.type == "LIGHT":
             payload_kinds[obj] = AKB_EXPORT_ITEM_LIGHT
             include_export_chain(obj)
         elif file_type == AK_FILE_TYPE_DAE and _can_export_native_curve(obj):
@@ -535,13 +623,13 @@ def _collect_scene_items(
             include_export_chain(obj)
             armature = (
                 _mesh_armature_object(obj)
-                if file_type != AK_FILE_TYPE_STL and obj.type == "MESH"
+                if not static_mesh_export and obj.type == "MESH"
                 else None
             )
             if armature is not None:
                 mesh_armatures[obj] = armature
                 include_skeleton_chain(armature)
-        elif file_type != AK_FILE_TYPE_STL and obj.type == "EMPTY":
+        elif not static_mesh_export and obj.type == "EMPTY":
             payload_kinds[obj] = AKB_EXPORT_ITEM_NODE
             include_export_chain(obj)
 
@@ -591,7 +679,7 @@ def _collect_scene_items(
 
     animation_payloads = (
         {}
-        if file_type == AK_FILE_TYPE_STL
+        if static_mesh_export
         else _collect_transform_animations(context, included)
     )
 
@@ -603,7 +691,7 @@ def _collect_scene_items(
 
     bone_animation_payloads = (
         {}
-        if file_type == AK_FILE_TYPE_STL
+        if static_mesh_export
         else _collect_bone_animations(context, needed_armatures)
     )
 
@@ -719,6 +807,10 @@ def _collect_scene_items(
                     material_export_mode,
                     material_bake_size,
                     skin_setup=skin_setup,
+                    ply_export_normals=ply_export_normals,
+                    ply_export_uv=ply_export_uv,
+                    ply_export_colors=ply_export_colors,
+                    ply_export_triangulated=ply_export_triangulated,
                 )
                 if profile:
                     mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
@@ -727,11 +819,11 @@ def _collect_scene_items(
                     None
                     if (
                         _mesh_material_bake_required(obj, material_export_mode)
-                        or (file_type == AK_FILE_TYPE_STL and _stl_requires_evaluated_mesh(obj, apply_modifiers))
+                        or (static_mesh_export and _static_mesh_requires_evaluated_mesh(obj, apply_modifiers))
                     )
                     else _shared_mesh_payload_key(
                         obj,
-                        ignore_modifiers=file_type == AK_FILE_TYPE_STL and not apply_modifiers,
+                        ignore_modifiers=static_mesh_export and not apply_modifiers,
                     )
                 )
                 if shared_key is not None and shared_key in mesh_payload_cache:
@@ -749,6 +841,10 @@ def _collect_scene_items(
                         material_export_mode,
                         material_bake_size,
                         skin_setup=None,
+                        ply_export_normals=ply_export_normals,
+                        ply_export_uv=ply_export_uv,
+                        ply_export_colors=ply_export_colors,
+                        ply_export_triangulated=ply_export_triangulated,
                     )
                     if profile:
                         mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
@@ -773,6 +869,10 @@ def _collect_scene_items(
                             material_export_mode,
                             material_bake_size,
                             skin_setup=None,
+                            ply_export_normals=ply_export_normals,
+                            ply_export_uv=ply_export_uv,
+                            ply_export_colors=ply_export_colors,
+                            ply_export_triangulated=ply_export_triangulated,
                         )
                         if profile:
                             mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
@@ -840,7 +940,7 @@ def _can_export_native_curve(obj: bpy.types.Object) -> bool:
 
 
 def _object_type_exports_as_mesh(obj: bpy.types.Object, file_type: int) -> bool:
-    if file_type == AK_FILE_TYPE_STL:
+    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}:
         return obj.type == "MESH"
     return obj.type in _MESH_EXPORT_OBJECT_TYPES
 
@@ -938,7 +1038,7 @@ def _shared_mesh_payload_key(
     return int(mesh.as_pointer()), materials
 
 
-def _stl_requires_evaluated_mesh(obj: bpy.types.Object, apply_modifiers: bool) -> bool:
+def _static_mesh_requires_evaluated_mesh(obj: bpy.types.Object, apply_modifiers: bool) -> bool:
     if not apply_modifiers and obj.type == "MESH":
         return False
     if obj.type != "MESH":
@@ -2067,26 +2167,32 @@ def _mesh_payload(
     material_bake_size: int,
     *,
     skin_setup: tuple | None = None,
+    ply_export_normals: bool = False,
+    ply_export_uv: bool = True,
+    ply_export_colors: bool = True,
+    ply_export_triangulated: bool = False,
 ) -> tuple | None:
     profile = _profile_enabled()
     phase_started_at = time.perf_counter() if profile else 0.0
     is_stl = file_type == AK_FILE_TYPE_STL
-    uv_layers = [] if is_stl else _uv_layers(mesh)
+    is_ply = file_type == AK_FILE_TYPE_PLY
+    is_static_mesh = file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
+    uv_layers = [] if is_stl or (is_ply and not ply_export_uv) else _uv_layers(mesh)
     uv_names = tuple(layer.name for layer in uv_layers)
     uv_slot_by_name = {name: index for index, name in enumerate(uv_names)}
-    color_layers = [] if is_stl else _color_attributes(mesh)
+    color_layers = [] if is_stl or (is_ply and not ply_export_colors) else _color_attributes(mesh)
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
     fps = 24.0
-    if not is_stl:
+    if not is_static_mesh:
         fps = float(context.scene.render.fps) / float(context.scene.render.fps_base or 1.0)
         if fps <= 0.0:
             fps = 24.0
 
-    morph_targets = [] if is_stl else _shape_key_targets(mesh, source_mesh)
+    morph_targets = [] if is_static_mesh else _shape_key_targets(mesh, source_mesh)
     morph_animation = (
         None
-        if is_stl
+        if is_static_mesh
         else _shape_key_weight_animation(
             context,
             source_mesh,
@@ -2110,10 +2216,12 @@ def _mesh_payload(
         file_type,
         material_export_mode,
         material_bake_size,
-        variant_payload=None if is_stl else _material_variant_payload(obj),
-        skin_setup=None if is_stl else skin_setup,
+        variant_payload=None if is_static_mesh else _material_variant_payload(obj),
+        skin_setup=None if is_static_mesh else skin_setup,
         morph_targets=morph_targets,
         morph_animation=morph_animation,
+        ply_export_normals=ply_export_normals if is_ply else True,
+        ply_export_triangulated=ply_export_triangulated if file_type == AK_FILE_TYPE_PLY else True,
     )
     native_payload_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     if profile:
@@ -2144,8 +2252,10 @@ def _native_mesh_payload(
     skin_setup: tuple | None = None,
     morph_targets: list | None = None,
     morph_animation: tuple | None = None,
+    ply_export_normals: bool = True,
+    ply_export_triangulated: bool = True,
 ):
-    if file_type == AK_FILE_TYPE_STL:
+    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}:
         material_payloads = ()
         variant_payload = None
     else:
@@ -2192,6 +2302,8 @@ def _native_mesh_payload(
         _assetkit_json_prop(obj, "assetkit_primitive_extra_json"),
         _mesh_primitive_type_for_export(obj, mesh),
         _mesh_primitive_mode_for_export(obj, mesh),
+        bool(ply_export_normals),
+        bool(ply_export_triangulated),
     )
 
 

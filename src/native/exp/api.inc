@@ -24,10 +24,10 @@ akb_export_axis_vector(const char *axis, float out[3]) {
 }
 
 static int
-akb_export_stl_axis_matrix(float        scale,
-                           const char  *forward_axis,
-                           const char  *up_axis,
-                           float        matrix[16]) {
+akb_export_static_mesh_axis_matrix(float        scale,
+                                   const char  *forward_axis,
+                                   const char  *up_axis,
+                                   float        matrix[16]) {
   float forward[3];
   float up[3];
   float right[3];
@@ -70,6 +70,11 @@ akb_export_scene(PyObject *self, PyObject *args) {
   uintptr_t saved_dae_version;
   uintptr_t saved_dae_index_mode;
   uintptr_t saved_stl_export_format;
+  uintptr_t saved_ply_export_format;
+  uintptr_t saved_ply_export_normals;
+  uintptr_t saved_ply_export_uv;
+  uintptr_t saved_ply_export_color_mode;
+  uintptr_t saved_ply_export_triangulated;
   uintptr_t saved_authoring_tool;
   const char *authoring_tool_fragment;
   const char *stl_forward_axis;
@@ -93,10 +98,16 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int dae_version;
   int dae_index_mode;
   int stl_export_format;
+  int ply_export_format;
+  int ply_export_normals;
+  int ply_export_uv;
+  int ply_export_color_mode;
+  int ply_export_triangulated;
   int export_coord_system_id;
   int export_coord_conversion_id;
   int set_dae_options;
   int set_stl_options;
+  int set_ply_options;
   int set_authoring_tool;
   double stl_global_scale;
   AkCoordSys *export_coord;
@@ -110,6 +121,11 @@ akb_export_scene(PyObject *self, PyObject *args) {
   dae_version = AK_DAE_EXPORT_VERSION_AUTO;
   dae_index_mode = AK_DAE_EXPORT_INDEX_AUTO;
   stl_export_format = AK_STL_EXPORT_BINARY;
+  ply_export_format = AK_PLY_EXPORT_BINARY_LITTLE;
+  ply_export_normals = 0;
+  ply_export_uv = 1;
+  ply_export_color_mode = AK_PLY_EXPORT_COLOR_SRGB;
+  ply_export_triangulated = 0;
   export_coord_system_id = AKB_LOAD_COORD_Y_UP;
   export_coord_conversion_id = AKB_COORD_TRANSFORM;
   authoring_tool_fragment = NULL;
@@ -117,7 +133,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   stl_forward_axis = "Y";
   stl_up_axis = "Z";
   if (!PyArg_ParseTuple(args,
-                        "sisO|Oiiiiisdss",
+                        "sisO|Oiiiiiiiiiisdss",
                         &out_dir,
                         &file_type_int,
                         &name,
@@ -128,6 +144,11 @@ akb_export_scene(PyObject *self, PyObject *args) {
                         &export_coord_system_id,
                         &export_coord_conversion_id,
                         &stl_export_format,
+                        &ply_export_format,
+                        &ply_export_normals,
+                        &ply_export_uv,
+                        &ply_export_color_mode,
+                        &ply_export_triangulated,
                         &authoring_tool_fragment,
                         &stl_global_scale,
                         &stl_forward_axis,
@@ -456,16 +477,16 @@ akb_export_scene(PyObject *self, PyObject *args) {
 
   free(nodes);
 
-  if (file_type_int == AK_FILE_TYPE_STL
+  if ((file_type_int == AK_FILE_TYPE_STL || file_type_int == AK_FILE_TYPE_PLY)
       && (stl_global_scale != 1.0
           || strcmp(stl_forward_axis ? stl_forward_axis : "Y", "Y") != 0
           || strcmp(stl_up_axis ? stl_up_axis : "Z", "Z") != 0)) {
-    if (!akb_export_stl_axis_matrix((float)stl_global_scale,
-                                    stl_forward_axis,
-                                    stl_up_axis,
-                                    stl_root_matrix)) {
+    if (!akb_export_static_mesh_axis_matrix((float)stl_global_scale,
+                                            stl_forward_axis,
+                                            stl_up_axis,
+                                            stl_root_matrix)) {
       ak_free(doc);
-      PyErr_SetString(PyExc_ValueError, "invalid STL forward/up axis options");
+      PyErr_SetString(PyExc_ValueError, "invalid static mesh forward/up axis options");
       return NULL;
     }
     ak_nodeSetTransformMatrix(doc->scene->node, stl_root_matrix);
@@ -495,6 +516,20 @@ akb_export_scene(PyObject *self, PyObject *args) {
     saved_stl_export_format = ak_opt_get(AK_OPT_STL_EXPORT_FORMAT);
     ak_opt_set(AK_OPT_STL_EXPORT_FORMAT, (uintptr_t)stl_export_format);
   }
+  set_ply_options = file_type_int == AK_FILE_TYPE_PLY;
+  if (set_ply_options) {
+    saved_ply_export_format = ak_opt_get(AK_OPT_PLY_EXPORT_FORMAT);
+    saved_ply_export_normals = ak_opt_get(AK_OPT_PLY_EXPORT_NORMALS);
+    saved_ply_export_uv = ak_opt_get(AK_OPT_PLY_EXPORT_UV);
+    saved_ply_export_color_mode = ak_opt_get(AK_OPT_PLY_EXPORT_COLOR_MODE);
+    saved_ply_export_triangulated = ak_opt_get(AK_OPT_PLY_EXPORT_TRIANGULATED);
+    ak_opt_set(AK_OPT_PLY_EXPORT_FORMAT, (uintptr_t)ply_export_format);
+    ak_opt_set(AK_OPT_PLY_EXPORT_NORMALS, (uintptr_t)(ply_export_normals != 0));
+    ak_opt_set(AK_OPT_PLY_EXPORT_UV, (uintptr_t)(ply_export_uv != 0));
+    ak_opt_set(AK_OPT_PLY_EXPORT_COLOR_MODE, (uintptr_t)ply_export_color_mode);
+    ak_opt_set(AK_OPT_PLY_EXPORT_TRIANGULATED,
+               (uintptr_t)(ply_export_triangulated != 0));
+  }
   saved_authoring_tool = ak_opt_get(AK_OPT_EXPORT_AUTHORING_TOOL);
   set_authoring_tool = 0;
   if (authoring_tool_fragment && authoring_tool_fragment[0]) {
@@ -515,6 +550,13 @@ akb_export_scene(PyObject *self, PyObject *args) {
   }
   if (set_stl_options)
     ak_opt_set(AK_OPT_STL_EXPORT_FORMAT, saved_stl_export_format);
+  if (set_ply_options) {
+    ak_opt_set(AK_OPT_PLY_EXPORT_FORMAT, saved_ply_export_format);
+    ak_opt_set(AK_OPT_PLY_EXPORT_NORMALS, saved_ply_export_normals);
+    ak_opt_set(AK_OPT_PLY_EXPORT_UV, saved_ply_export_uv);
+    ak_opt_set(AK_OPT_PLY_EXPORT_COLOR_MODE, saved_ply_export_color_mode);
+    ak_opt_set(AK_OPT_PLY_EXPORT_TRIANGULATED, saved_ply_export_triangulated);
+  }
   if (profile)
     core_export_ms = akb_now_ms() - phase_started_at;
   Py_END_ALLOW_THREADS

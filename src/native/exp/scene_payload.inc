@@ -14,7 +14,9 @@ akb_export_payload_is_native_mesh(PyObject *payload_obj) {
       && size != 10
       && size != 11
       && size != 12
-      && size != 14)
+      && size != 14
+      && size != 15
+      && size != 16)
     return 0;
 
   tag_obj = PyTuple_GET_ITEM(payload_obj, 0);

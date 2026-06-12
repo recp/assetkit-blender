@@ -1804,6 +1804,340 @@ akb_export_add_native_group_primitive(AkDoc              *doc,
   return prim;
 }
 
+static AkMeshPrimitive *
+akb_export_add_ply_poly_group_primitive(AkDoc              *doc,
+                                        AkObject           *mesh_obj,
+                                        AkMesh             *mesh,
+                                        AkbExportFastGroup *group,
+                                        const uint32_t     *vcounts,
+                                        size_t              polygon_count,
+                                        uint32_t            uv_count,
+                                        uint32_t            color_count,
+                                        int                 has_normals) {
+  AkHeap          *heap;
+  AkPolygon       *poly;
+  AkMeshPrimitive *prim;
+  AkUInt          *dst_vcount;
+  uint32_t         vertex_count;
+  uint32_t         i;
+
+  if (!doc || !mesh_obj || !mesh || !group || !group->positions
+      || group->vertexCount == 0 || group->indexCount == 0
+      || !vcounts || polygon_count == 0)
+    return NULL;
+  if (group->vertexCount > UINT32_MAX
+      || group->indexCount > UINT32_MAX
+      || polygon_count > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "PLY mesh is too large");
+    return NULL;
+  }
+
+  heap = ak_heap_getheap(doc);
+  if (!heap)
+    return NULL;
+
+  poly = (AkPolygon *)ak_heap_calloc(heap, mesh_obj, sizeof(*poly));
+  if (!poly) {
+    PyErr_NoMemory();
+    return NULL;
+  }
+
+  poly->vcount = ak_heap_alloc(heap,
+                               poly,
+                               sizeof(*poly->vcount)
+                               + sizeof(AkUInt) * polygon_count);
+  if (!poly->vcount) {
+    PyErr_NoMemory();
+    return NULL;
+  }
+  poly->vcount->count = polygon_count;
+  dst_vcount = poly->vcount->items;
+  for (i = 0; i < (uint32_t)polygon_count; i++)
+    dst_vcount[i] = (AkUInt)vcounts[i];
+
+  vertex_count = (uint32_t)group->vertexCount;
+  prim = &poly->base;
+  prim->mesh = mesh;
+  prim->type = AK_PRIMITIVE_POLYGONS;
+  prim->nPolygons = (uint32_t)polygon_count;
+  prim->indexStride = 1u;
+  prim->indices = akb_export_index_array_from_u32(heap,
+                                                  prim,
+                                                  group->indices,
+                                                  group->indexCount,
+                                                  vertex_count);
+  if (!prim->indices)
+    return NULL;
+
+  if (!akb_export_add_input_buffer(heap,
+                                   doc,
+                                   prim,
+                                   group->positions,
+                                   (size_t)vertex_count * 3u * sizeof(float),
+                                   vertex_count,
+                                   AK_COMPONENT_SIZE_VEC3,
+                                   AKT_FLOAT,
+                                   3,
+                                   AK_INPUT_POSITION,
+                                   "POSITION",
+                                   0))
+    return NULL;
+
+  if (has_normals
+      && !akb_export_add_input_buffer(heap,
+                                      doc,
+                                      prim,
+                                      group->normals,
+                                      (size_t)vertex_count * 3u * sizeof(float),
+                                      vertex_count,
+                                      AK_COMPONENT_SIZE_VEC3,
+                                      AKT_FLOAT,
+                                      3,
+                                      AK_INPUT_NORMAL,
+                                      "NORMAL",
+                                      0))
+    return NULL;
+
+  for (i = 0; i < uv_count; i++) {
+    if (!akb_export_add_input_buffer(heap,
+                                     doc,
+                                     prim,
+                                     group->uvs[i],
+                                     (size_t)vertex_count * 2u * sizeof(float),
+                                     vertex_count,
+                                     AK_COMPONENT_SIZE_VEC2,
+                                     AKT_FLOAT,
+                                     2,
+                                     AK_INPUT_TEXCOORD,
+                                     "TEXCOORD",
+                                     i))
+      return NULL;
+  }
+
+  for (i = 0; i < color_count; i++) {
+    if (!akb_export_add_input_buffer(heap,
+                                     doc,
+                                     prim,
+                                     group->colors[i],
+                                     (size_t)vertex_count * 4u * sizeof(float),
+                                     vertex_count,
+                                     AK_COMPONENT_SIZE_VEC4,
+                                     AKT_FLOAT,
+                                     4,
+                                     AK_INPUT_COLOR,
+                                     "COLOR",
+                                     i))
+      return NULL;
+  }
+
+  return prim;
+}
+
+static int
+akb_export_add_ply_compact_poly_mesh_payload_to_node(AkDoc                       *doc,
+                                                     AkNode                      *node,
+                                                     const char                  *name,
+                                                     const float                 *positions,
+                                                     Py_ssize_t                   vertex_count,
+                                                     const int32_t               *loop_vertices,
+                                                     Py_ssize_t                   loop_count,
+                                                     const int32_t               *poly_loop_starts,
+                                                     const int32_t               *poly_loop_totals,
+                                                     Py_ssize_t                   polygon_count,
+                                                     const float                 *normals,
+                                                     int                          has_normals,
+                                                     float                      **uvs,
+                                                     uint32_t                     uv_count,
+                                                     float                      **colors,
+                                                     const AkbExportFastAttrDomain *color_domains,
+                                                     uint32_t                     color_count,
+                                                     PyObject                    *mesh_extra_obj,
+                                                     PyObject                    *geometry_extra_obj,
+                                                     PyObject                    *primitive_extra_obj) {
+  AkbExportFastGroup group;
+  AkHeap            *heap;
+  AkGeometry        *geom;
+  AkObject          *mesh_obj;
+  AkMesh            *mesh;
+  AkMeshPrimitive   *prim;
+  uint32_t          *vcounts;
+  size_t             vcount_count;
+  int                ok;
+
+  if (!doc || !node || !positions || !loop_vertices || !poly_loop_starts
+      || !poly_loop_totals || vertex_count <= 0 || loop_count <= 0
+      || polygon_count <= 0)
+    return 0;
+  if (vertex_count > UINT32_MAX || polygon_count > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "PLY mesh is too large");
+    return 0;
+  }
+
+  memset(&group, 0, sizeof(group));
+  group.materialIndex = -1;
+  vcounts = (uint32_t *)malloc((size_t)polygon_count * sizeof(*vcounts));
+  if (!vcounts) {
+    PyErr_NoMemory();
+    return 0;
+  }
+
+  ok = 1;
+  vcount_count = 0;
+  for (Py_ssize_t poly_index = 0; poly_index < polygon_count && ok; poly_index++) {
+    int32_t loop_start_i;
+    int32_t loop_total_i;
+
+    loop_start_i = poly_loop_starts[poly_index];
+    loop_total_i = poly_loop_totals[poly_index];
+    if (loop_total_i < 3)
+      continue;
+    if (loop_start_i < 0 || loop_total_i < 0
+        || loop_start_i > loop_count
+        || loop_total_i > loop_count - loop_start_i) {
+      PyErr_SetString(PyExc_ValueError, "mesh polygon references missing loops");
+      ok = 0;
+      break;
+    }
+
+    vcounts[vcount_count++] = (uint32_t)loop_total_i;
+    for (int32_t corner = 0; corner < loop_total_i; corner++) {
+      uint32_t loop_index;
+      int32_t  vertex_index_i;
+      uint32_t vertex_index;
+      float    normal[3] = {0.0f, 0.0f, 1.0f};
+      float    tangent[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      uint16_t joints[4] = {0, 0, 0, 0};
+      float    weights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      float    uv[AKB_EXPORT_FAST_UV_MAX * 2u];
+      float    color[AKB_EXPORT_FAST_COLOR_MAX * 4u];
+      uint32_t out_index;
+
+      loop_index = (uint32_t)(loop_start_i + corner);
+      vertex_index_i = loop_vertices[loop_index];
+      if (vertex_index_i < 0 || vertex_index_i >= vertex_count) {
+        PyErr_SetString(PyExc_ValueError, "mesh loop references a missing vertex");
+        ok = 0;
+        break;
+      }
+      vertex_index = (uint32_t)vertex_index_i;
+
+      if (has_normals && normals) {
+        normal[0] = normals[(size_t)loop_index * 3u];
+        normal[1] = normals[(size_t)loop_index * 3u + 1u];
+        normal[2] = normals[(size_t)loop_index * 3u + 2u];
+        if (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]
+            <= 0.00000001f) {
+          normal[0] = 0.0f;
+          normal[1] = 0.0f;
+          normal[2] = 1.0f;
+        }
+      }
+
+      for (uint32_t i = 0; i < uv_count; i++) {
+        uv[i * 2u] = uvs[i][(size_t)loop_index * 2u];
+        uv[i * 2u + 1u] = uvs[i][(size_t)loop_index * 2u + 1u];
+      }
+
+      for (uint32_t i = 0; i < color_count; i++) {
+        size_t color_index;
+
+        color_index = color_domains[i] == AKB_EXPORT_FAST_ATTR_CORNER
+                      ? (size_t)loop_index
+                      : (size_t)vertex_index;
+        color[i * 4u] = akb_export_clamp01_float(colors[i][color_index * 4u]);
+        color[i * 4u + 1u] = akb_export_clamp01_float(colors[i][color_index * 4u + 1u]);
+        color[i * 4u + 2u] = akb_export_clamp01_float(colors[i][color_index * 4u + 2u]);
+        color[i * 4u + 3u] = akb_export_clamp01_float(colors[i][color_index * 4u + 3u]);
+      }
+
+      if (!akb_export_fast_group_vertex(&group,
+                                        uv_count,
+                                        color_count,
+                                        0,
+                                        0,
+                                        0,
+                                        positions,
+                                        NULL,
+                                        vertex_index,
+                                        normal,
+                                        tangent,
+                                        joints,
+                                        weights,
+                                        uv,
+                                        color,
+                                        &out_index)
+          || !akb_export_fast_group_reserve_indices(&group, group.indexCount + 1u)) {
+        ok = 0;
+        break;
+      }
+      group.indices[group.indexCount++] = out_index;
+    }
+  }
+
+  if (!ok || vcount_count == 0 || group.vertexCount == 0)
+    goto done_ply_poly;
+
+  heap = ak_heap_getheap(doc);
+  if (!heap) {
+    ok = 0;
+    goto done_ply_poly;
+  }
+
+  geom = (AkGeometry *)ak_heap_calloc(heap, doc, sizeof(*geom));
+  if (!geom) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done_ply_poly;
+  }
+  geom->name = name && name[0] ? name : NULL;
+  ak_setypeid(geom, AKT_GEOMETRY);
+
+  mesh_obj = ak_objAlloc(heap, geom, sizeof(*mesh), AK_GEOMETRY_MESH, true);
+  if (!mesh_obj) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done_ply_poly;
+  }
+  geom->gdata = mesh_obj;
+  mesh = (AkMesh *)ak_objGet(mesh_obj);
+  mesh->geom = geom;
+  mesh->name = name && name[0] ? name : NULL;
+
+  if (!akb_export_apply_direct_extra(doc, geom, &mesh->extra, mesh_extra_obj)
+      || !akb_export_apply_direct_extra(doc, geom, &geom->extra, geometry_extra_obj)) {
+    ok = 0;
+    goto done_ply_poly;
+  }
+
+  prim = akb_export_add_ply_poly_group_primitive(doc,
+                                                 mesh_obj,
+                                                 mesh,
+                                                 &group,
+                                                 vcounts,
+                                                 vcount_count,
+                                                 uv_count,
+                                                 color_count,
+                                                 has_normals);
+  if (!prim
+      || !akb_export_apply_direct_extra(doc, geom, &prim->extra, primitive_extra_obj)) {
+    ok = 0;
+    goto done_ply_poly;
+  }
+
+  mesh->primitive = prim;
+  mesh->primitiveCount = 1u;
+  AKB_LIB_APPEND(doc->lib.geometries, geom, next);
+  if (!ak_nodeAttachGeometry(node, geom)) {
+    ok = 0;
+    goto done_ply_poly;
+  }
+
+done_ply_poly:
+  free(vcounts);
+  akb_export_fast_group_free(&group, uv_count, color_count, 0);
+  return ok;
+}
+
 static void
 akb_export_fast_groups_free(AkbExportFastGroup *groups,
                             size_t              group_count,
@@ -2261,6 +2595,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   PyObject *morph_targets_seq;
   PyObject *vertices_obj;
   PyObject *loops_obj;
+  PyObject *polygons_obj;
   PyObject *loop_tris_obj;
   PyObject *corner_normals_obj;
   PyObject *morph_basis_data_obj;
@@ -2271,6 +2606,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   PyObject *normals_buf;
   PyObject *tangents_buf;
   PyObject *loop_vertices_buf;
+  PyObject *poly_loop_starts_buf;
+  PyObject *poly_loop_totals_buf;
   PyObject *tri_loops_buf;
   PyObject *tri_materials_buf;
   PyObject **morph_bufs;
@@ -2280,6 +2617,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   Py_buffer normals_view;
   Py_buffer tangents_view;
   Py_buffer loop_vertices_view;
+  Py_buffer poly_loop_starts_view;
+  Py_buffer poly_loop_totals_view;
   Py_buffer tri_loops_view;
   Py_buffer tri_materials_view;
   Py_buffer *morph_views;
@@ -2295,11 +2634,14 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   float *uvs[AKB_EXPORT_FAST_UV_MAX];
   float *colors[AKB_EXPORT_FAST_COLOR_MAX];
   int32_t *loop_vertices;
+  int32_t *poly_loop_starts;
+  int32_t *poly_loop_totals;
   int32_t *tri_loops;
   int32_t *tri_materials;
   AkbExportFastAttrDomain color_domains[AKB_EXPORT_FAST_COLOR_MAX];
   Py_ssize_t vertex_count;
   Py_ssize_t loop_count;
+  Py_ssize_t polygon_count;
   Py_ssize_t tri_count;
   Py_ssize_t uv_count_py;
   Py_ssize_t color_count_py;
@@ -2323,12 +2665,17 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   int has_skin;
   int has_morph;
   int is_stl_export;
+  int is_ply_export;
+  int ply_export_normals;
+  int ply_export_triangulated;
+  int use_ply_polygons;
   int flip_uv_v;
   int ok;
 
   if (!doc || !node || !payload_obj)
     return 0;
   is_stl_export = doc->inf && doc->inf->ftype == AK_FILE_TYPE_STL;
+  is_ply_export = doc->inf && doc->inf->ftype == AK_FILE_TYPE_PLY;
   flip_uv_v = doc->inf
               && (doc->inf->ftype == AK_FILE_TYPE_GLTF
                   || doc->inf->ftype == AK_FILE_TYPE_GLB);
@@ -2380,8 +2727,22 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   }
   has_skin = skin_mapping_obj != Py_None && skin_obj != Py_None;
   has_morph = morph_obj != Py_None;
+  ply_export_normals = 1;
+  ply_export_triangulated = 1;
+  if (payload_size >= 15) {
+    ply_export_normals = PyObject_IsTrue(PyTuple_GET_ITEM(payload_obj, 14));
+    if (ply_export_normals < 0)
+      return 0;
+  }
+  if (payload_size >= 16) {
+    ply_export_triangulated = PyObject_IsTrue(PyTuple_GET_ITEM(payload_obj, 15));
+    if (ply_export_triangulated < 0)
+      return 0;
+  }
+  use_ply_polygons = is_ply_export && !ply_export_triangulated;
 
-  if (PyObject_CallMethod(mesh_py, "calc_loop_triangles", NULL) == NULL)
+  if (!use_ply_polygons
+      && PyObject_CallMethod(mesh_py, "calc_loop_triangles", NULL) == NULL)
     return 0;
 
   uv_layers_seq = PySequence_Fast(uv_layers_obj, "uv layers must be a sequence");
@@ -2466,11 +2827,15 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
 
   vertices_obj = akb_export_attr_obj(mesh_py, "vertices");
   loops_obj = akb_export_attr_obj(mesh_py, "loops");
-  loop_tris_obj = akb_export_attr_obj(mesh_py, "loop_triangles");
-  corner_normals_obj = is_stl_export ? Py_NewRef(Py_None) : akb_export_attr_obj(mesh_py, "corner_normals");
-  if (!vertices_obj || !loops_obj || !loop_tris_obj || !corner_normals_obj) {
+  polygons_obj = use_ply_polygons ? akb_export_attr_obj(mesh_py, "polygons") : Py_NewRef(Py_None);
+  loop_tris_obj = use_ply_polygons ? Py_NewRef(Py_None) : akb_export_attr_obj(mesh_py, "loop_triangles");
+  corner_normals_obj = (is_stl_export || (is_ply_export && !ply_export_normals))
+                       ? Py_NewRef(Py_None)
+                       : akb_export_attr_obj(mesh_py, "corner_normals");
+  if (!vertices_obj || !loops_obj || !polygons_obj || !loop_tris_obj || !corner_normals_obj) {
     Py_XDECREF(vertices_obj);
     Py_XDECREF(loops_obj);
+    Py_XDECREF(polygons_obj);
     Py_XDECREF(loop_tris_obj);
     Py_XDECREF(corner_normals_obj);
     Py_XDECREF(morph_targets_seq);
@@ -2482,8 +2847,10 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
 
   vertex_count = PyObject_Length(vertices_obj);
   loop_count = PyObject_Length(loops_obj);
-  tri_count = PyObject_Length(loop_tris_obj);
-  if (vertex_count <= 0 || loop_count <= 0 || tri_count <= 0) {
+  polygon_count = use_ply_polygons ? PyObject_Length(polygons_obj) : 0;
+  tri_count = use_ply_polygons ? 0 : PyObject_Length(loop_tris_obj);
+  if (vertex_count <= 0 || loop_count <= 0
+      || (use_ply_polygons ? polygon_count <= 0 : tri_count <= 0)) {
     int point_line_ok;
 
     point_line_ok = 1;
@@ -2510,6 +2877,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     }
     Py_DECREF(vertices_obj);
     Py_DECREF(loops_obj);
+    Py_DECREF(polygons_obj);
     Py_DECREF(loop_tris_obj);
     Py_DECREF(corner_normals_obj);
     Py_XDECREF(morph_targets_seq);
@@ -2523,6 +2891,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(&normals_view, 0, sizeof(normals_view));
   memset(&tangents_view, 0, sizeof(tangents_view));
   memset(&loop_vertices_view, 0, sizeof(loop_vertices_view));
+  memset(&poly_loop_starts_view, 0, sizeof(poly_loop_starts_view));
+  memset(&poly_loop_totals_view, 0, sizeof(poly_loop_totals_view));
   memset(&tri_loops_view, 0, sizeof(tri_loops_view));
   memset(&tri_materials_view, 0, sizeof(tri_materials_view));
   memset(uv_data_objs, 0, sizeof(uv_data_objs));
@@ -2535,10 +2905,14 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(colors, 0, sizeof(colors));
   memset(color_domains, 0, sizeof(color_domains));
   positions_buf = akb_export_array_new("f", vertex_count * 3);
-  normals_buf = is_stl_export ? NULL : akb_export_array_new("f", loop_count * 3);
+  normals_buf = (is_stl_export || (is_ply_export && !ply_export_normals))
+                ? NULL
+                : akb_export_array_new("f", loop_count * 3);
   tangents_buf = NULL;
   loop_vertices_buf = akb_export_array_new("i", loop_count);
-  tri_loops_buf = akb_export_array_new("i", tri_count * 3);
+  poly_loop_starts_buf = use_ply_polygons ? akb_export_array_new("i", polygon_count) : NULL;
+  poly_loop_totals_buf = use_ply_polygons ? akb_export_array_new("i", polygon_count) : NULL;
+  tri_loops_buf = use_ply_polygons ? NULL : akb_export_array_new("i", tri_count * 3);
   tri_materials_buf = NULL;
   morph_deltas = NULL;
   morph_bufs = NULL;
@@ -2556,27 +2930,45 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(&morph_build, 0, sizeof(morph_build));
   ok = 1;
 
-  if (!positions_buf || (!is_stl_export && !normals_buf) || !loop_vertices_buf || !tri_loops_buf
+  if (!positions_buf
+      || (!is_stl_export && !(is_ply_export && !ply_export_normals) && !normals_buf)
+      || !loop_vertices_buf
+      || (use_ply_polygons && (!poly_loop_starts_buf || !poly_loop_totals_buf))
+      || (!use_ply_polygons && !tri_loops_buf)
       || (has_morph && (!morph_deltas || !morph_bufs || !morph_views || !morph_data_objs))) {
     PyErr_NoMemory();
     ok = 0;
     goto done_native;
   }
   if (PyObject_GetBuffer(positions_buf, &positions_view, PyBUF_SIMPLE) < 0
-      || (!is_stl_export && PyObject_GetBuffer(normals_buf, &normals_view, PyBUF_SIMPLE) < 0)
+      || (!is_stl_export
+          && !(is_ply_export && !ply_export_normals)
+          && PyObject_GetBuffer(normals_buf, &normals_view, PyBUF_SIMPLE) < 0)
       || PyObject_GetBuffer(loop_vertices_buf, &loop_vertices_view, PyBUF_SIMPLE) < 0
-      || PyObject_GetBuffer(tri_loops_buf, &tri_loops_view, PyBUF_SIMPLE) < 0) {
+      || (use_ply_polygons
+          && (PyObject_GetBuffer(poly_loop_starts_buf, &poly_loop_starts_view, PyBUF_SIMPLE) < 0
+              || PyObject_GetBuffer(poly_loop_totals_buf, &poly_loop_totals_view, PyBUF_SIMPLE) < 0))
+      || (!use_ply_polygons
+          && PyObject_GetBuffer(tri_loops_buf, &tri_loops_view, PyBUF_SIMPLE) < 0)) {
     ok = 0;
     goto done_native;
   }
 
   positions = (float *)positions_view.buf;
-  normals = is_stl_export ? NULL : (float *)normals_view.buf;
+  normals = (is_stl_export || (is_ply_export && !ply_export_normals))
+            ? NULL
+            : (float *)normals_view.buf;
   tangents = NULL;
   loop_vertices = (int32_t *)loop_vertices_view.buf;
-  tri_loops = (int32_t *)tri_loops_view.buf;
+  poly_loop_starts = use_ply_polygons ? (int32_t *)poly_loop_starts_view.buf : NULL;
+  poly_loop_totals = use_ply_polygons ? (int32_t *)poly_loop_totals_view.buf : NULL;
+  tri_loops = use_ply_polygons ? NULL : (int32_t *)tri_loops_view.buf;
   tri_materials = NULL;
-  if (!positions || (!is_stl_export && !normals) || !loop_vertices || !tri_loops) {
+  if (!positions
+      || (!is_stl_export && !(is_ply_export && !ply_export_normals) && !normals)
+      || !loop_vertices
+      || (use_ply_polygons && (!poly_loop_starts || !poly_loop_totals))
+      || (!use_ply_polygons && !tri_loops)) {
     PyErr_NoMemory();
     ok = 0;
     goto done_native;
@@ -2687,8 +3079,19 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     ok = akb_export_foreach_get_buffer(vertices_obj, "co", positions_buf, "f");
   }
   ok = ok
-       && akb_export_foreach_get_buffer(loops_obj, "vertex_index", loop_vertices_buf, "i")
-       && akb_export_foreach_get_buffer(loop_tris_obj, "loops", tri_loops_buf, "i");
+       && akb_export_foreach_get_buffer(loops_obj, "vertex_index", loop_vertices_buf, "i");
+  if (ok && use_ply_polygons) {
+    ok = akb_export_foreach_get_buffer(polygons_obj,
+                                       "loop_start",
+                                       poly_loop_starts_buf,
+                                       "i")
+         && akb_export_foreach_get_buffer(polygons_obj,
+                                          "loop_total",
+                                          poly_loop_totals_buf,
+                                          "i");
+  } else if (ok) {
+    ok = akb_export_foreach_get_buffer(loop_tris_obj, "loops", tri_loops_buf, "i");
+  }
   if (!ok)
     goto done_native;
 
@@ -2708,9 +3111,11 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     goto done_native;
   }
 
-  ok = akb_export_foreach_get_buffer(corner_normals_obj, "vector", normals_buf, "f");
-  if (!ok)
-    goto done_native;
+  if (!(is_ply_export && !ply_export_normals)) {
+    ok = akb_export_foreach_get_buffer(corner_normals_obj, "vector", normals_buf, "f");
+    if (!ok)
+      goto done_native;
+  }
 
   if (has_morph) {
     for (uint32_t i = 0; i < morph_count; i++) {
@@ -2752,6 +3157,30 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       ok = 0;
       goto done_native;
     }
+  }
+
+  if (use_ply_polygons) {
+    ok = akb_export_add_ply_compact_poly_mesh_payload_to_node(doc,
+                                                              node,
+                                                              name,
+                                                              positions,
+                                                              vertex_count,
+                                                              loop_vertices,
+                                                              loop_count,
+                                                              poly_loop_starts,
+                                                              poly_loop_totals,
+                                                              polygon_count,
+                                                              normals,
+                                                              ply_export_normals,
+                                                              uvs,
+                                                              uv_count,
+                                                              colors,
+                                                              color_domains,
+                                                              color_count,
+                                                              mesh_extra_obj,
+                                                              geometry_extra_obj,
+                                                              primitive_extra_obj);
+    goto done_native;
   }
 
   if (doc->inf
@@ -2800,30 +3229,34 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     }
   }
 
-  if (!akb_export_read_tri_materials(loop_tris_obj,
-                                     tri_count,
-                                     &tri_materials_buf,
-                                     &tri_materials_view,
-                                     &tri_materials)) {
-    ok = 0;
-    goto done_native;
-  }
+  if (is_ply_export) {
+    has_tangents = 0;
+  } else {
+    if (!akb_export_read_tri_materials(loop_tris_obj,
+                                       tri_count,
+                                       &tri_materials_buf,
+                                       &tri_materials_view,
+                                       &tri_materials)) {
+      ok = 0;
+      goto done_native;
+    }
 
-  if (!akb_export_fast_read_tangents(mesh_py,
-                                     loop_count,
-                                     &tangents_buf,
-                                     &tangents_view,
-                                     &tangents,
-                                     &has_tangents)) {
-    ok = 0;
-    goto done_native;
+    if (!akb_export_fast_read_tangents(mesh_py,
+                                       loop_count,
+                                       &tangents_buf,
+                                       &tangents_view,
+                                       &tangents,
+                                       &has_tangents)) {
+      ok = 0;
+      goto done_native;
+    }
   }
 
   for (Py_ssize_t tri_index = 0; tri_index < tri_count && ok; tri_index++) {
     AkbExportFastGroup *group;
     int material_index;
 
-    material_index = tri_materials[tri_index];
+    material_index = is_ply_export ? -1 : tri_materials[tri_index];
     if (material_index >= 0 && material_index < material_count_py)
       group = &groups[material_index];
     else
@@ -2857,9 +3290,15 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       }
       vertex_index = (uint32_t)vertex_index_i;
 
-      normal[0] = normals[(size_t)loop_index * 3u];
-      normal[1] = normals[(size_t)loop_index * 3u + 1u];
-      normal[2] = normals[(size_t)loop_index * 3u + 2u];
+      if (normals) {
+        normal[0] = normals[(size_t)loop_index * 3u];
+        normal[1] = normals[(size_t)loop_index * 3u + 1u];
+        normal[2] = normals[(size_t)loop_index * 3u + 2u];
+      } else {
+        normal[0] = 0.0f;
+        normal[1] = 0.0f;
+        normal[2] = 1.0f;
+      }
       if (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2] <= 0.00000001f) {
         normal[0] = 0.0f;
         normal[1] = 0.0f;
@@ -3132,6 +3571,10 @@ done_native:
     PyBuffer_Release(&tri_materials_view);
   if (tri_loops_view.buf)
     PyBuffer_Release(&tri_loops_view);
+  if (poly_loop_totals_view.buf)
+    PyBuffer_Release(&poly_loop_totals_view);
+  if (poly_loop_starts_view.buf)
+    PyBuffer_Release(&poly_loop_starts_view);
   if (loop_vertices_view.buf)
     PyBuffer_Release(&loop_vertices_view);
   if (tangents_view.buf)
@@ -3144,6 +3587,8 @@ done_native:
   Py_XDECREF(normals_buf);
   Py_XDECREF(tangents_buf);
   Py_XDECREF(loop_vertices_buf);
+  Py_XDECREF(poly_loop_starts_buf);
+  Py_XDECREF(poly_loop_totals_buf);
   Py_XDECREF(tri_loops_buf);
   Py_XDECREF(tri_materials_buf);
   free(skin_cache);
@@ -3151,6 +3596,7 @@ done_native:
   Py_XDECREF(morph_targets_seq);
   Py_DECREF(vertices_obj);
   Py_DECREF(loops_obj);
+  Py_DECREF(polygons_obj);
   Py_DECREF(loop_tris_obj);
   Py_DECREF(corner_normals_obj);
   Py_DECREF(uv_layers_seq);
