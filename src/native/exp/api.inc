@@ -7,6 +7,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   PyObject *doc_extra_obj;
   uintptr_t saved_dae_version;
   uintptr_t saved_dae_index_mode;
+  uintptr_t saved_stl_export_format;
   uintptr_t saved_authoring_tool;
   const char *authoring_tool_fragment;
   char authoring_tool[256];
@@ -27,9 +28,11 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int ok;
   int dae_version;
   int dae_index_mode;
+  int stl_export_format;
   int export_coord_system_id;
   int export_coord_conversion_id;
   int set_dae_options;
+  int set_stl_options;
   int set_authoring_tool;
   AkCoordSys *export_coord;
   uint8_t export_coord_conversion;
@@ -40,11 +43,12 @@ akb_export_scene(PyObject *self, PyObject *args) {
   doc_extra_obj = Py_None;
   dae_version = AK_DAE_EXPORT_VERSION_AUTO;
   dae_index_mode = AK_DAE_EXPORT_INDEX_AUTO;
+  stl_export_format = AK_STL_EXPORT_BINARY;
   export_coord_system_id = AKB_LOAD_COORD_Y_UP;
   export_coord_conversion_id = AKB_COORD_TRANSFORM;
   authoring_tool_fragment = NULL;
   if (!PyArg_ParseTuple(args,
-                        "sisO|Oiiiis",
+                        "sisO|Oiiiiis",
                         &out_dir,
                         &file_type_int,
                         &name,
@@ -54,6 +58,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
                         &dae_index_mode,
                         &export_coord_system_id,
                         &export_coord_conversion_id,
+                        &stl_export_format,
                         &authoring_tool_fragment))
     return NULL;
   if (!PySequence_Check(items_obj)) {
@@ -398,6 +403,11 @@ akb_export_scene(PyObject *self, PyObject *args) {
     ak_opt_set(AK_OPT_DAE_EXPORT_VERSION, (uintptr_t)dae_version);
     ak_opt_set(AK_OPT_DAE_EXPORT_INDEX_MODE, (uintptr_t)dae_index_mode);
   }
+  set_stl_options = file_type_int == AK_FILE_TYPE_STL;
+  if (set_stl_options) {
+    saved_stl_export_format = ak_opt_get(AK_OPT_STL_EXPORT_FORMAT);
+    ak_opt_set(AK_OPT_STL_EXPORT_FORMAT, (uintptr_t)stl_export_format);
+  }
   saved_authoring_tool = ak_opt_get(AK_OPT_EXPORT_AUTHORING_TOOL);
   set_authoring_tool = 0;
   if (authoring_tool_fragment && authoring_tool_fragment[0]) {
@@ -416,6 +426,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
     ak_opt_set(AK_OPT_DAE_EXPORT_VERSION, saved_dae_version);
     ak_opt_set(AK_OPT_DAE_EXPORT_INDEX_MODE, saved_dae_index_mode);
   }
+  if (set_stl_options)
+    ak_opt_set(AK_OPT_STL_EXPORT_FORMAT, saved_stl_export_format);
   if (profile)
     core_export_ms = akb_now_ms() - phase_started_at;
   Py_END_ALLOW_THREADS

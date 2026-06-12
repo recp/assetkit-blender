@@ -23,7 +23,10 @@ from ..enums import (
     AK_FILE_TYPE_DAE,
     AK_FILE_TYPE_GLB,
     AK_FILE_TYPE_GLTF,
+    AK_FILE_TYPE_STL,
     AK_FILE_TYPE_WAVEFRONT,
+    AK_STL_EXPORT_ASCII,
+    AK_STL_EXPORT_BINARY,
     AK_INTERPOLATION_LINEAR,
     AK_INTERPOLATION_STEP,
     AK_LIGHT_TYPE_DIRECTIONAL,
@@ -58,6 +61,7 @@ EXPORT_FORMATS = (
     ("GLB", "GLB", "Export binary .glb", AK_FILE_TYPE_GLB, ".glb"),
     ("DAE", "COLLADA (.dae)", "Export COLLADA .dae", AK_FILE_TYPE_DAE, ".dae"),
     ("OBJ", "Wavefront OBJ (.obj)", "Export Wavefront OBJ .obj/.mtl", AK_FILE_TYPE_WAVEFRONT, ".obj"),
+    ("STL", "STL (.stl)", "Export STL triangle mesh", AK_FILE_TYPE_STL, ".stl"),
 )
 
 _AKB_NATIVE_MESH_PAYLOAD = 0x414B4D46
@@ -127,6 +131,7 @@ def export_scene(
     coordinate_conversion: int | None = None,
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
+    stl_format: str = "BINARY",
 ) -> int:
     module = _native_module()
     if module is None:
@@ -137,7 +142,10 @@ def export_scene(
     if path.suffix.lower() != suffix:
         path = path.with_suffix(suffix)
     material_export_mode = _material_export_mode_id(material_export_mode)
+    if file_type == AK_FILE_TYPE_STL:
+        material_export_mode = "DIRECT"
     material_bake_size = _material_bake_size(material_bake_size)
+    stl_export_format = _stl_export_format_id(stl_format)
 
     profile = _profile_enabled()
     started_at = time.perf_counter() if profile else 0.0
@@ -172,7 +180,7 @@ def export_scene(
             export_coord_system = (
                 AKB_LOAD_COORD_Z_UP
                 if coordinate_system is None
-                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_WAVEFRONT}
+                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
                 else AKB_LOAD_COORD_Y_UP
                 if coordinate_system is None
                 else int(coordinate_system)
@@ -180,7 +188,7 @@ def export_scene(
             export_coord_conversion = (
                 AKB_LOAD_COORD_RAW
                 if coordinate_conversion is None
-                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_WAVEFRONT}
+                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
                 else AKB_LOAD_COORD_TRANSFORM
                 if coordinate_conversion is None
                 else int(coordinate_conversion)
@@ -195,6 +203,7 @@ def export_scene(
                 int(dae_index_mode),
                 export_coord_system,
                 export_coord_conversion,
+                stl_export_format,
                 _assetkit_blender_authoring_tool(),
             ))
             if profile:
@@ -234,6 +243,12 @@ def _material_export_mode_id(value: str | None) -> str:
     if mode not in {"DIRECT", "AUTO", "BAKE"}:
         return "AUTO"
     return mode
+
+
+def _stl_export_format_id(value: str | None) -> int:
+    if value == "ASCII":
+        return AK_STL_EXPORT_ASCII
+    return AK_STL_EXPORT_BINARY
 
 
 def _material_bake_size(value: int | str | None) -> int:
@@ -303,10 +318,10 @@ def _collect_scene_items(
         if obj in instancing_skips:
             continue
 
-        if obj.type == "CAMERA":
+        if file_type != AK_FILE_TYPE_STL and obj.type == "CAMERA":
             payload_kinds[obj] = AKB_EXPORT_ITEM_CAMERA
             include_export_chain(obj)
-        elif obj.type == "LIGHT":
+        elif file_type != AK_FILE_TYPE_STL and obj.type == "LIGHT":
             payload_kinds[obj] = AKB_EXPORT_ITEM_LIGHT
             include_export_chain(obj)
         elif file_type == AK_FILE_TYPE_DAE and _can_export_native_curve(obj):
@@ -315,11 +330,15 @@ def _collect_scene_items(
         elif obj.type in _MESH_EXPORT_OBJECT_TYPES:
             payload_kinds[obj] = AKB_EXPORT_ITEM_MESH
             include_export_chain(obj)
-            armature = _mesh_armature_object(obj) if obj.type == "MESH" else None
+            armature = (
+                _mesh_armature_object(obj)
+                if file_type != AK_FILE_TYPE_STL and obj.type == "MESH"
+                else None
+            )
             if armature is not None:
                 mesh_armatures[obj] = armature
                 include_skeleton_chain(armature)
-        elif obj.type == "EMPTY":
+        elif file_type != AK_FILE_TYPE_STL and obj.type == "EMPTY":
             payload_kinds[obj] = AKB_EXPORT_ITEM_NODE
             include_export_chain(obj)
 
@@ -367,7 +386,11 @@ def _collect_scene_items(
         )
         phase_started_at = time.perf_counter()
 
-    animation_payloads = _collect_transform_animations(context, included)
+    animation_payloads = (
+        {}
+        if file_type == AK_FILE_TYPE_STL
+        else _collect_transform_animations(context, included)
+    )
 
     if profile:
         _profile_log(
@@ -375,7 +398,11 @@ def _collect_scene_items(
         )
         phase_started_at = time.perf_counter()
 
-    bone_animation_payloads = _collect_bone_animations(context, needed_armatures)
+    bone_animation_payloads = (
+        {}
+        if file_type == AK_FILE_TYPE_STL
+        else _collect_bone_animations(context, needed_armatures)
+    )
 
     if profile:
         _profile_log(
@@ -495,7 +522,10 @@ def _collect_scene_items(
             else:
                 shared_key = (
                     None
-                    if _mesh_material_bake_required(obj, material_export_mode)
+                    if (
+                        _mesh_material_bake_required(obj, material_export_mode)
+                        or (file_type == AK_FILE_TYPE_STL and _stl_requires_evaluated_mesh(obj))
+                    )
                     else _shared_mesh_payload_key(obj)
                 )
                 if shared_key is not None and shared_key in mesh_payload_cache:
@@ -690,6 +720,27 @@ def _shared_mesh_payload_key(obj: bpy.types.Object) -> tuple[int, tuple[int, ...
         for material in (_material_for_index(obj, mesh, index) for index in range(slot_count))
     )
     return int(mesh.as_pointer()), materials
+
+
+def _stl_requires_evaluated_mesh(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH":
+        return True
+    if getattr(obj, "modifiers", None):
+        return True
+
+    mesh = obj.data
+    shape_keys = getattr(mesh, "shape_keys", None)
+    key_blocks = getattr(shape_keys, "key_blocks", None)
+    if key_blocks is None or len(key_blocks) <= 1:
+        return False
+
+    for key in key_blocks[1:]:
+        try:
+            if abs(float(getattr(key, "value", 0.0))) > 1.0e-6:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
 
 
 def _mesh_material_bake_required(obj: bpy.types.Object, material_export_mode: str) -> bool:
@@ -1801,21 +1852,28 @@ def _mesh_payload(
 ) -> tuple | None:
     profile = _profile_enabled()
     phase_started_at = time.perf_counter() if profile else 0.0
-    uv_layers = _uv_layers(mesh)
+    is_stl = file_type == AK_FILE_TYPE_STL
+    uv_layers = [] if is_stl else _uv_layers(mesh)
     uv_names = tuple(layer.name for layer in uv_layers)
     uv_slot_by_name = {name: index for index, name in enumerate(uv_names)}
-    color_layers = _color_attributes(mesh)
+    color_layers = [] if is_stl else _color_attributes(mesh)
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
-    fps = float(context.scene.render.fps) / float(context.scene.render.fps_base or 1.0)
-    if fps <= 0.0:
-        fps = 24.0
+    fps = 24.0
+    if not is_stl:
+        fps = float(context.scene.render.fps) / float(context.scene.render.fps_base or 1.0)
+        if fps <= 0.0:
+            fps = 24.0
 
-    morph_targets = _shape_key_targets(mesh, source_mesh)
-    morph_animation = _shape_key_weight_animation(
-        context,
-        source_mesh,
-        morph_targets,
+    morph_targets = [] if is_stl else _shape_key_targets(mesh, source_mesh)
+    morph_animation = (
+        None
+        if is_stl
+        else _shape_key_weight_animation(
+            context,
+            source_mesh,
+            morph_targets,
+        )
     )
     morph_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
@@ -1834,8 +1892,8 @@ def _mesh_payload(
         file_type,
         material_export_mode,
         material_bake_size,
-        variant_payload=_material_variant_payload(obj),
-        skin_setup=skin_setup,
+        variant_payload=None if is_stl else _material_variant_payload(obj),
+        skin_setup=None if is_stl else skin_setup,
         morph_targets=morph_targets,
         morph_animation=morph_animation,
     )
@@ -1869,24 +1927,28 @@ def _native_mesh_payload(
     morph_targets: list | None = None,
     morph_animation: tuple | None = None,
 ):
-    material_payloads = tuple(
-        _cached_material_tuple(
-            _material_for_index(obj, mesh, index),
-            image_store,
-            material_cache,
-            uv_slot_by_name,
-            uv_names,
-            fps,
-            context,
-            obj,
-            mesh,
-            index,
-            file_type,
-            material_export_mode,
-            material_bake_size,
+    if file_type == AK_FILE_TYPE_STL:
+        material_payloads = ()
+        variant_payload = None
+    else:
+        material_payloads = tuple(
+            _cached_material_tuple(
+                _material_for_index(obj, mesh, index),
+                image_store,
+                material_cache,
+                uv_slot_by_name,
+                uv_names,
+                fps,
+                context,
+                obj,
+                mesh,
+                index,
+                file_type,
+                material_export_mode,
+                material_bake_size,
+            )
+            for index in range(len(mesh.materials))
         )
-        for index in range(len(mesh.materials))
-    )
     skin_payload = None
     skin_mapping = None
     if skin_setup is not None:

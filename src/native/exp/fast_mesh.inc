@@ -516,6 +516,168 @@ akb_export_read_tri_materials(PyObject  *loop_tris_obj,
 }
 
 static int
+akb_export_add_stl_compact_tri_mesh_payload_to_node(AkDoc        *doc,
+                                                    AkNode       *node,
+                                                    const char   *name,
+                                                    const float  *positions,
+                                                    Py_ssize_t    vertex_count,
+                                                    const int32_t *loop_vertices,
+                                                    const int32_t *tri_loops,
+                                                    Py_ssize_t    loop_count,
+                                                    Py_ssize_t    tri_count,
+                                                    PyObject     *mesh_extra_obj,
+                                                    PyObject     *geometry_extra_obj,
+                                                    PyObject     *primitive_extra_obj) {
+  AkHeap          *heap;
+  AkGeometry      *geom;
+  AkObject        *mesh_obj;
+  AkMesh          *mesh;
+  AkTriangles     *tri;
+  AkMeshPrimitive *prim;
+  uint32_t        *raw_indices;
+  size_t           raw_count;
+  size_t           raw_i;
+  uint32_t         max_index;
+  int              ok;
+
+  if (!doc || !node || !positions || !loop_vertices || !tri_loops
+      || vertex_count <= 0 || loop_count <= 0 || tri_count <= 0)
+    return 0;
+  if (vertex_count > UINT32_MAX || tri_count > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "STL mesh is too large");
+    return 0;
+  }
+  if ((size_t)tri_count > SIZE_MAX / 3u) {
+    PyErr_SetString(PyExc_OverflowError, "STL index buffer is too large");
+    return 0;
+  }
+
+  raw_count = (size_t)tri_count * 3u;
+  raw_indices = (uint32_t *)malloc(raw_count * sizeof(*raw_indices));
+  if (!raw_indices) {
+    PyErr_NoMemory();
+    return 0;
+  }
+
+  raw_i = 0;
+  max_index = 0;
+  ok = 1;
+  for (Py_ssize_t tri_index = 0; tri_index < tri_count && ok; tri_index++) {
+    for (uint32_t corner = 0; corner < 3u; corner++) {
+      int32_t  loop_index_i;
+      int32_t  vertex_index_i;
+      uint32_t vertex_index;
+
+      loop_index_i = tri_loops[(size_t)tri_index * 3u + corner];
+      if (loop_index_i < 0 || loop_index_i >= loop_count) {
+        PyErr_SetString(PyExc_ValueError, "loop triangle references a missing mesh loop");
+        ok = 0;
+        break;
+      }
+      vertex_index_i = loop_vertices[loop_index_i];
+      if (vertex_index_i < 0 || vertex_index_i >= vertex_count) {
+        PyErr_SetString(PyExc_ValueError, "mesh loop references a missing vertex");
+        ok = 0;
+        break;
+      }
+      vertex_index = (uint32_t)vertex_index_i;
+      raw_indices[raw_i++] = vertex_index;
+      if (vertex_index > max_index)
+        max_index = vertex_index;
+    }
+  }
+  if (!ok)
+    goto done;
+
+  heap = ak_heap_getheap(doc);
+  if (!heap) {
+    PyErr_SetString(PyExc_RuntimeError, "AssetKit export heap is unavailable");
+    ok = 0;
+    goto done;
+  }
+
+  geom = (AkGeometry *)ak_heap_calloc(heap, doc, sizeof(*geom));
+  if (!geom) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done;
+  }
+  geom->name = name && name[0] ? name : NULL;
+  ak_setypeid(geom, AKT_GEOMETRY);
+
+  mesh_obj = ak_objAlloc(heap, geom, sizeof(*mesh), AK_GEOMETRY_MESH, true);
+  if (!mesh_obj) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done;
+  }
+  geom->gdata = mesh_obj;
+  mesh = (AkMesh *)ak_objGet(mesh_obj);
+  mesh->geom = geom;
+  mesh->name = name && name[0] ? name : NULL;
+  if (!akb_export_apply_direct_extra(doc, geom, &mesh->extra, mesh_extra_obj)
+      || !akb_export_apply_direct_extra(doc, geom, &geom->extra, geometry_extra_obj)) {
+    ok = 0;
+    goto done;
+  }
+
+  tri = (AkTriangles *)ak_heap_calloc(heap, mesh_obj, sizeof(*tri));
+  if (!tri) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done;
+  }
+  tri->mode = AK_TRIANGLES;
+  prim = &tri->base;
+  prim->mesh = mesh;
+  prim->type = AK_PRIMITIVE_TRIANGLES;
+  prim->nPolygons = (uint32_t)tri_count;
+  prim->indexStride = 1u;
+  prim->indices = akb_export_index_array_from_u32_max(heap,
+                                                      prim,
+                                                      raw_indices,
+                                                      raw_count,
+                                                      max_index);
+  if (!prim->indices) {
+    ok = 0;
+    goto done;
+  }
+
+  if (!akb_export_add_input_buffer(heap,
+                                   doc,
+                                   prim,
+                                   positions,
+                                   (size_t)vertex_count * 3u * sizeof(float),
+                                   (uint32_t)vertex_count,
+                                   AK_COMPONENT_SIZE_VEC3,
+                                   AKT_FLOAT,
+                                   3,
+                                   AK_INPUT_POSITION,
+                                   "POSITION",
+                                   0)) {
+    ok = 0;
+    goto done;
+  }
+
+  if (!akb_export_apply_direct_extra(doc, geom, &prim->extra, primitive_extra_obj)) {
+    ok = 0;
+    goto done;
+  }
+
+  mesh->primitive = prim;
+  mesh->primitiveCount = 1u;
+  AKB_LIB_APPEND(doc->lib.geometries, geom, next);
+  if (!ak_nodeAttachGeometry(node, geom))
+    ok = 0;
+  if (!ok && !PyErr_Occurred())
+    PyErr_SetString(PyExc_RuntimeError, "failed to attach STL mesh geometry");
+
+done:
+  free(raw_indices);
+  return ok;
+}
+
+static int
 akb_export_add_obj_compact_tri_mesh_payload_to_node(AkDoc       *doc,
                                                     AkNode      *node,
                                                     const char  *name,
@@ -2160,11 +2322,13 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   int has_tangents;
   int has_skin;
   int has_morph;
+  int is_stl_export;
   int flip_uv_v;
   int ok;
 
   if (!doc || !node || !payload_obj)
     return 0;
+  is_stl_export = doc->inf && doc->inf->ftype == AK_FILE_TYPE_STL;
   flip_uv_v = doc->inf
               && (doc->inf->ftype == AK_FILE_TYPE_GLTF
                   || doc->inf->ftype == AK_FILE_TYPE_GLB);
@@ -2303,7 +2467,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   vertices_obj = akb_export_attr_obj(mesh_py, "vertices");
   loops_obj = akb_export_attr_obj(mesh_py, "loops");
   loop_tris_obj = akb_export_attr_obj(mesh_py, "loop_triangles");
-  corner_normals_obj = akb_export_attr_obj(mesh_py, "corner_normals");
+  corner_normals_obj = is_stl_export ? Py_NewRef(Py_None) : akb_export_attr_obj(mesh_py, "corner_normals");
   if (!vertices_obj || !loops_obj || !loop_tris_obj || !corner_normals_obj) {
     Py_XDECREF(vertices_obj);
     Py_XDECREF(loops_obj);
@@ -2371,7 +2535,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(colors, 0, sizeof(colors));
   memset(color_domains, 0, sizeof(color_domains));
   positions_buf = akb_export_array_new("f", vertex_count * 3);
-  normals_buf = akb_export_array_new("f", loop_count * 3);
+  normals_buf = is_stl_export ? NULL : akb_export_array_new("f", loop_count * 3);
   tangents_buf = NULL;
   loop_vertices_buf = akb_export_array_new("i", loop_count);
   tri_loops_buf = akb_export_array_new("i", tri_count * 3);
@@ -2392,14 +2556,14 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(&morph_build, 0, sizeof(morph_build));
   ok = 1;
 
-  if (!positions_buf || !normals_buf || !loop_vertices_buf || !tri_loops_buf
+  if (!positions_buf || (!is_stl_export && !normals_buf) || !loop_vertices_buf || !tri_loops_buf
       || (has_morph && (!morph_deltas || !morph_bufs || !morph_views || !morph_data_objs))) {
     PyErr_NoMemory();
     ok = 0;
     goto done_native;
   }
   if (PyObject_GetBuffer(positions_buf, &positions_view, PyBUF_SIMPLE) < 0
-      || PyObject_GetBuffer(normals_buf, &normals_view, PyBUF_SIMPLE) < 0
+      || (!is_stl_export && PyObject_GetBuffer(normals_buf, &normals_view, PyBUF_SIMPLE) < 0)
       || PyObject_GetBuffer(loop_vertices_buf, &loop_vertices_view, PyBUF_SIMPLE) < 0
       || PyObject_GetBuffer(tri_loops_buf, &tri_loops_view, PyBUF_SIMPLE) < 0) {
     ok = 0;
@@ -2407,12 +2571,12 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   }
 
   positions = (float *)positions_view.buf;
-  normals = (float *)normals_view.buf;
+  normals = is_stl_export ? NULL : (float *)normals_view.buf;
   tangents = NULL;
   loop_vertices = (int32_t *)loop_vertices_view.buf;
   tri_loops = (int32_t *)tri_loops_view.buf;
   tri_materials = NULL;
-  if (!positions || !normals || !loop_vertices || !tri_loops) {
+  if (!positions || (!is_stl_export && !normals) || !loop_vertices || !tri_loops) {
     PyErr_NoMemory();
     ok = 0;
     goto done_native;
@@ -2524,8 +2688,27 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   }
   ok = ok
        && akb_export_foreach_get_buffer(loops_obj, "vertex_index", loop_vertices_buf, "i")
-       && akb_export_foreach_get_buffer(loop_tris_obj, "loops", tri_loops_buf, "i")
-       && akb_export_foreach_get_buffer(corner_normals_obj, "vector", normals_buf, "f");
+       && akb_export_foreach_get_buffer(loop_tris_obj, "loops", tri_loops_buf, "i");
+  if (!ok)
+    goto done_native;
+
+  if (is_stl_export) {
+    ok = akb_export_add_stl_compact_tri_mesh_payload_to_node(doc,
+                                                             node,
+                                                             name,
+                                                             positions,
+                                                             vertex_count,
+                                                             loop_vertices,
+                                                             tri_loops,
+                                                             loop_count,
+                                                             tri_count,
+                                                             mesh_extra_obj,
+                                                             geometry_extra_obj,
+                                                             primitive_extra_obj);
+    goto done_native;
+  }
+
+  ok = akb_export_foreach_get_buffer(corner_normals_obj, "vector", normals_buf, "f");
   if (!ok)
     goto done_native;
 

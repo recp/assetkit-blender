@@ -42,7 +42,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".gltf"
     filter_glob: bpy.props.StringProperty(
-        default="*.gltf;*.glb;*.dae;*.obj",
+        default="*.gltf;*.glb;*.dae;*.obj;*.stl",
         options={"HIDDEN"},
     )
     assetkit_last_filepath: bpy.props.StringProperty(
@@ -71,7 +71,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Mode",
         description="Coordinate handling for AssetKit export",
         items=(
-            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, OBJ/COLLADA authored coordinates"),
+            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, OBJ/COLLADA/STL authored coordinates"),
             ("TRANSFORM", "Convert Data", "Export in the selected target coordinate system"),
             ("RAW", "Raw", "Do not change AssetKit document coordinates before export"),
         ),
@@ -127,16 +127,26 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="1024",
     )
+    stl_format: bpy.props.EnumProperty(
+        name="Format",
+        description="STL file encoding",
+        items=(
+            ("BINARY", "Binary", "Export compact binary STL"),
+            ("ASCII", "ASCII", "Export text STL"),
+        ),
+        default="BINARY",
+    )
 
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "export_format")
         layout.prop(self, "selected_only")
-        materials = layout.box()
-        materials.label(text="Materials")
-        materials.prop(self, "material_export_mode")
-        if self.material_export_mode != "DIRECT":
-            materials.prop(self, "material_bake_size")
+        if self.export_format != "STL":
+            materials = layout.box()
+            materials.label(text="Materials")
+            materials.prop(self, "material_export_mode")
+            if self.material_export_mode != "DIRECT":
+                materials.prop(self, "material_bake_size")
         coords = layout.box()
         coords.label(text="Coordinates")
         coords.prop(self, "coordinate_conversion")
@@ -147,6 +157,10 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             dae.label(text="COLLADA")
             dae.prop(self, "dae_version")
             dae.prop(self, "dae_index_mode")
+        if self.export_format == "STL":
+            stl = layout.box()
+            stl.label(text="STL")
+            stl.prop(self, "stl_format")
 
     def check(self, _context):
         path_changed = self.filepath != self.assetkit_last_filepath
@@ -182,7 +196,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         coord_conversion = self.coordinate_conversion
         coord_system = self.coordinate_system
         if coord_conversion == "AUTO":
-            if self.export_format in {"DAE", "OBJ"}:
+            if self.export_format in {"DAE", "OBJ", "STL"}:
                 coord_conversion = "RAW"
                 coord_system = "Z_UP"
             else:
@@ -203,6 +217,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 coordinate_conversion=_coord_conversion_id(coord_conversion),
                 material_export_mode=self.material_export_mode,
                 material_bake_size=int(self.material_bake_size),
+                stl_format=self.stl_format,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
