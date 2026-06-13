@@ -20,6 +20,7 @@ from ..enums import (
     AK_DAE_EXPORT_INDEX_AUTO,
     AK_DAE_EXPORT_INDEX_SINGLE,
     AK_DAE_EXPORT_VERSION_AUTO,
+    AK_FILE_TYPE_3MF,
     AK_FILE_TYPE_DAE,
     AK_FILE_TYPE_GLB,
     AK_FILE_TYPE_GLTF,
@@ -65,6 +66,7 @@ from .materials import _material_bake_required, _material_tuple
 EXPORT_FORMATS = (
     ("GLTF", "glTF", "Export .gltf with external .bin/resources", AK_FILE_TYPE_GLTF, ".gltf"),
     ("GLB", "GLB", "Export binary .glb", AK_FILE_TYPE_GLB, ".glb"),
+    ("3MF", "3MF (.3mf)", "Export 3D Manufacturing Format package", AK_FILE_TYPE_3MF, ".3mf"),
     ("DAE", "COLLADA (.dae)", "Export COLLADA .dae", AK_FILE_TYPE_DAE, ".dae"),
     ("OBJ", "Wavefront OBJ (.obj)", "Export Wavefront OBJ .obj/.mtl", AK_FILE_TYPE_WAVEFRONT, ".obj"),
     ("STL", "STL (.stl)", "Export STL triangle mesh", AK_FILE_TYPE_STL, ".stl"),
@@ -411,18 +413,23 @@ def _export_scene_once(
         try:
             native_started_at = time.perf_counter() if profile else 0.0
             doc_extra = _export_document_extra(context) if export_custom_properties else None
+            raw_z_up_formats = {
+                AK_FILE_TYPE_3MF,
+                AK_FILE_TYPE_DAE,
+                AK_FILE_TYPE_PLY,
+                AK_FILE_TYPE_STL,
+                AK_FILE_TYPE_WAVEFRONT,
+            }
             export_coord_system = (
                 AKB_LOAD_COORD_Z_UP
-                if coordinate_system is None
-                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
+                if coordinate_system is None and file_type in raw_z_up_formats
                 else AKB_LOAD_COORD_Y_UP
                 if coordinate_system is None
                 else int(coordinate_system)
             )
             export_coord_conversion = (
                 AKB_LOAD_COORD_RAW
-                if coordinate_conversion is None
-                and file_type in {AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT}
+                if coordinate_conversion is None and file_type in raw_z_up_formats
                 else AKB_LOAD_COORD_TRANSFORM
                 if coordinate_conversion is None
                 else int(coordinate_conversion)
@@ -613,7 +620,7 @@ def _resolve_apply_modifiers(
         return bool(stl_value)
     if file_type == AK_FILE_TYPE_PLY and ply_value is not None:
         return bool(ply_value)
-    return file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT}
+    return file_type in {AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT}
 
 
 def _resolve_format_bool(value: bool | None, legacy_value: bool | None, default: bool) -> bool:
@@ -2592,9 +2599,9 @@ def _mesh_payload(
 ) -> tuple | None:
     profile = _profile_enabled()
     phase_started_at = time.perf_counter() if profile else 0.0
-    is_stl = file_type == AK_FILE_TYPE_STL
+    is_stl = file_type in {AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL}
     is_ply = file_type == AK_FILE_TYPE_PLY
-    is_static_mesh = file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
+    is_static_mesh = file_type in {AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
     uv_layers = [] if is_stl or not export_uv or (is_ply and not ply_export_uv) else _uv_layers(mesh)
     color_layers = [] if is_stl or not export_vertex_colors or (is_ply and not ply_export_colors) else _color_attributes(mesh)
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0

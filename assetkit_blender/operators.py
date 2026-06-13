@@ -27,7 +27,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 
     filename_ext = ""
     filter_glob: bpy.props.StringProperty(
-        default="*.gltf;*.glb;*.dae;*.obj;*.stl;*.ply",
+        default="*.gltf;*.glb;*.dae;*.obj;*.stl;*.ply;*.3mf",
         options={"HIDDEN"},
     )
     coordinate_conversion: bpy.props.EnumProperty(

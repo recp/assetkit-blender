@@ -1,10 +1,11 @@
 # AssetKit Blender
 
-Blender add-on for importing 3D assets through AssetKit.
+Blender add-on for importing and exporting 3D assets through AssetKit.
 
 ## Formats
 
 - glTF / GLB
+- 3MF
 - COLLADA DAE
 - OBJ
 - STL

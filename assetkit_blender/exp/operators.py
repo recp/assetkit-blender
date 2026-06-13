@@ -35,10 +35,11 @@ _FORMAT_BY_SUFFIX = {
 }
 
 _MESH_TRANSFORM_FORMATS = {"OBJ", "STL", "PLY"}
-_APPLY_MODIFIER_FORMATS = {"GLTF", "GLB", "DAE", "OBJ", "STL", "PLY"}
+_APPLY_MODIFIER_FORMATS = {"GLTF", "GLB", "3MF", "DAE", "OBJ", "STL", "PLY"}
 _SCENE_DATA_FORMATS = {"GLTF", "GLB", "DAE"}
-_MATERIAL_FORMATS = {"GLTF", "GLB", "DAE", "OBJ"}
-_MESH_DATA_FORMATS = {"GLTF", "GLB", "DAE", "OBJ", "PLY"}
+_CUSTOM_PROPERTY_FORMATS = {"GLTF", "GLB", "3MF", "DAE"}
+_MATERIAL_FORMATS = {"GLTF", "GLB", "3MF", "DAE", "OBJ"}
+_MESH_DATA_FORMATS = {"GLTF", "GLB", "3MF", "DAE", "OBJ", "PLY"}
 _ANIMATION_FORMATS = {"GLTF", "GLB", "DAE"}
 
 _FORWARD_AXIS_ITEMS = (
@@ -112,7 +113,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".gltf"
     filter_glob: bpy.props.StringProperty(
-        default="*.gltf;*.glb;*.dae;*.obj;*.stl;*.ply",
+        default="*.gltf;*.glb;*.dae;*.obj;*.stl;*.ply;*.3mf",
         options={"HIDDEN"},
     )
     assetkit_last_filepath: bpy.props.StringProperty(
@@ -262,7 +263,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Mode",
         description="Coordinate handling for AssetKit export",
         items=(
-            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, OBJ/COLLADA/STL/PLY authored coordinates"),
+            ("AUTO", "Auto", "Use format defaults: glTF/GLB Y-up, 3MF/OBJ/COLLADA/STL/PLY authored coordinates"),
             ("TRANSFORM", "Convert Data", "Export in the selected target coordinate system"),
             ("RAW", "Raw", "Do not change AssetKit document coordinates before export"),
         ),
@@ -488,6 +489,9 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             data.prop(self, "export_cameras")
             data.prop(self, "export_lights")
             data.prop(self, "export_custom_properties")
+        elif self.export_format in _CUSTOM_PROPERTY_FORMATS:
+            data = include.column(heading="Metadata", align=True)
+            data.prop(self, "export_custom_properties")
 
     def _draw_data_settings(self, layout):
         has_mesh_settings = self.export_format in _MESH_DATA_FORMATS
@@ -599,7 +603,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             coord_conversion = "RAW"
             coord_system = "Z_UP"
         elif coord_conversion == "AUTO":
-            if self.export_format in {"DAE", "OBJ", "STL", "PLY"}:
+            if self.export_format in {"3MF", "DAE", "OBJ", "STL", "PLY"}:
                 coord_conversion = "RAW"
                 coord_system = "Z_UP"
             else:
@@ -624,10 +628,10 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 material_bake_size=int(self.material_bake_size),
                 export_visible=self.export_visible,
                 export_renderable=self.export_renderable,
-                export_cameras=self.export_cameras if self.export_format in _SCENE_DATA_FORMATS else True,
-                export_lights=self.export_lights if self.export_format in _SCENE_DATA_FORMATS else True,
+                export_cameras=self.export_cameras if self.export_format in _SCENE_DATA_FORMATS else False,
+                export_lights=self.export_lights if self.export_format in _SCENE_DATA_FORMATS else False,
                 export_custom_properties=(
-                    self.export_custom_properties if self.export_format in _SCENE_DATA_FORMATS else True
+                    self.export_custom_properties if self.export_format in _CUSTOM_PROPERTY_FORMATS else True
                 ),
                 export_uv=self.export_uv if self.export_format in _MESH_DATA_FORMATS else True,
                 export_normals=self.export_normals if self.export_format in _MESH_DATA_FORMATS else True,

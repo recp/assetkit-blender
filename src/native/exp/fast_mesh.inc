@@ -2685,6 +2685,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   int has_tangents;
   int has_skin;
   int has_morph;
+  int is_3mf_export;
   int is_stl_export;
   int is_ply_export;
   int ply_export_normals;
@@ -2698,6 +2699,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
 
   if (!doc || !node || !payload_obj)
     return 0;
+  is_3mf_export = doc->inf && doc->inf->ftype == AK_FILE_TYPE_3MF;
   is_stl_export = doc->inf && doc->inf->ftype == AK_FILE_TYPE_STL;
   is_ply_export = doc->inf && doc->inf->ftype == AK_FILE_TYPE_PLY;
   flip_uv_v = doc->inf
@@ -2776,6 +2778,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       return 0;
   }
   want_normals = !is_stl_export
+                 && !is_3mf_export
                  && export_normals
                  && !(is_ply_export && !ply_export_normals);
   if (is_ply_export)
@@ -3128,7 +3131,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   if (!ok)
     goto done_native;
 
-  if (is_stl_export) {
+  if (is_stl_export || is_3mf_export) {
     ok = akb_export_add_stl_compact_tri_mesh_payload_to_node(doc,
                                                              node,
                                                              name,
