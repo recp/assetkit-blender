@@ -37,6 +37,42 @@ akb_extract_node_camera(AkbSceneNode *out, AkNode *node) {
   }
 }
 
+static float
+akb_matrix_axis_len(const float matrix[16], int offset) {
+  float x;
+  float y;
+  float z;
+
+  x = matrix[offset];
+  y = matrix[offset + 1];
+  z = matrix[offset + 2];
+  return sqrtf(x * x + y * y + z * z);
+}
+
+static float
+akb_node_light_preview_energy(const AkDoc *doc,
+                              const AkbSceneNode *node,
+                              const AkResolvedLight *light) {
+  float energy;
+  float scale;
+
+  energy = light->intensity;
+  if (!doc || !doc->inf || doc->inf->ftype != AK_FILE_TYPE_COLLADA)
+    return energy;
+  if (light->attenuationFalloffExponent > 0.001f || light->range > 0.001f)
+    return energy;
+
+  scale = (akb_matrix_axis_len(node->matrix, 0)
+           + akb_matrix_axis_len(node->matrix, 4)
+           + akb_matrix_axis_len(node->matrix, 8)) / 3.0f;
+  if (!isfinite(scale) || scale <= 1.0f)
+    return energy;
+  if (scale > 64.0f)
+    scale = 64.0f;
+
+  return energy * scale;
+}
+
 static void
 akb_extract_node_light(AkbSceneNode *out, AkDoc *doc, AkNode *node) {
   AkLight *light;
@@ -55,7 +91,7 @@ akb_extract_node_light(AkbSceneNode *out, AkDoc *doc, AkNode *node) {
   out->light_color[0] = resolved.color.rgba.R;
   out->light_color[1] = resolved.color.rgba.G;
   out->light_color[2] = resolved.color.rgba.B;
-  out->light_values[0] = resolved.intensity;
+  out->light_values[0] = akb_node_light_preview_energy(doc, out, &resolved);
   out->light_values[1] = resolved.range;
 
   if (resolved.type == AK_LIGHT_TYPE_SPOT) {
