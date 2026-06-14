@@ -55,6 +55,7 @@ akb_node_light_preview_energy(const AkDoc *doc,
                               const AkResolvedLight *light) {
   float energy;
   float scale;
+  float preview_scale;
 
   energy = light->intensity;
   if (!doc || !doc->inf || doc->inf->ftype != AK_FILE_TYPE_COLLADA)
@@ -70,7 +71,11 @@ akb_node_light_preview_energy(const AkDoc *doc,
   if (scale > 64.0f)
     scale = 64.0f;
 
-  return energy * scale;
+  preview_scale = 1.0f + (sqrtf(scale) - 1.0f) * 2.0f;
+  if (preview_scale > 16.0f)
+    preview_scale = 16.0f;
+
+  return energy * preview_scale;
 }
 
 static void
