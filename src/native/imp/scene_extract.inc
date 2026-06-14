@@ -38,34 +38,30 @@ akb_extract_node_camera(AkbSceneNode *out, AkNode *node) {
 }
 
 static void
-akb_extract_node_light(AkbSceneNode *out, AkNode *node) {
+akb_extract_node_light(AkbSceneNode *out, AkDoc *doc, AkNode *node) {
   AkLight *light;
-  AkLightBase *base;
+  AkResolvedLight resolved;
 
   if (!out || !node || !node->light)
     return;
 
   light = (AkLight *)ak_instanceObject(node->light);
-  if (!light || !light->data)
+  if (!ak_lightResolve(doc, light, AK_LIGHT_RESOLVE_PREVIEW, &resolved))
     return;
 
-  base = light->data;
   out->light_extra = ak_extra(light);
-  out->light_type = (uint8_t)base->type;
+  out->light_type = (uint8_t)resolved.type;
   out->light_name = akb_name(light->name, out->name);
-  out->light_color[0] = base->color.rgba.R;
-  out->light_color[1] = base->color.rgba.G;
-  out->light_color[2] = base->color.rgba.B;
-  out->light_values[0] = base->intensity;
-  out->light_values[1] = base->range;
+  out->light_color[0] = resolved.color.rgba.R;
+  out->light_color[1] = resolved.color.rgba.G;
+  out->light_color[2] = resolved.color.rgba.B;
+  out->light_values[0] = resolved.intensity;
+  out->light_values[1] = resolved.range;
 
-  if (base->type == AK_LIGHT_TYPE_SPOT) {
-    AkSpotLight *spot;
-
-    spot = (AkSpotLight *)base;
-    out->light_values[2] = spot->innerConeAngle;
-    out->light_values[3] = spot->outerConeAngle;
-    out->light_values[4] = spot->coneFalloffExponent;
+  if (resolved.type == AK_LIGHT_TYPE_SPOT) {
+    out->light_values[2] = resolved.innerConeAngle;
+    out->light_values[3] = resolved.outerConeAngle;
+    out->light_values[4] = resolved.coneFalloffExponent;
   }
 }
 
@@ -93,7 +89,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   ak_transformCombine(node->transform, out.matrix);
   out.has_transform = 1;
   akb_extract_node_camera(&out, node);
-  akb_extract_node_light(&out, node);
+  akb_extract_node_light(&out, doc, node);
   if ((anim_index && anim_index->count)
       || (!anim_index && doc && doc->lib.animations.first)) {
     out.animation = akb_animation_new(doc, doc_owner, node, anim_index, coord, &ok);
