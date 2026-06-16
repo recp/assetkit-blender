@@ -67,6 +67,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int file_type_int;
   PyObject *items_obj;
   PyObject *doc_extra_obj;
+  uintptr_t saved_gltf_version;
   uintptr_t saved_dae_version;
   uintptr_t saved_dae_index_mode;
   uintptr_t saved_stl_export_format;
@@ -95,6 +96,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   double core_export_ms;
   int profile;
   int ok;
+  int gltf_version;
   int dae_version;
   int dae_index_mode;
   int stl_export_format;
@@ -105,6 +107,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int ply_export_triangulated;
   int export_coord_system_id;
   int export_coord_conversion_id;
+  int set_gltf_options;
   int set_dae_options;
   int set_stl_options;
   int set_ply_options;
@@ -118,6 +121,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   memset(&geometry_cache, 0, sizeof(geometry_cache));
 
   doc_extra_obj = Py_None;
+  gltf_version = AK_GLTF_EXPORT_VERSION_AUTO;
   dae_version = AK_DAE_EXPORT_VERSION_AUTO;
   dae_index_mode = AK_DAE_EXPORT_INDEX_AUTO;
   stl_export_format = AK_STL_EXPORT_BINARY;
@@ -133,12 +137,13 @@ akb_export_scene(PyObject *self, PyObject *args) {
   stl_forward_axis = "Y";
   stl_up_axis = "Z";
   if (!PyArg_ParseTuple(args,
-                        "sisO|Oiiiiiiiiiisdss",
+                        "sisO|O" "iiiiiiiiiii" "sdss",
                         &out_dir,
                         &file_type_int,
                         &name,
                         &items_obj,
                         &doc_extra_obj,
+                        &gltf_version,
                         &dae_version,
                         &dae_index_mode,
                         &export_coord_system_id,
@@ -506,6 +511,12 @@ akb_export_scene(PyObject *self, PyObject *args) {
     coord_ms = akb_now_ms() - phase_started_at;
     phase_started_at = akb_now_ms();
   }
+  set_gltf_options = file_type_int == AK_FILE_TYPE_GLTF
+                     || file_type_int == AK_FILE_TYPE_GLB;
+  if (set_gltf_options) {
+    saved_gltf_version = ak_opt_get(AK_OPT_GLTF_EXPORT_VERSION);
+    ak_opt_set(AK_OPT_GLTF_EXPORT_VERSION, (uintptr_t)gltf_version);
+  }
   set_dae_options = file_type_int == AK_FILE_TYPE_COLLADA;
   if (set_dae_options) {
     saved_dae_version = ak_opt_get(AK_OPT_DAE_EXPORT_VERSION);
@@ -546,6 +557,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
   result = ak_export(doc, out_dir, (AkFileType)file_type_int);
   if (set_authoring_tool)
     ak_opt_set(AK_OPT_EXPORT_AUTHORING_TOOL, saved_authoring_tool);
+  if (set_gltf_options)
+    ak_opt_set(AK_OPT_GLTF_EXPORT_VERSION, saved_gltf_version);
   if (set_dae_options) {
     ak_opt_set(AK_OPT_DAE_EXPORT_VERSION, saved_dae_version);
     ak_opt_set(AK_OPT_DAE_EXPORT_INDEX_MODE, saved_dae_index_mode);

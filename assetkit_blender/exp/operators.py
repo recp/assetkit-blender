@@ -13,6 +13,8 @@ from ..enums import (
     AK_DAE_EXPORT_VERSION_1_4,
     AK_DAE_EXPORT_VERSION_1_5,
     AK_DAE_EXPORT_VERSION_AUTO,
+    AK_GLTF_EXPORT_VERSION_2_0,
+    AK_GLTF_EXPORT_VERSION_AUTO,
 )
 from ..load_options import _coord_conversion_id, _coord_system_id
 from .exporter import EXPORT_FORMATS, export_scene, file_type_from_format, suffix_from_format
@@ -27,6 +29,11 @@ _DAE_INDEX_MODE_VALUES = {
     "AUTO": AK_DAE_EXPORT_INDEX_AUTO,
     "MULTI": AK_DAE_EXPORT_INDEX_MULTI,
     "SINGLE": AK_DAE_EXPORT_INDEX_SINGLE,
+}
+
+_GLTF_VERSION_VALUES = {
+    "AUTO": AK_GLTF_EXPORT_VERSION_AUTO,
+    "2_0": AK_GLTF_EXPORT_VERSION_2_0,
 }
 
 _FORMAT_BY_SUFFIX = {
@@ -104,6 +111,16 @@ def _draw_toggle_panel(
     if body:
         body.active = bool(getattr(operator, prop_name))
     return body
+
+
+def _draw_gltf_version_settings(layout, operator) -> None:
+    layout.prop(operator, "gltf_version")
+
+    row = layout.row(align=True)
+    row.use_property_split = False
+    row.alignment = "RIGHT"
+    row.alert = True
+    row.label(text="2.1 is DRAFT", icon="ERROR")
 
 
 class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
@@ -299,6 +316,15 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="SINGLE",
     )
+    gltf_version: bpy.props.EnumProperty(
+        name="Version",
+        description="glTF asset version for glTF/GLB export",
+        items=(
+            ("AUTO", "Auto", "Use AssetKit's stable glTF writer profile"),
+            ("2_0", "2.0", "Force glTF 2.0 asset version"),
+        ),
+        default="AUTO",
+    )
     material_export_mode: bpy.props.EnumProperty(
         name="Shader Graphs",
         description="How unsupported Blender shader graphs are exported",
@@ -441,7 +467,11 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         self._draw_animation_settings(layout)
 
     def _draw_format_settings(self, layout):
-        if self.export_format == "DAE":
+        if self.export_format in {"GLTF", "GLB"}:
+            gltf = _draw_panel(layout, "ASSETKIT_export_gltf", "glTF", default_closed=False)
+            if gltf:
+                _draw_gltf_version_settings(gltf, self)
+        elif self.export_format == "DAE":
             dae = _draw_panel(layout, "ASSETKIT_export_collada", "COLLADA", default_closed=False)
             if dae:
                 dae.prop(self, "dae_version")
@@ -617,6 +647,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 self.filepath,
                 file_type,
                 selected_only=self.selected_only,
+                gltf_version=_GLTF_VERSION_VALUES.get(self.gltf_version, AK_GLTF_EXPORT_VERSION_AUTO),
                 dae_version=_DAE_VERSION_VALUES.get(self.dae_version, AK_DAE_EXPORT_VERSION_AUTO),
                 dae_index_mode=_DAE_INDEX_MODE_VALUES.get(
                     self.dae_index_mode,
