@@ -4,7 +4,7 @@ Blender add-on for importing and exporting 3D assets through AssetKit.
 
 ## Formats
 
-- glTF / GLB (2.0+
+- glTF / GLB (2.0+)
 - COLLADA DAE (1.4+, 1.5.0+)
 - 3MF
 - OBJ
