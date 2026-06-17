@@ -70,6 +70,11 @@ The release script stages the extension so `blender_manifest.toml` and
 `__init__.py` are at the zip root and native AssetKit runtime libraries are
 included.
 
+## Release assets
+
+Pushing a tag such as `v0.1.0` runs the package matrix and attaches the five
+platform zip files to the GitHub Release for that tag.
+
 ## Install
 
 Install or symlink the `assetkit_blender` package into Blender's add-ons directory, then enable `AssetKit` in Preferences.
