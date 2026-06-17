@@ -465,7 +465,7 @@ class MeshPrimitiveData:
 
 @dataclass(slots=True)
 class CurveData:
-    name: str = "AssetKitCurve"
+    name: str = "AssetKit Curve"
     object_name: str = ""
     kind: int = 1
     point_count: int = 0
@@ -1177,7 +1177,7 @@ class NativeSceneNodeData:
 
     @property
     def name(self):
-        return self._raw[_N_NAME] or "AssetKitNode"
+        return self._raw[_N_NAME] or ""
 
     @property
     def parent_index(self):
@@ -1266,7 +1266,7 @@ def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
             visible = bool(item.get("visible", True))
         nodes.append(
             SceneNodeData(
-                name=item.get("name") or "AssetKitNode",
+                name=item.get("name") or "",
                 parent_index=int(item.get("parent_index") if item.get("parent_index") is not None else -1),
                 matrix_f32=item.get("matrix_f32") or b"",
                 anim_channels=item.get("anim_channels") or [],
@@ -2086,7 +2086,7 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
         for target in get(_M_MORPH_TARGETS) or []:
             morph_targets.append(
                 MorphTargetData(
-                    name=target.get("name") or "AssetKitMorph",
+                    name=target.get("name") or "",
                     weight=float(target.get("weight") if target.get("weight") is not None else 0.0),
                     vertex_count=int(target.get("vertex_count") or 0),
                     positions_f32=target.get("positions_f32") or b"",
@@ -2307,7 +2307,7 @@ class NativeCurveData:
 
     @property
     def name(self):
-        return self._get(_C_NAME, "AssetKitCurve") or "AssetKitCurve"
+        return self._get(_C_NAME, "") or ""
 
     @property
     def object_name(self):
@@ -2371,7 +2371,7 @@ def _native_curves_from_raw(raw_curves: Iterable[dict | tuple]) -> list[CurveDat
         node_index = item.get("node_index")
         curves.append(
             CurveData(
-                name=item.get("name") or "AssetKitCurve",
+                name=item.get("name") or "",
                 object_name=item.get("object_name") or "",
                 kind=int(item.get("kind") or 1),
                 point_count=int(item.get("point_count") or 0),

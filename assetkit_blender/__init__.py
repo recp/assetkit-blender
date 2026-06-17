@@ -1,7 +1,30 @@
+from pathlib import Path
+import tomllib
+
+
+def _manifest_version() -> tuple[int, ...] | None:
+    package_dir = Path(__file__).resolve().parent
+    for manifest in (package_dir / "blender_manifest.toml", package_dir.parent / "blender_manifest.toml"):
+        try:
+            version = tomllib.loads(manifest.read_text(encoding="utf-8")).get("version")
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if not isinstance(version, str):
+            continue
+        try:
+            return tuple(int(part) for part in version.split("."))
+        except ValueError:
+            continue
+    return None
+
+
+__version_tuple__ = _manifest_version() or (0, 1, 0)
+__version__ = ".".join(str(part) for part in __version_tuple__)
+
 bl_info = {
     "name": "AssetKit",
     "author": "Recep Aslantas",
-    "version": (0, 1, 0),
+    "version": __version_tuple__,
     "blender": (4, 5, 0),
     "location": "File > Import/Export > AssetKit",
     "description": "Import and export 3D assets through AssetKit",

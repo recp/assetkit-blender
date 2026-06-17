@@ -581,6 +581,9 @@ def _export_stl_batch_scene(
 def _assetkit_blender_authoring_tool() -> str:
     root_name = __package__.split(".", 1)[0]
     root_mod = sys.modules.get(root_name)
+    version_text = getattr(root_mod, "__version__", "") if root_mod is not None else ""
+    if version_text:
+        return f"AssetKit Blender v{version_text}"
     info = getattr(root_mod, "bl_info", {}) if root_mod is not None else {}
     version = info.get("version") if isinstance(info, dict) else None
     if isinstance(version, tuple) and version:
@@ -3220,7 +3223,10 @@ def _action_has_visibility_animation(action: bpy.types.Action) -> bool:
 def _is_assetkit_synthetic_helper_object(obj: bpy.types.Object) -> bool:
     if not bool(obj.get("assetkit_helper_object", False)):
         return False
-    if obj.name not in {"AssetKit Coordinates", "AssetKitNode"}:
+    if (
+        not bool(obj.get("assetkit_coordinate_root", False))
+        and obj.name not in {"AssetKit Root", "AssetKit Coordinate Root", "AssetKit Coordinates"}
+    ):
         return False
     if _assetkit_json_prop(obj, "assetkit_node_extra_json") is not None:
         return False

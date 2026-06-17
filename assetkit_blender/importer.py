@@ -2018,7 +2018,7 @@ def _focus_imported_objects(
         return
 
     _frame_viewports(bounds, objects)
-    if scene_was_empty:
+    if scene_was_empty and focus_camera is not None:
         _frame_camera(bounds, collection, focus_camera)
 
 
@@ -2221,10 +2221,7 @@ def _frame_camera(
 ) -> None:
     scene = bpy.context.scene
     if camera_obj is None:
-        camera = bpy.data.cameras.new("AssetKit Camera")
-        camera_obj = bpy.data.objects.new("AssetKit Camera", camera)
-        collection.objects.link(camera_obj)
-        scene.camera = camera_obj
+        return
     elif scene.camera is None:
         scene.camera = camera_obj
 
@@ -4660,7 +4657,7 @@ def _remove_fcurves(action: bpy.types.Action, data_path: str) -> None:
 
 
 def _new_scene_node_object(node: SceneNodeData, index: int, visible: bool) -> bpy.types.Object:
-    name = node.name or f"AssetKitNode_{index}"
+    name = node.name or f"AssetKit Node {index}"
 
     if node.camera_type:
         camera = bpy.data.cameras.new(node.camera_name or name)
@@ -4741,7 +4738,8 @@ def _set_node_visibility(obj: bpy.types.Object, visible: bool) -> None:
 def _hide_helper_object(obj: bpy.types.Object, hide_empty: bool = False) -> None:
     obj["assetkit_helper_object"] = True
     if obj.type == "EMPTY":
-        _hide_empty_helper_object(obj)
+        if hide_empty:
+            _hide_empty_helper_object(obj)
         return
 
     obj.hide_select = True
@@ -4760,6 +4758,10 @@ def _hide_empty_helper_object(obj: bpy.types.Object) -> None:
     if not obj.get("assetkit_helper_object"):
         obj["assetkit_helper_object"] = True
     obj.hide_select = True
+    try:
+        obj.hide_set(True)
+    except Exception:
+        pass
     obj.hide_viewport = True
     obj.hide_render = True
     obj["assetkit_helper_hidden"] = True
@@ -4775,12 +4777,13 @@ def _create_coord_root(
         if matrix is None:
             continue
 
-        root = bpy.data.objects.new("AssetKit Coordinates", None)
+        root = bpy.data.objects.new("AssetKit Root", None)
         root.empty_display_type = "ARROWS"
         root.empty_display_size = 0.5
         root.matrix_local = matrix
+        root["assetkit_helper_object"] = True
+        root["assetkit_coordinate_root"] = True
         collection.objects.link(root)
-        _hide_helper_object(root)
         return root
 
     for curve in curves or ():
@@ -4788,12 +4791,13 @@ def _create_coord_root(
         if matrix is None:
             continue
 
-        root = bpy.data.objects.new("AssetKit Coordinates", None)
+        root = bpy.data.objects.new("AssetKit Root", None)
         root.empty_display_type = "ARROWS"
         root.empty_display_size = 0.5
         root.matrix_local = matrix
+        root["assetkit_helper_object"] = True
+        root["assetkit_coordinate_root"] = True
         collection.objects.link(root)
-        _hide_helper_object(root)
         return root
 
     return None
@@ -4834,7 +4838,7 @@ def _create_curve_object(
     if point_count <= 0 or points is None or len(points) < point_count * 4:
         return None
 
-    curve_data = bpy.data.curves.new(curve.name or "AssetKitCurve", type="CURVE")
+    curve_data = bpy.data.curves.new(curve.name or "AssetKit Curve", type="CURVE")
     curve_data.dimensions = "3D"
     curve_data.resolution_u = 12
 
@@ -4850,7 +4854,7 @@ def _create_curve_object(
         except Exception:
             pass
 
-    obj = bpy.data.objects.new(curve.object_name or curve.name or "AssetKitCurve", curve_data)
+    obj = bpy.data.objects.new(curve.object_name or curve.name or "AssetKit Curve", curve_data)
     collection.objects.link(obj)
     parent, use_node_parent = _mesh_node_parent(state, int(curve.node_index))
     _set_parent(obj, parent)
@@ -5676,7 +5680,7 @@ def _apply_shape_keys(obj: bpy.types.Object, data: MeshPrimitiveData) -> None:
         if coords is None or len(coords) != vertex_count * 3:
             continue
 
-        key = obj.shape_key_add(name=target.name or f"AssetKitMorph_{index}", from_mix=False)
+        key = obj.shape_key_add(name=target.name or f"AssetKit Morph {index}", from_mix=False)
         key.data.foreach_set("co", coords)
         key.value = target.weight
 
@@ -5988,8 +5992,8 @@ def _skin_joint_name(
     if node:
         return node.name
     if node_index >= 0:
-        return f"AssetKitJoint_{node_index}"
-    return f"AssetKitJoint_{joint_index}"
+        return f"AssetKit Joint {node_index}"
+    return f"AssetKit Joint {joint_index}"
 
 
 def _create_skin_vertex_groups(
@@ -6274,7 +6278,7 @@ def _skin_bone_names_by_node(
             names[node_index] = joint_names[joint_index]
             continue
         node = node_objects.get(node_index)
-        names[node_index] = node.name if node else f"AssetKitBone_{node_index}"
+        names[node_index] = node.name if node else f"AssetKit Bone {node_index}"
     return names
 
 
@@ -7102,7 +7106,7 @@ def _variant_material_name(data: MeshPrimitiveData, variant: dict, raw: dict) ->
     if name:
         return str(name)
 
-    base = data.material_name or data.name or "AssetKitMaterial"
+    base = data.material_name or data.name or "AssetKit Material"
     suffix = variant.get("variant_name") or f"Variant_{int(variant.get('variant_index') or 0)}"
     return f"{base}_{suffix}"
 

@@ -43,6 +43,37 @@ cmake --build build
 
 The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is not present, the add-on can still use the configured AssetKit shared library through `ctypes`.
 
+## Production package
+
+Build and validate a Blender Extensions upload zip with one command:
+
+```sh
+python3 tools/release_extension.py --blender /path/to/blender
+```
+
+To include Blender 4.5/5.0 support in the same platform package, add Python
+3.11:
+
+```sh
+python3 tools/release_extension.py --blender /path/to/blender --extra-python python3.11
+```
+
+The zip is written to `dist/` and is the file to upload at:
+
+```text
+https://extensions.blender.org/submit/
+```
+
+For repeat packaging after the native bridge is already built:
+
+```sh
+python3 tools/package_extension.py --blender /path/to/blender --platform auto
+```
+
+Do not upload a GitHub source archive directly. The production zip is staged so
+`blender_manifest.toml` and `__init__.py` are at the zip root and native
+AssetKit runtime libraries are included.
+
 ## Install
 
 Install or symlink the `assetkit_blender` package into Blender's add-ons directory, then enable `AssetKit` in Preferences.
