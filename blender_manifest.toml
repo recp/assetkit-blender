@@ -1,10 +1,15 @@
 schema_version = "1.0.0"
 id = "assetkit_blender"
 version = "0.1.0"
-name = "AssetKit Blender"
-tagline = "Import 3D assets through AssetKit"
+name = "AssetKit"
+tagline = "3D assets IO through AssetKit"
 maintainer = "Recep Aslantas"
 type = "add-on"
-blender_version_min = "4.2.0"
-license = ["SPDX:Apache-2.0"]
-tags = ["Import-Export", "3D View"]
+website = "https://github.com/recp/assetkit-blender"
+blender_version_min = "4.5.0"
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Recep Aslantas"]
+tags = ["Import-Export"]
+
+[permissions]
+files = "Import and export 3D asset files from disk"

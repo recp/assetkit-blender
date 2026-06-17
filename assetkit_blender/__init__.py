@@ -1,8 +1,8 @@
 bl_info = {
-    "name": "AssetKit Blender",
+    "name": "AssetKit",
     "author": "Recep Aslantas",
-    "version": (0, 1, 1),
-    "blender": (4, 2, 0),
+    "version": (0, 1, 0),
+    "blender": (4, 5, 0),
     "location": "File > Import/Export > AssetKit",
     "description": "Import and export 3D assets through AssetKit",
     "category": "Import-Export",

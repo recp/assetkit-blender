@@ -1,4 +1,4 @@
-# AssetKit Blender
+# AssetKit
 
 Blender add-on for importing and exporting 3D assets through AssetKit.
 
@@ -45,12 +45,12 @@ The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is 
 
 ## Install
 
-Install or symlink the `assetkit_blender` package into Blender's add-ons directory, then enable `AssetKit Blender` in Preferences.
+Install or symlink the `assetkit_blender` package into Blender's add-ons directory, then enable `AssetKit` in Preferences.
 
 If needed, set the AssetKit shared library path in:
 
 ```text
-Edit > Preferences > Add-ons > AssetKit Blender
+Edit > Preferences > Add-ons > AssetKit
 ```
 
 ## Import

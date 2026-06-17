@@ -8,5 +8,9 @@ build/
 assetkit_blender/_assetkit_blender*.so
 assetkit_blender/_assetkit_blender*.pyd
 assetkit_blender/libassetkit_*.*
+assetkit_blender/libassetkit*.dylib
+assetkit_blender/libassetkit*.so*
+assetkit_blender/assetkit*.dll
+dist/
 build-blender/
 build-*/

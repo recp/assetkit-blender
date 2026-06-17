@@ -148,6 +148,12 @@ set_target_properties(_assetkit_blender PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${ASSETKIT_BLENDER_PACKAGE_DIR}"
   RUNTIME_OUTPUT_DIRECTORY "${ASSETKIT_BLENDER_PACKAGE_DIR}"
 )
+foreach(ASSETKIT_BLENDER_CONFIG DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+  set_target_properties(_assetkit_blender PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY_${ASSETKIT_BLENDER_CONFIG} "${ASSETKIT_BLENDER_PACKAGE_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_${ASSETKIT_BLENDER_CONFIG} "${ASSETKIT_BLENDER_PACKAGE_DIR}"
+  )
+endforeach()
 
 get_filename_component(ASSETKIT_LIBRARY_DIR "${ASSETKIT_LIBRARY}" DIRECTORY)
 if(APPLE)
@@ -163,6 +169,37 @@ elseif(UNIX)
 endif()
 
 message(STATUS "AssetKit library: ${ASSETKIT_LIBRARY}")
+function(assetkit_blender_copy_runtime_library runtime_library runtime_label)
+  if(NOT runtime_library)
+    return()
+  endif()
+
+  get_filename_component(ASSETKIT_RUNTIME_REALPATH "${runtime_library}" REALPATH)
+  get_filename_component(ASSETKIT_RUNTIME_NAME "${runtime_library}" NAME)
+  get_filename_component(ASSETKIT_RUNTIME_REALNAME "${ASSETKIT_RUNTIME_REALPATH}" NAME)
+
+  set(ASSETKIT_RUNTIME_OUTPUT_NAMES
+    "${ASSETKIT_RUNTIME_NAME}"
+    "${ASSETKIT_RUNTIME_REALNAME}")
+
+  if(APPLE AND ASSETKIT_RUNTIME_REALNAME MATCHES "^(.+[^0-9])\\.([0-9]+)(\\.[0-9]+.*)\\.dylib$")
+    list(APPEND ASSETKIT_RUNTIME_OUTPUT_NAMES "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.dylib")
+  elseif(UNIX AND ASSETKIT_RUNTIME_REALNAME MATCHES "^(.+[^0-9]\\.so)\\.([0-9]+)(\\..*)$")
+    list(APPEND ASSETKIT_RUNTIME_OUTPUT_NAMES "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
+  endif()
+
+  list(REMOVE_DUPLICATES ASSETKIT_RUNTIME_OUTPUT_NAMES)
+  foreach(ASSETKIT_RUNTIME_OUTPUT_NAME IN LISTS ASSETKIT_RUNTIME_OUTPUT_NAMES)
+    add_custom_command(TARGET _assetkit_blender POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${ASSETKIT_RUNTIME_REALPATH}"
+              "${ASSETKIT_BLENDER_PACKAGE_DIR}/${ASSETKIT_RUNTIME_OUTPUT_NAME}")
+  endforeach()
+  message(STATUS "AssetKit ${runtime_label} runtime: ${runtime_library}")
+endfunction()
+
+assetkit_blender_copy_runtime_library("${ASSETKIT_LIBRARY}" "core")
+
 function(assetkit_blender_copy_decoder decoder_library decoder_label)
   if(NOT decoder_library)
     return()
