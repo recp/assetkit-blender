@@ -45,7 +45,7 @@ The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is 
 
 ## Production package
 
-Build and validate a Blender Extensions upload zip with one command:
+Build and validate a Blender Extensions package zip with one command:
 
 ```sh
 python3 tools/release_extension.py --blender /path/to/blender
@@ -58,11 +58,7 @@ To include Blender 4.5/5.0 support in the same platform package, add Python
 python3 tools/release_extension.py --blender /path/to/blender --extra-python python3.11
 ```
 
-The uploadable zip is written to `dist/` for Blender Extensions submission:
-
-```text
-https://extensions.blender.org/submit/
-```
+The zip is written to `dist/`.
 
 For repeat packaging after the native bridge is already built:
 
@@ -70,8 +66,7 @@ For repeat packaging after the native bridge is already built:
 python3 tools/package_extension.py --blender /path/to/blender --platform auto
 ```
 
-Use the generated `dist/*.zip` package for submission, not a GitHub source
-archive. The release script stages the extension so `blender_manifest.toml` and
+The release script stages the extension so `blender_manifest.toml` and
 `__init__.py` are at the zip root and native AssetKit runtime libraries are
 included.
 
