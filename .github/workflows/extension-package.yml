@@ -45,7 +45,7 @@ jobs:
     env:
       BLENDER_URL: https://download.blender.org/release/${{ matrix.blender-release-dir }}/${{ matrix.blender-file }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -69,15 +69,17 @@ jobs:
 
       - name: Install macOS build tools
         if: runner.os == 'macOS'
-        run: brew install cmake ninja
+        run: |
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+          brew list ninja >/dev/null 2>&1 || brew install ninja
 
       - id: py311
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - id: py313
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -130,7 +132,7 @@ jobs:
             --python "${{ steps.py313.outputs.python-path }}" `
             --extra-python "${{ steps.py311.outputs.python-path }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: assetkit-blender-${{ matrix.platform }}
           path: dist/*.zip

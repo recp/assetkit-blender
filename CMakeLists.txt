@@ -41,10 +41,15 @@ set(ASSETKIT_CACHE_PATH_VARS
   ASSETKIT_INCLUDE_DIR
   CGLM_INCLUDE_DIR
   ASSETKIT_LIBRARY
+  ASSETKIT_RUNTIME_LIBRARY
   ASSETKIT_KTX2_LIBRARY
+  ASSETKIT_KTX2_RUNTIME_LIBRARY
   ASSETKIT_MESHOPTIMIZER_LIBRARY
+  ASSETKIT_MESHOPTIMIZER_RUNTIME_LIBRARY
   ASSETKIT_DRACO_LIBRARY
-  ASSETKIT_SPZ_LIBRARY)
+  ASSETKIT_DRACO_RUNTIME_LIBRARY
+  ASSETKIT_SPZ_LIBRARY
+  ASSETKIT_SPZ_RUNTIME_LIBRARY)
 
 if(ASSETKIT_ROOT AND ASSETKIT_STRICT_ROOT AND DEFINED ASSETKIT_CACHED_ROOT
    AND NOT ASSETKIT_CACHED_ROOT STREQUAL ASSETKIT_ROOT)
@@ -114,11 +119,43 @@ find_library(ASSETKIT_SPZ_LIBRARY
   HINTS ${ASSETKIT_LIBRARY_HINTS}
   ${ASSETKIT_FIND_ROOT_ARGS})
 
+if(WIN32)
+  find_file(ASSETKIT_RUNTIME_LIBRARY
+    NAMES assetkit.dll libassetkit.dll
+    HINTS ${ASSETKIT_LIBRARY_HINTS}
+    ${ASSETKIT_FIND_ROOT_ARGS})
+  find_file(ASSETKIT_KTX2_RUNTIME_LIBRARY
+    NAMES assetkit_ktx2.dll libassetkit_ktx2.dll
+    HINTS ${ASSETKIT_LIBRARY_HINTS}
+    ${ASSETKIT_FIND_ROOT_ARGS})
+  find_file(ASSETKIT_MESHOPTIMIZER_RUNTIME_LIBRARY
+    NAMES assetkit_meshoptimizer.dll libassetkit_meshoptimizer.dll
+    HINTS ${ASSETKIT_LIBRARY_HINTS}
+    ${ASSETKIT_FIND_ROOT_ARGS})
+  find_file(ASSETKIT_DRACO_RUNTIME_LIBRARY
+    NAMES assetkit_draco.dll libassetkit_draco.dll
+    HINTS ${ASSETKIT_LIBRARY_HINTS}
+    ${ASSETKIT_FIND_ROOT_ARGS})
+  find_file(ASSETKIT_SPZ_RUNTIME_LIBRARY
+    NAMES assetkit_spz.dll libassetkit_spz.dll
+    HINTS ${ASSETKIT_LIBRARY_HINTS}
+    ${ASSETKIT_FIND_ROOT_ARGS})
+else()
+  set(ASSETKIT_RUNTIME_LIBRARY "${ASSETKIT_LIBRARY}")
+  set(ASSETKIT_KTX2_RUNTIME_LIBRARY "${ASSETKIT_KTX2_LIBRARY}")
+  set(ASSETKIT_MESHOPTIMIZER_RUNTIME_LIBRARY "${ASSETKIT_MESHOPTIMIZER_LIBRARY}")
+  set(ASSETKIT_DRACO_RUNTIME_LIBRARY "${ASSETKIT_DRACO_LIBRARY}")
+  set(ASSETKIT_SPZ_RUNTIME_LIBRARY "${ASSETKIT_SPZ_LIBRARY}")
+endif()
+
 if(NOT ASSETKIT_INCLUDE_DIR)
   message(FATAL_ERROR "AssetKit headers not found. Set ASSETKIT_ROOT.")
 endif()
 if(NOT ASSETKIT_LIBRARY)
   message(FATAL_ERROR "AssetKit shared library not found. Build AssetKit first or set ASSETKIT_LIBRARY.")
+endif()
+if(WIN32 AND NOT ASSETKIT_RUNTIME_LIBRARY)
+  message(FATAL_ERROR "AssetKit runtime DLL not found. Build AssetKit first or set ASSETKIT_RUNTIME_LIBRARY.")
 endif()
 if(NOT CGLM_INCLUDE_DIR)
   message(FATAL_ERROR "cglm headers not found. Set ASSETKIT_ROOT to an AssetKit source root.")
@@ -198,7 +235,7 @@ function(assetkit_blender_copy_runtime_library runtime_library runtime_label)
   message(STATUS "AssetKit ${runtime_label} runtime: ${runtime_library}")
 endfunction()
 
-assetkit_blender_copy_runtime_library("${ASSETKIT_LIBRARY}" "core")
+assetkit_blender_copy_runtime_library("${ASSETKIT_RUNTIME_LIBRARY}" "core")
 
 function(assetkit_blender_copy_decoder decoder_library decoder_label)
   if(NOT decoder_library)
@@ -211,8 +248,8 @@ function(assetkit_blender_copy_decoder decoder_library decoder_label)
             "${ASSETKIT_BLENDER_PACKAGE_DIR}/${ASSETKIT_DECODER_LIBRARY_NAME}")
   message(STATUS "AssetKit ${decoder_label} decoder: ${decoder_library}")
 endfunction()
-assetkit_blender_copy_decoder("${ASSETKIT_KTX2_LIBRARY}" "KTX2")
-assetkit_blender_copy_decoder("${ASSETKIT_MESHOPTIMIZER_LIBRARY}" "meshoptimizer")
-assetkit_blender_copy_decoder("${ASSETKIT_DRACO_LIBRARY}" "Draco")
-assetkit_blender_copy_decoder("${ASSETKIT_SPZ_LIBRARY}" "SPZ")
+assetkit_blender_copy_decoder("${ASSETKIT_KTX2_RUNTIME_LIBRARY}" "KTX2")
+assetkit_blender_copy_decoder("${ASSETKIT_MESHOPTIMIZER_RUNTIME_LIBRARY}" "meshoptimizer")
+assetkit_blender_copy_decoder("${ASSETKIT_DRACO_RUNTIME_LIBRARY}" "Draco")
+assetkit_blender_copy_decoder("${ASSETKIT_SPZ_RUNTIME_LIBRARY}" "SPZ")
 message(STATUS "Python extension output: ${ASSETKIT_BLENDER_PACKAGE_DIR}")

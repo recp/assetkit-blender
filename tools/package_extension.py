@@ -199,8 +199,10 @@ def runtime_candidates(platform_tag: str) -> list[Path]:
         if candidate:
             candidates.append(candidate)
 
-    for path in ROOT.glob("deps/assetkit/build/libassetkit*"):
-        candidates.append(path)
+    assetkit_build = ROOT / "deps" / "assetkit" / "build"
+    if assetkit_build.exists():
+        for pattern in core_library_patterns(platform_tag):
+            candidates.extend(assetkit_build.rglob(pattern))
 
     candidates = [path.resolve() for path in candidates if path.exists()]
     return [path for path in sorted(set(candidates), reverse=True) if is_core_runtime(path, platform_tag)]
