@@ -58,7 +58,7 @@ To include Blender 4.5/5.0 support in the same platform package, add Python
 python3 tools/release_extension.py --blender /path/to/blender --extra-python python3.11
 ```
 
-The zip is written to `dist/` and is the file to upload at:
+The uploadable zip is written to `dist/` for Blender Extensions submission:
 
 ```text
 https://extensions.blender.org/submit/
@@ -70,9 +70,10 @@ For repeat packaging after the native bridge is already built:
 python3 tools/package_extension.py --blender /path/to/blender --platform auto
 ```
 
-Do not upload a GitHub source archive directly. The production zip is staged so
-`blender_manifest.toml` and `__init__.py` are at the zip root and native
-AssetKit runtime libraries are included.
+Use the generated `dist/*.zip` package for submission, not a GitHub source
+archive. The release script stages the extension so `blender_manifest.toml` and
+`__init__.py` are at the zip root and native AssetKit runtime libraries are
+included.
 
 ## Install
 
