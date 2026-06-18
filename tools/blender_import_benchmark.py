@@ -96,6 +96,12 @@ REVIEW_SUITE = (
         "Khronos glTF Sample Models sourceModels",
     ),
     BenchmarkAsset(
+        "dae-brainstem",
+        "dae/BrainStem.dae",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/sourceModels/BrainStem/BrainStem.dae",
+        "Khronos glTF Sample Models sourceModels",
+    ),
+    BenchmarkAsset(
         "obj-xyzrgb-dragon",
         "obj/xyzrgb_dragon.obj",
         "https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/xyzrgb_dragon.obj",

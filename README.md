@@ -52,6 +52,10 @@ PLY, and STL comparison files:
 
 Use Blender 4.5 LTS for DAE comparison runs.
 
+The default suite only includes files where both importers complete. Some extra
+DAE candidates are useful robustness cases but are kept out of the performance
+table if Blender's legacy Collada importer exits during import.
+
 ```sh
 /path/to/blender --background --factory-startup \
   --python tools/blender_import_benchmark.py -- \
