@@ -84,6 +84,18 @@ REVIEW_SUITE = (
         "Khronos glTF Sample Assets",
     ),
     BenchmarkAsset(
+        "gltf-antique-camera",
+        "gltf/AntiqueCamera.glb",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/AntiqueCamera/glTF-Binary/AntiqueCamera.glb",
+        "Khronos glTF Sample Assets",
+    ),
+    BenchmarkAsset(
+        "gltf-mosquito-in-amber",
+        "gltf/MosquitoInAmber.glb",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb",
+        "Khronos glTF Sample Assets",
+    ),
+    BenchmarkAsset(
         "dae-duck",
         "dae/Duck.dae",
         "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/sourceModels/Duck/Duck.dae",
