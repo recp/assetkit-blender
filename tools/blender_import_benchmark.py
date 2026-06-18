@@ -78,6 +78,12 @@ REVIEW_SUITE = (
         default=False,
     ),
     BenchmarkAsset(
+        "gltf-a-beautiful-game",
+        "gltf/ABeautifulGame.glb",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/ABeautifulGame/glTF-Binary/ABeautifulGame.glb",
+        "Khronos glTF Sample Assets",
+    ),
+    BenchmarkAsset(
         "dae-duck",
         "dae/Duck.dae",
         "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/sourceModels/Duck/Duck.dae",
