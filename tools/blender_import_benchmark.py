@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gzip
 import io
 import json
 import os
+import shutil
 import statistics
 import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.request import urlopen
 
 import bpy
 
@@ -34,6 +37,63 @@ from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 
 SUPPORTED_FORMATS = {"gltf", "glb", "dae", "obj", "ply", "stl"}
+DEFAULT_ASSET_CACHE = REPO_ROOT / "benchmark-assets" / "import-suite"
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkAsset:
+    id: str
+    path: str
+    url: str
+    source: str
+    compressed: bool = False
+
+
+REVIEW_SUITE = (
+    BenchmarkAsset(
+        "gltf-damaged-helmet",
+        "gltf/DamagedHelmet.glb",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb",
+        "Khronos glTF Sample Assets",
+    ),
+    BenchmarkAsset(
+        "gltf-boombox",
+        "gltf/BoomBox.glb",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/glTF-Binary/BoomBox.glb",
+        "Khronos glTF Sample Assets",
+    ),
+    BenchmarkAsset(
+        "gltf-water-bottle",
+        "gltf/WaterBottle.glb",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/WaterBottle/glTF-Binary/WaterBottle.glb",
+        "Khronos glTF Sample Assets",
+    ),
+    BenchmarkAsset(
+        "gltf-node-performance",
+        "gltf/NodePerformanceTest.glb",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/NodePerformanceTest/glTF-Binary/NodePerformanceTest.glb",
+        "Khronos glTF Sample Assets",
+    ),
+    BenchmarkAsset(
+        "obj-xyzrgb-dragon",
+        "obj/xyzrgb_dragon.obj",
+        "https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/xyzrgb_dragon.obj",
+        "common-3d-test-models",
+    ),
+    BenchmarkAsset(
+        "ply-stanford-dragon",
+        "ply/dragon_vrip.ply",
+        "https://raw.githubusercontent.com/hughsk/stanford-dragon/master/models/dragon_vrip.ply.gz",
+        "Stanford Dragon mirror",
+        compressed=True,
+    ),
+    BenchmarkAsset(
+        "stl-3dbenchy",
+        "stl/3DBenchy.stl",
+        "https://raw.githubusercontent.com/CreativeTools/3DBenchy/master/Single-part/3DBenchy.stl",
+        "CreativeTools 3DBenchy",
+    ),
+)
 
 
 @dataclass(slots=True)
@@ -70,6 +130,57 @@ def file_size(path: Path) -> int:
     if path.is_dir():
         return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
     return 0
+
+
+def download_file(url: str, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".download")
+    with urlopen(url, timeout=120) as response, tmp_path.open("wb") as out_file:
+        shutil.copyfileobj(response, out_file)
+    tmp_path.replace(out_path)
+
+
+def ensure_asset(asset: BenchmarkAsset, cache_dir: Path) -> Path:
+    out_path = cache_dir / asset.path
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return out_path
+
+    if asset.compressed:
+        compressed_path = out_path.with_suffix(out_path.suffix + ".gz")
+        if not compressed_path.exists() or compressed_path.stat().st_size == 0:
+            print(f"Downloading {asset.id} from {asset.source}: {asset.url}", flush=True)
+            download_file(asset.url, compressed_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = out_path.with_suffix(out_path.suffix + ".extract")
+        with gzip.open(compressed_path, "rb") as src, tmp_path.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        tmp_path.replace(out_path)
+        return out_path
+
+    print(f"Downloading {asset.id} from {asset.source}: {asset.url}", flush=True)
+    download_file(asset.url, out_path)
+    return out_path
+
+
+def selected_suite_assets(asset_ids: list[str]) -> list[BenchmarkAsset]:
+    if not asset_ids:
+        return list(REVIEW_SUITE)
+    by_id = {asset.id: asset for asset in REVIEW_SUITE}
+    missing = [asset_id for asset_id in asset_ids if asset_id not in by_id]
+    if missing:
+        names = ", ".join(missing)
+        known = ", ".join(sorted(by_id))
+        raise SystemExit(f"Unknown suite asset(s): {names}. Known assets: {known}")
+    return [by_id[asset_id] for asset_id in asset_ids]
+
+
+def download_suite(cache_dir: Path, asset_ids: list[str]) -> list[Path]:
+    return [ensure_asset(asset, cache_dir) for asset in selected_suite_assets(asset_ids)]
+
+
+def print_suite() -> None:
+    for asset in REVIEW_SUITE:
+        print(f"{asset.id}\t{asset.path}\t{asset.source}\t{asset.url}")
 
 
 def scene_stats() -> SceneStats:
@@ -268,10 +379,27 @@ def print_markdown(summaries: list[dict]) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("paths", nargs="+", help="Input .gltf, .glb, .dae, .obj, .ply, or .stl files")
+    parser.add_argument("paths", nargs="*", help="Input .gltf, .glb, .dae, .obj, .ply, or .stl files")
     parser.add_argument("--runs", type=int, default=5, help="Samples per importer")
     parser.add_argument("--warmup", type=int, default=1, help="Successful samples to drop from summaries")
     parser.add_argument("--engines", nargs="+", choices=("assetkit", "builtin"), default=("assetkit", "builtin"))
+    parser.add_argument(
+        "--download-suite",
+        action="store_true",
+        help="Download and benchmark the built-in review suite: Khronos GLB, OBJ, PLY, and STL assets.",
+    )
+    parser.add_argument(
+        "--suite-assets",
+        nargs="+",
+        default=(),
+        help="Optional subset of suite asset ids to download. Use --list-suite to see ids.",
+    )
+    parser.add_argument(
+        "--asset-cache",
+        default=os.fspath(DEFAULT_ASSET_CACHE),
+        help=f"Download cache for --download-suite. Defaults to {DEFAULT_ASSET_CACHE}",
+    )
+    parser.add_argument("--list-suite", action="store_true", help="Print the built-in download suite and exit")
     parser.add_argument(
         "--assetkit-textures",
         choices=("AUTO", "IMMEDIATE", "DEFERRED"),
@@ -287,7 +415,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.list_suite:
+        print_suite()
+        return 0
+
     paths = [Path(path).expanduser().resolve() for path in args.paths]
+    if args.download_suite:
+        paths.extend(download_suite(Path(args.asset_cache).expanduser().resolve(), list(args.suite_assets)))
+    if not paths:
+        raise SystemExit("No input files. Pass paths or use --download-suite.")
+
     runs = max(1, args.runs)
     warmup = max(0, args.warmup)
     rows: list[dict] = []

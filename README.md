@@ -43,6 +43,28 @@ cmake --build build
 
 The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is not present, the add-on can still use the configured AssetKit shared library through `ctypes`.
 
+## Benchmarks
+
+Run repeatable importer benchmarks from Blender. `--download-suite` fetches the
+review suite into the ignored `benchmark-assets/` cache, including Khronos glTF
+sample assets and OBJ, PLY, and STL comparison files:
+
+```sh
+/path/to/blender --background --factory-startup \
+  --python tools/blender_import_benchmark.py -- \
+  --download-suite --runs 3 --warmup 1 --markdown
+```
+
+The node stress test is much slower with Blender's built-in importer, so it can
+be run separately:
+
+```sh
+/path/to/blender --background --factory-startup \
+  --python tools/blender_import_benchmark.py -- \
+  --download-suite --suite-assets gltf-node-performance \
+  --runs 1 --warmup 0 --markdown
+```
+
 ## Production package
 
 Build and validate a Blender Extensions package zip with one command:
