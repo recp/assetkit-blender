@@ -1,6 +1,6 @@
-# AssetKit
+# AssetKit ⇢ Blender
 
-Blender add-on for importing and exporting 3D assets through AssetKit.
+Blender add-on for importing and exporting 3D assets through [AssetKit](https://github.com/recp/assetkit)
 
 ## Formats
 
@@ -10,39 +10,7 @@ Blender add-on for importing and exporting 3D assets through AssetKit.
 - OBJ
 - STL
 - PLY
-
-## AssetKit
-
-AssetKit can be provided as a submodule or an external checkout. The build looks for it in this order:
-
-1. `-DASSETKIT_ROOT=/path/to/assetkit`
-2. `ASSETKIT_ROOT` environment variable
-3. sibling local checkout `../assetio`
-4. sibling local checkout `../assetkit`
-5. `deps/assetkit`
-6. system install paths
-
-For local development next to the AssetKit repository, build `../assetio` once and the Blender bridge will use that checkout by default for both Python 3.13 and 3.14 build directories.
-
-For a fresh clone:
-
-```sh
-git submodule update --init --recursive
-```
-
-## Build
-
-Build AssetKit, then build the native Blender bridge with Blender's Python:
-
-```sh
-cmake -S deps/assetkit -B deps/assetkit/build -DAK_SHARED=ON
-cmake --build deps/assetkit/build
-cmake -S . -B build -DASSETKIT_ROOT=deps/assetkit -DPython3_EXECUTABLE=/path/to/blender/python
-cmake --build build
-```
-
-The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is not present, the add-on can still use the configured AssetKit shared library through `ctypes`.
-
+- 
 ## Benchmarks
 
 Here are local benchmark results from an M1 Max MacBook Pro, using Blender 4.5.10 LTS to include COLLADA:
@@ -96,6 +64,18 @@ be run separately by selecting the optional suite asset:
   --runs 1 --warmup 0 --markdown
 ```
 
+## Build
+
+Build AssetKit, then build the native Blender bridge with Blender's Python:
+
+```sh
+cmake -S deps/assetkit -B deps/assetkit/build -DAK_SHARED=ON
+cmake --build deps/assetkit/build
+cmake -S . -B build -DASSETKIT_ROOT=deps/assetkit -DPython3_EXECUTABLE=/path/to/blender/python
+cmake --build build
+```
+
+The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is not present, the add-on can still use the configured AssetKit shared library through `ctypes`.
 
 ## Production package
 
@@ -126,18 +106,13 @@ included.
 
 ## Release assets
 
-Pushing a tag such as `v0.1.0` runs the package matrix and attaches the five
-platform zip files to the GitHub Release for that tag.
+Pushing a tag such as `v0.1.0` runs the package matrix ob Github Actions and attaches the
+platform zip files to the GitHub Release for that tag automatically. 
 
 ## Install
 
-Install or symlink the `assetkit_blender` package into Blender's add-ons directory, then enable `AssetKit` in Preferences.
+Download the addon in releases page and use "Install from Disk" select the downloaded addon zip.
 
-If needed, set the AssetKit shared library path in:
-
-```text
-Edit > Preferences > Add-ons > AssetKit
-```
 
 ## Import
 
