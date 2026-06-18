@@ -112,10 +112,3 @@ platform zip files to the GitHub Release for that tag automatically.
 ## Install
 
 Download the addon in releases page and use "Install from Disk" select the downloaded addon zip.
-
-
-## Import
-
-```text
-File > Import > AssetKit
-```
