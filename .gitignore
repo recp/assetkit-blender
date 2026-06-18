@@ -15,3 +15,4 @@ dist/
 addon_upload_ready/
 build-blender/
 build-*/
+benchmark-results/
