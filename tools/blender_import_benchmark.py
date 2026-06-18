@@ -47,6 +47,8 @@ class BenchmarkAsset:
     url: str
     source: str
     compressed: bool = False
+    default: bool = True
+    resources: tuple[tuple[str, str], ...] = ()
 
 
 REVIEW_SUITE = (
@@ -73,6 +75,25 @@ REVIEW_SUITE = (
         "gltf/NodePerformanceTest.glb",
         "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/NodePerformanceTest/glTF-Binary/NodePerformanceTest.glb",
         "Khronos glTF Sample Assets",
+        default=False,
+    ),
+    BenchmarkAsset(
+        "dae-duck",
+        "dae/Duck.dae",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/sourceModels/Duck/Duck.dae",
+        "Khronos glTF Sample Models sourceModels",
+        resources=(
+            (
+                "dae/DuckCM.png",
+                "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/sourceModels/Duck/DuckCM.png",
+            ),
+        ),
+    ),
+    BenchmarkAsset(
+        "dae-gearbox-assy",
+        "dae/GearboxAssy.dae",
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/sourceModels/GearboxAssy/GearboxAssy.dae",
+        "Khronos glTF Sample Models sourceModels",
     ),
     BenchmarkAsset(
         "obj-xyzrgb-dragon",
@@ -143,6 +164,8 @@ def download_file(url: str, out_path: Path) -> None:
 def ensure_asset(asset: BenchmarkAsset, cache_dir: Path) -> Path:
     out_path = cache_dir / asset.path
     if out_path.exists() and out_path.stat().st_size > 0:
+        for resource_path, resource_url in asset.resources:
+            ensure_resource(cache_dir / resource_path, resource_url, asset)
         return out_path
 
     if asset.compressed:
@@ -155,16 +178,27 @@ def ensure_asset(asset: BenchmarkAsset, cache_dir: Path) -> Path:
         with gzip.open(compressed_path, "rb") as src, tmp_path.open("wb") as dst:
             shutil.copyfileobj(src, dst)
         tmp_path.replace(out_path)
+        for resource_path, resource_url in asset.resources:
+            ensure_resource(cache_dir / resource_path, resource_url, asset)
         return out_path
 
     print(f"Downloading {asset.id} from {asset.source}: {asset.url}", flush=True)
     download_file(asset.url, out_path)
+    for resource_path, resource_url in asset.resources:
+        ensure_resource(cache_dir / resource_path, resource_url, asset)
     return out_path
+
+
+def ensure_resource(out_path: Path, url: str, asset: BenchmarkAsset) -> None:
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return
+    print(f"Downloading {asset.id} resource from {asset.source}: {url}", flush=True)
+    download_file(url, out_path)
 
 
 def selected_suite_assets(asset_ids: list[str]) -> list[BenchmarkAsset]:
     if not asset_ids:
-        return list(REVIEW_SUITE)
+        return [asset for asset in REVIEW_SUITE if asset.default]
     by_id = {asset.id: asset for asset in REVIEW_SUITE}
     missing = [asset_id for asset_id in asset_ids if asset_id not in by_id]
     if missing:
@@ -180,7 +214,8 @@ def download_suite(cache_dir: Path, asset_ids: list[str]) -> list[Path]:
 
 def print_suite() -> None:
     for asset in REVIEW_SUITE:
-        print(f"{asset.id}\t{asset.path}\t{asset.source}\t{asset.url}")
+        default = "default" if asset.default else "optional"
+        print(f"{asset.id}\t{default}\t{asset.path}\t{asset.source}\t{asset.url}")
 
 
 def scene_stats() -> SceneStats:
@@ -256,6 +291,35 @@ def import_builtin(path: Path) -> None:
         raise ValueError(f"unsupported built-in format: {fmt}")
 
 
+@contextlib.contextmanager
+def suppress_importer_output():
+    try:
+        stdout_fd = sys.stdout.fileno()
+        stderr_fd = sys.stderr.fileno()
+    except (AttributeError, io.UnsupportedOperation):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            yield
+        return
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved_stdout = os.dup(stdout_fd)
+    saved_stderr = os.dup(stderr_fd)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), stdout_fd)
+            os.dup2(devnull.fileno(), stderr_fd)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_stdout, stdout_fd)
+        os.dup2(saved_stderr, stderr_fd)
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+
+
 def time_import(path: Path, engine: str, texture_loading: str, triangulate: bool, verbose_importers: bool) -> dict:
     purge_scene()
     started_at = time.perf_counter()
@@ -269,7 +333,7 @@ def time_import(path: Path, engine: str, texture_loading: str, triangulate: bool
             else:
                 raise ValueError(engine)
         else:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with suppress_importer_output():
                 if engine == "assetkit":
                     import_assetkit(path, texture_loading, triangulate)
                 elif engine == "builtin":
@@ -386,7 +450,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--download-suite",
         action="store_true",
-        help="Download and benchmark the built-in review suite: Khronos GLB, OBJ, PLY, and STL assets.",
+        help="Download and benchmark the built-in review suite: Khronos GLB/DAE, OBJ, PLY, and STL assets.",
     )
     parser.add_argument(
         "--suite-assets",

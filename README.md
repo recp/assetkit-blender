@@ -47,7 +47,10 @@ The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is 
 
 Run repeatable importer benchmarks from Blender. `--download-suite` fetches the
 review suite into the ignored `benchmark-assets/` cache, including Khronos glTF
-sample assets and OBJ, PLY, and STL comparison files:
+sample assets, Khronos `glTF-Sample-Models/sourceModels` DAE files, and OBJ,
+PLY, and STL comparison files:
+
+Use Blender 4.5 LTS for DAE comparison runs.
 
 ```sh
 /path/to/blender --background --factory-startup \
@@ -56,7 +59,7 @@ sample assets and OBJ, PLY, and STL comparison files:
 ```
 
 The node stress test is much slower with Blender's built-in importer, so it can
-be run separately:
+be run separately by selecting the optional suite asset:
 
 ```sh
 /path/to/blender --background --factory-startup \
