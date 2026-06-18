@@ -45,6 +45,28 @@ The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is 
 
 ## Benchmarks
 
+Here are local benchmark results from an M1 Max MacBook Pro, using Blender 4.5.10 LTS to include COLLADA:
+
+| File | AssetKit median | Blender median | Blender / AssetKit |
+| --- | ---: | ---: | ---: |
+| BrainStem.dae | 67.9 ms | 6151.4 ms | 90.62x |
+| Duck.dae | 1.5 ms | 5.8 ms | 4.00x |
+| GearboxAssy.dae | 52.7 ms | 232.1 ms | 4.41x |
+| NodePerformanceTest.glb | 19187.0 ms | 207511.9 ms | 10.82x |
+| BoomBox.glb | 8.8 ms | 10.3 ms | 1.17x |
+| DamagedHelmet.glb | 2.2 ms | 20.1 ms | 9.13x |
+| WaterBottle.glb | 6.8 ms | 7.3 ms | 1.08x |
+| ABeautifulGame.glb | 1918.9 ms (TODO) | 456.2 ms | 0.24x |
+| AntiqueCamera.glb | 3.0 ms | 27.0 ms | 8.90x |
+| MosquitoInAmber.glb | 18.5 ms | 28.7 ms | 1.55x |
+| xyzrgb_dragon.obj | 24.9 ms | 81.3 ms | 3.27x |
+| dragon_vrip.ply | 54.8 ms | 233.5 ms | 4.26x |
+| 3DBenchy.stl | 8.5 ms | 39.2 ms | 4.58x |
+...
+
+---
+
+
 Run repeatable importer benchmarks from Blender. `--download-suite` fetches the
 review suite into the ignored `benchmark-assets/` cache, including Khronos glTF
 sample assets, Khronos `glTF-Sample-Models/sourceModels` DAE files, and OBJ,
@@ -73,6 +95,7 @@ be run separately by selecting the optional suite asset:
   --download-suite --suite-assets gltf-node-performance \
   --runs 1 --warmup 0 --markdown
 ```
+
 
 ## Production package
 
