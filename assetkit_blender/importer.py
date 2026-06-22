@@ -6,10 +6,7 @@ from dataclasses import replace
 import json
 import math
 import os
-import queue
-import threading
 import time
-import traceback
 
 import bpy
 from bpy_extras.object_utils import world_to_camera_view
@@ -33,7 +30,6 @@ from .assetkit import (
     native_fill_triangle_loop_offsets_ptr,
     native_fill_u8_ptr,
     native_offset_i32,
-    native_open_scene_stream,
     native_skin_group_assignments,
     native_write_offset_i32,
 )
@@ -45,7 +41,6 @@ from .enums import (
     AK_PRIMITIVE_POINTS,
     AK_PRIMITIVE_TRIANGLES,
 )
-from .hud import finish_loading_hud, start_loading_hud, update_loading_hud
 from .load_options import (
     AKB_LOAD_DEFER_NORMALS_AUTO,
     AKB_LOAD_DEFER_NORMALS_NO,
@@ -171,11 +166,7 @@ _TEXTURE_WRAP_DEFAULT = 1
 _TEXTURE_FILTER_DEFAULT = 0
 _TEXTURE_EXTENSION_DEFAULT = "REPEAT"
 _TEXTURE_INTERPOLATION_DEFAULT = "Linear"
-_PROGRESSIVE_BATCH_SIZE = 128
-_PROGRESSIVE_FIRST_BATCH_SIZE = 8
-_PROGRESSIVE_TIME_BUDGET = 0.025
 _DEFERRED_NORMAL_TIME_BUDGET = 0.006
-_ACTIVE_IMPORT_JOBS: list["_ProgressiveImportJob"] = []
 _DEFERRED_NORMAL_TASKS: deque[tuple[bpy.types.Mesh, object, object | None, object | None]] = deque()
 _DEFERRED_NORMAL_TIMER_ACTIVE = False
 _ACTION_CHANNELBAGS: dict[tuple[int, int], tuple[object, object]] = {}
@@ -412,103 +403,6 @@ def import_assetkit_file(
             f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
         )
     return _import_result_objects(objects, state)
-
-
-def import_assetkit_file_progressive(
-    filepath: str,
-    library_path: str = "",
-    load_options: LoadOptions | None = None,
-    collection: bpy.types.Collection | None = None,
-    batch_size: int = _PROGRESSIVE_BATCH_SIZE,
-    focus_mode: str = "NEVER",
-    placement_mode: str = "AS_AUTHORED",
-    scene_was_empty: bool = False,
-    focus_camera: bpy.types.Object | None = None,
-    select_imported: bool = False,
-    shading_mode: str = "AUTO",
-    set_viewport_shading: bool = True,
-    clean_viewport_overlays: bool = True,
-    fit_timeline: bool = False,
-) -> "_ProgressiveImportJob":
-    _reset_action_cache()
-    _reset_material_template_cache()
-    _reset_material_profile()
-    job = _ProgressiveImportJob(
-        filepath,
-        library_path,
-        load_options,
-        collection or bpy.context.collection,
-        max(1, batch_size),
-        focus_mode,
-        placement_mode,
-        scene_was_empty,
-        focus_camera,
-        select_imported,
-        shading_mode,
-        set_viewport_shading,
-        clean_viewport_overlays,
-        _snapshot_actions(fit_timeline),
-        prefer_grouped=True,
-    )
-    job.start()
-    return job
-
-
-def import_assetkit_file_auto(
-    filepath: str,
-    library_path: str = "",
-    load_options: LoadOptions | None = None,
-    collection: bpy.types.Collection | None = None,
-    batch_size: int = _PROGRESSIVE_BATCH_SIZE,
-    focus_mode: str = "NEVER",
-    placement_mode: str = "AS_AUTHORED",
-    scene_was_empty: bool = False,
-    focus_camera: bpy.types.Object | None = None,
-    select_imported: bool = False,
-    shading_mode: str = "AUTO",
-    set_viewport_shading: bool = True,
-    clean_viewport_overlays: bool = True,
-    fit_timeline: bool = False,
-) -> list[bpy.types.Object] | "_ProgressiveImportJob":
-    if bpy.app.background:
-        return import_assetkit_file(
-            filepath,
-            library_path,
-            load_options,
-            collection,
-            focus_mode,
-            placement_mode,
-            scene_was_empty,
-            focus_camera,
-            select_imported,
-            shading_mode,
-            set_viewport_shading,
-            clean_viewport_overlays,
-            fit_timeline,
-        )
-
-    _reset_action_cache()
-    _reset_material_profile()
-    active_collection = collection or bpy.context.collection
-    job = _ProgressiveImportJob(
-        filepath,
-        library_path,
-        load_options,
-        active_collection,
-        max(1, batch_size),
-        focus_mode,
-        placement_mode,
-        scene_was_empty,
-        focus_camera,
-        select_imported,
-        shading_mode,
-        set_viewport_shading,
-        clean_viewport_overlays,
-        _snapshot_actions(fit_timeline),
-        prefer_grouped=True,
-    )
-    job.start()
-    return job
 
 
 def _load_assetkit_scene(
@@ -2345,445 +2239,6 @@ def _clip_start_for_radius(radius: float) -> float:
 
 def _clip_end_for_radius(radius: float) -> float:
     return min(max(radius * 32.0, 1000.0), 10_000_000.0)
-
-
-class _ProgressiveImportJob:
-    def __init__(
-        self,
-        filepath: str,
-        library_path: str,
-        load_options: LoadOptions | None,
-        collection: bpy.types.Collection,
-        batch_size: int,
-        focus_mode: str,
-        placement_mode: str,
-        scene_was_empty: bool,
-        focus_camera: bpy.types.Object | None,
-        select_imported: bool,
-        shading_mode: str,
-        set_viewport_shading: bool,
-        clean_viewport_overlays: bool,
-        existing_actions: set[bpy.types.Action] | None,
-        stream: object | None = None,
-        prefer_grouped: bool = False,
-    ) -> None:
-        self.filepath = filepath
-        self.library_path = library_path
-        self.load_options = load_options
-        self.collection = collection
-        self.batch_size = batch_size
-        self.focus_mode = focus_mode
-        self.placement_mode = placement_mode
-        self.scene_was_empty = scene_was_empty
-        self.focus_camera = focus_camera
-        self.select_imported = select_imported
-        self.shading_mode = shading_mode
-        self.set_viewport_shading = set_viewport_shading
-        self.clean_viewport_overlays = clean_viewport_overlays
-        self.existing_actions = existing_actions
-        self.stream = stream
-        self.prefer_grouped = prefer_grouped
-        self.texture_load_mode = _texture_load_mode(load_options)
-        self.defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
-        self.scene_nodes: list[SceneNodeData] = []
-        self.curves: list[CurveData] = list(getattr(stream, "curves", []) or [])
-        self.doc_extra: object | None = getattr(stream, "doc_extra", None)
-        self.scene_extra: object | None = getattr(stream, "scene_extra", None)
-        self.scene_info: dict = _scene_info_from_loaded(stream)
-        self.doc_images: list[dict] = list(getattr(stream, "images", []) or [])
-        self.required_node_indices: list[int] | None = getattr(stream, "required_node_indices", None)
-        self.mesh_count = 0
-        self.pending_primitives: deque[MeshPrimitiveData] = deque()
-        self.deferred_primitives: deque[MeshPrimitiveData] = deque()
-        self.objects: list[bpy.types.Object] = []
-        self.state: dict | None = None
-        self.error: BaseException | None = None
-        self.error_traceback = ""
-        self.producer_done = False
-        self.load_started_at = 0.0
-        self.build_started_at = 0.0
-        self.first_object_at = 0.0
-        self.created_count = 0
-        self.curves_created = False
-        self.progress_active = False
-        self.profile_detail = _PROFILE_MATERIAL_STATS is not None
-        self._queue: queue.SimpleQueue[list[MeshPrimitiveData]] = queue.SimpleQueue()
-        self._thread = threading.Thread(target=self._produce, name="AssetKit progressive import", daemon=True)
-
-    def start(self) -> None:
-        self.load_started_at = time.perf_counter()
-        _ACTIVE_IMPORT_JOBS.append(self)
-        self._progress_begin()
-        self._status_set("AssetKit is importing...")
-        start_loading_hud("AssetKit is importing", delay=0.0)
-        self._thread.start()
-        bpy.app.timers.register(self._timer, first_interval=0.001)
-
-    def _produce(self) -> None:
-        try:
-            if not self.library_path:
-                open_started_at = time.perf_counter() if self.profile_detail else 0.0
-                stream = self.stream or native_open_scene_stream(self.filepath, self.load_options)
-                if stream is not None:
-                    if self.profile_detail:
-                        _profile_log(
-                            "producer open_scene "
-                            f"elapsed={(time.perf_counter() - open_started_at) * 1000.0:.3f}ms "
-                            f"meshes={stream.mesh_count} nodes={len(stream.nodes)}"
-                        )
-                    self.scene_nodes = stream.nodes
-                    self.curves = list(stream.curves or [])
-                    self.doc_extra = stream.doc_extra
-                    self.scene_extra = stream.scene_extra
-                    self.doc_images = list(stream.images or [])
-                    self.scene_info = _scene_info_from_loaded(stream)
-                    self.required_node_indices = stream.required_node_indices
-                    self.mesh_count = stream.mesh_count
-                    start = 0
-                    producer_batch_size = max(self.batch_size * 4, 256)
-                    while start < stream.mesh_count:
-                        if self.prefer_grouped and stream.mesh_count <= self.batch_size:
-                            count = stream.mesh_count
-                        elif start == 0:
-                            count = min(_PROGRESSIVE_FIRST_BATCH_SIZE, self.batch_size)
-                        else:
-                            count = producer_batch_size
-                        batch_started_at = time.perf_counter() if self.profile_detail else 0.0
-                        batch = stream.read_mesh_batch(start, count)
-                        if batch:
-                            self._queue.put(batch)
-                        if self.profile_detail:
-                            _profile_log(
-                                "producer batch "
-                                f"start={start} requested={count} got={len(batch)} "
-                                f"elapsed={(time.perf_counter() - batch_started_at) * 1000.0:.3f}ms"
-                            )
-                        start += count
-                    return
-
-            fallback_started_at = time.perf_counter() if self.profile_detail else 0.0
-            primitives, curves, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
-                self.filepath,
-                self.library_path,
-                self.load_options,
-            )
-            if self.profile_detail:
-                _profile_log(
-                    "producer fallback_load "
-                    f"elapsed={(time.perf_counter() - fallback_started_at) * 1000.0:.3f}ms "
-                    f"meshes={len(primitives)} curves={len(curves)} nodes={len(scene_nodes)}"
-                )
-            self.scene_nodes = scene_nodes
-            self.curves = curves
-            self.doc_extra = doc_extra
-            self.scene_extra = scene_extra
-            self.scene_info = scene_info
-            self.doc_images = doc_images
-            self.required_node_indices = None
-            self.mesh_count = len(primitives)
-            if primitives:
-                self._queue.put(primitives)
-        except BaseException as exc:
-            self.error = exc
-            self.error_traceback = traceback.format_exc()
-        finally:
-            self.producer_done = True
-
-    def _timer(self) -> float | None:
-        try:
-            return self._step()
-        except BaseException:
-            print(traceback.format_exc())
-            self._finish()
-            return None
-
-    def _step(self) -> float | None:
-        self._drain_queue()
-
-        if self.error:
-            print(self.error_traceback or str(self.error))
-            self._finish()
-            return None
-
-        if self._waiting_for_grouped_auto_load():
-            self._status_set("AssetKit is importing...")
-            update_loading_hud("AssetKit is importing")
-            return 0.001
-
-        if self.state is None:
-            if not self.pending_primitives and not self.deferred_primitives and not self.producer_done:
-                self._status_set("AssetKit is importing...")
-                update_loading_hud("AssetKit is importing")
-                return 0.01
-            self.build_started_at = time.perf_counter()
-            coord_probe = [self.pending_primitives[0]] if self.pending_primitives else list(self.deferred_primitives)[:1]
-            scene_build_started_at = time.perf_counter() if self.profile_detail else 0.0
-            self.state = _begin_scene_build(
-                coord_probe,
-                self.scene_nodes,
-                self.collection,
-                self.doc_extra,
-                self.scene_extra,
-                self.scene_info,
-                self.doc_images,
-                apply_node_animation=False,
-                defer_custom_normals=self.defer_custom_normals,
-                dynamic_skin_animation_skip=True,
-                create_all_nodes=self.required_node_indices is None and not self.producer_done,
-                required_node_indices=(
-                    self.required_node_indices
-                    if self.required_node_indices is not None
-                    else _REQUIRED_NODE_INDICES_AUTO
-                ),
-                curves=self.curves,
-            )
-            self._create_curves_once()
-            if self.profile_detail:
-                _profile_log(
-                    "begin_scene_build "
-                    f"nodes={len(self.scene_nodes)} "
-                    f"curves={len(self.curves)} "
-                    f"pending={len(self.pending_primitives)} deferred={len(self.deferred_primitives)} "
-                    f"elapsed={(time.perf_counter() - scene_build_started_at) * 1000.0:.3f}ms"
-                )
-            self._status_set("AssetKit is importing...")
-            update_loading_hud("AssetKit is importing")
-            if not self.pending_primitives and not self.deferred_primitives and self.producer_done:
-                self._finish_success()
-                return None
-
-        if self._can_build_grouped_auto_slice():
-            self._build_grouped_auto_slice()
-            if self.producer_done and not self.pending_primitives and not self.deferred_primitives:
-                self._finish_success()
-                return None
-            self._progress_update()
-            return 0.001
-
-        if not self.pending_primitives and self.deferred_primitives and not self.producer_done:
-            self._status_set("AssetKit is importing...")
-            update_loading_hud("AssetKit is importing")
-            self._drain_queue()
-            return 0.005
-
-        created_this_step = 0
-        slice_started_at = time.perf_counter()
-        global _ACTIVE_TEXTURE_LOAD_MODE
-        previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
-        _ACTIVE_TEXTURE_LOAD_MODE = self.texture_load_mode
-        try:
-            while (self.pending_primitives or self.deferred_primitives) and created_this_step < self.batch_size:
-                primitive = (
-                    self.pending_primitives.popleft()
-                    if self.pending_primitives
-                    else self.deferred_primitives.popleft()
-                )
-                created_objects = _create_import_object(
-                    primitive,
-                    self.state,
-                    self.collection,
-                    self.shading_mode,
-                )
-                self.objects.extend(created_objects)
-                self.created_count += 1
-                created_this_step += 1
-                if self.first_object_at == 0.0:
-                    self.first_object_at = time.perf_counter()
-                if time.perf_counter() - slice_started_at >= _PROGRESSIVE_TIME_BUDGET:
-                    break
-        finally:
-            _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
-
-        if created_this_step and self.profile_detail:
-            _profile_log(
-                "build_slice "
-                f"created={created_this_step} "
-                f"pending={len(self.pending_primitives)} deferred={len(self.deferred_primitives)} "
-                f"elapsed={(time.perf_counter() - slice_started_at) * 1000.0:.3f}ms"
-            )
-
-        self._drain_queue()
-        if self.producer_done and not self.pending_primitives and not self.deferred_primitives:
-            self._finish_success()
-            return None
-
-        self._progress_update()
-        return 0.001
-
-    def _drain_queue(self) -> None:
-        while True:
-            try:
-                batch = self._queue.get_nowait()
-            except queue.Empty:
-                return
-            for primitive in batch:
-                if primitive.primitive_type in {AK_PRIMITIVE_LINES, AK_PRIMITIVE_POINTS}:
-                    self.deferred_primitives.append(primitive)
-                else:
-                    self.pending_primitives.append(primitive)
-
-    def _waiting_for_grouped_auto_load(self) -> bool:
-        return (
-            self.prefer_grouped
-            and not self.producer_done
-            and self.mesh_count > 0
-            and self.mesh_count <= self.batch_size
-        )
-
-    def _can_build_grouped_auto_slice(self) -> bool:
-        return (
-            self.prefer_grouped
-            and self.producer_done
-            and self.mesh_count > 0
-            and self.mesh_count <= self.batch_size
-            and (self.pending_primitives or self.deferred_primitives)
-        )
-
-    def _build_grouped_auto_slice(self) -> None:
-        if self.state is None:
-            return
-
-        slice_started_at = time.perf_counter()
-        primitives = list(self.pending_primitives)
-        deferred = list(self.deferred_primitives)
-        self.pending_primitives.clear()
-        self.deferred_primitives.clear()
-
-        units = _mesh_import_units(primitives)
-        if deferred:
-            units.extend(deferred)
-
-        created_units = 0
-        created_primitives = 0
-        global _ACTIVE_TEXTURE_LOAD_MODE
-        previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
-        _ACTIVE_TEXTURE_LOAD_MODE = self.texture_load_mode
-        try:
-            for unit in units:
-                created_objects = _create_import_unit(
-                    unit,
-                    self.state,
-                    self.collection,
-                    self.shading_mode,
-                )
-                self.objects.extend(created_objects)
-                created_units += 1
-                created_primitives += len(unit) if isinstance(unit, list) else 1
-                if self.first_object_at == 0.0 and created_objects:
-                    self.first_object_at = time.perf_counter()
-        finally:
-            _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
-
-        self.created_count += created_primitives
-        if self.profile_detail:
-            _profile_log(
-                "build_grouped_auto_slice "
-                f"units={created_units} primitives={created_primitives} "
-                f"elapsed={(time.perf_counter() - slice_started_at) * 1000.0:.3f}ms"
-            )
-
-    def _finish_success(self) -> None:
-        _apply_deferred_bind_pose_skins(self.state)
-        _apply_deferred_scene_node_animations(self.state)
-        _apply_deferred_skin_animations(self.state)
-        _finish_import(
-            self.objects,
-            self.focus_mode,
-            self.placement_mode,
-            self.state[_S_ROOT_OBJECTS] if self.state else [],
-            self.scene_was_empty,
-            self.collection,
-            self.focus_camera,
-            self.select_imported,
-            self.set_viewport_shading,
-            self.clean_viewport_overlays,
-            self.existing_actions,
-        )
-        finished_at = time.perf_counter()
-        load_seconds = self.build_started_at - self.load_started_at
-        build_seconds = finished_at - self.build_started_at
-        first_object_seconds = self.first_object_at - self.load_started_at if self.first_object_at else 0.0
-        if self.profile_detail:
-            _profile_log(
-                "progressive finish "
-                f"objects={len(_import_result_objects(self.objects, self.state or {}))} "
-                f"mesh_cache_hits={int(self.state[_S_MESH_CACHE_HITS]) if self.state else 0} "
-                f"first_object={first_object_seconds:.3f}s "
-                f"load={load_seconds:.3f}s build={build_seconds:.3f}s "
-                f"total={finished_at - self.load_started_at:.3f}s"
-            )
-            _log_material_profile("progressive")
-        self._finish()
-
-    def _create_curves_once(self) -> None:
-        if self.curves_created or self.state is None:
-            return
-        self.curves_created = True
-        if not self.curves:
-            return
-        started_at = time.perf_counter() if self.profile_detail else 0.0
-        created = _create_curve_objects(self.curves, self.state, self.collection)
-        self.objects.extend(created)
-        self.created_count += len(created)
-        if self.first_object_at == 0.0 and created:
-            self.first_object_at = time.perf_counter()
-        if self.profile_detail:
-            _profile_log(
-                "build_curves "
-                f"created={len(created)} curves={len(self.curves)} "
-                f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
-            )
-
-    def _finish(self) -> None:
-        _reset_material_template_cache()
-        self._progress_end()
-        self._status_clear()
-        finish_loading_hud()
-        if self in _ACTIVE_IMPORT_JOBS:
-            _ACTIVE_IMPORT_JOBS.remove(self)
-
-    def _progress_begin(self) -> None:
-        if self.progress_active:
-            return
-        try:
-            total = self.mesh_count or len(self.pending_primitives)
-            bpy.context.window_manager.progress_begin(0, max(1, total + len(self.curves)))
-            self.progress_active = True
-        except Exception:
-            self.progress_active = False
-
-    def _progress_update(self) -> None:
-        if not self.progress_active:
-            return
-        try:
-            bpy.context.window_manager.progress_update(self.created_count)
-        except Exception:
-            self.progress_active = False
-
-    def _progress_end(self) -> None:
-        if not self.progress_active:
-            return
-        try:
-            bpy.context.window_manager.progress_end()
-        except Exception:
-            pass
-        self.progress_active = False
-
-    def _status_set(self, text: str) -> None:
-        try:
-            workspace = bpy.context.workspace
-            if workspace:
-                workspace.status_text_set(text)
-        except Exception:
-            pass
-
-    def _status_clear(self) -> None:
-        try:
-            workspace = bpy.context.workspace
-            if workspace:
-                workspace.status_text_set(None)
-        except Exception:
-            pass
 
 
 def _create_mesh_object(
@@ -5825,9 +5280,9 @@ def _apply_skin(
         detail_parts.append(f"vertex_groups={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
     if data.skin_mesh_in_bind_pose:
-        queue = _deferred_bind_pose_skin_queue(skin_cache)
-        if queue is not None:
-            queue.append((
+        pending = _deferred_bind_pose_skin_items(skin_cache)
+        if pending is not None:
+            pending.append((
                 obj,
                 data,
                 joint_names,
@@ -5972,14 +5427,14 @@ def _skin_cache_key(
     )
 
 
-def _deferred_bind_pose_skin_queue(skin_cache: dict | None) -> list | None:
+def _deferred_bind_pose_skin_items(skin_cache: dict | None) -> list | None:
     if skin_cache is None:
         return None
-    queue = skin_cache.get(_SKIN_CACHE_DEFER_BIND_SKINS)
-    if queue is None:
-        queue = []
-        skin_cache[_SKIN_CACHE_DEFER_BIND_SKINS] = queue
-    return queue
+    pending = skin_cache.get(_SKIN_CACHE_DEFER_BIND_SKINS)
+    if pending is None:
+        pending = []
+        skin_cache[_SKIN_CACHE_DEFER_BIND_SKINS] = pending
+    return pending
 
 
 def _skin_joint_name(
