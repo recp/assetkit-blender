@@ -49,7 +49,9 @@ set(ASSETKIT_CACHE_PATH_VARS
   ASSETKIT_DRACO_LIBRARY
   ASSETKIT_DRACO_RUNTIME_LIBRARY
   ASSETKIT_SPZ_LIBRARY
-  ASSETKIT_SPZ_RUNTIME_LIBRARY)
+  ASSETKIT_SPZ_RUNTIME_LIBRARY
+  ASSETKIT_DS_LIBRARY
+  ASSETKIT_DS_RUNTIME_LIBRARY)
 
 if(ASSETKIT_ROOT AND ASSETKIT_STRICT_ROOT AND DEFINED ASSETKIT_CACHED_ROOT
    AND NOT ASSETKIT_CACHED_ROOT STREQUAL ASSETKIT_ROOT)
@@ -75,6 +77,7 @@ endif()
 set(ASSETKIT_INCLUDE_HINTS)
 set(ASSETKIT_LIBRARY_HINTS)
 set(CGLM_INCLUDE_HINTS)
+set(ASSETKIT_DS_LIBRARY_HINTS)
 if(ASSETKIT_ROOT)
   list(APPEND ASSETKIT_INCLUDE_HINTS "${ASSETKIT_ROOT}/include")
   list(APPEND CGLM_INCLUDE_HINTS "${ASSETKIT_ROOT}/deps/cglm/include")
@@ -83,6 +86,15 @@ if(ASSETKIT_ROOT)
     "${ASSETKIT_ROOT}/build/src"
     "${ASSETKIT_ROOT}/build/Release"
     "${ASSETKIT_ROOT}/lib")
+  list(APPEND ASSETKIT_DS_LIBRARY_HINTS
+    "${ASSETKIT_ROOT}/build/deps/ds"
+    "${ASSETKIT_ROOT}/build/deps/ds/Release"
+    "${ASSETKIT_ROOT}/build/deps/ds/RelWithDebInfo"
+    "${ASSETKIT_ROOT}/deps/ds/build"
+    "${ASSETKIT_ROOT}/deps/ds/build/Release"
+    "${ASSETKIT_ROOT}/deps/ds/build/RelWithDebInfo"
+    "${ASSETKIT_ROOT}/lib"
+    "${ASSETKIT_ROOT}/bin")
 endif()
 
 set(ASSETKIT_FIND_ROOT_ARGS)
@@ -118,6 +130,10 @@ find_library(ASSETKIT_SPZ_LIBRARY
   NAMES assetkit_spz libassetkit_spz
   HINTS ${ASSETKIT_LIBRARY_HINTS}
   ${ASSETKIT_FIND_ROOT_ARGS})
+find_library(ASSETKIT_DS_LIBRARY
+  NAMES ds libds
+  HINTS ${ASSETKIT_DS_LIBRARY_HINTS}
+  ${ASSETKIT_FIND_ROOT_ARGS})
 
 if(WIN32)
   find_file(ASSETKIT_RUNTIME_LIBRARY
@@ -140,12 +156,17 @@ if(WIN32)
     NAMES assetkit_spz.dll libassetkit_spz.dll
     HINTS ${ASSETKIT_LIBRARY_HINTS}
     ${ASSETKIT_FIND_ROOT_ARGS})
+  find_file(ASSETKIT_DS_RUNTIME_LIBRARY
+    NAMES ds.dll libds.dll
+    HINTS ${ASSETKIT_DS_LIBRARY_HINTS}
+    ${ASSETKIT_FIND_ROOT_ARGS})
 else()
   set(ASSETKIT_RUNTIME_LIBRARY "${ASSETKIT_LIBRARY}")
   set(ASSETKIT_KTX2_RUNTIME_LIBRARY "${ASSETKIT_KTX2_LIBRARY}")
   set(ASSETKIT_MESHOPTIMIZER_RUNTIME_LIBRARY "${ASSETKIT_MESHOPTIMIZER_LIBRARY}")
   set(ASSETKIT_DRACO_RUNTIME_LIBRARY "${ASSETKIT_DRACO_LIBRARY}")
   set(ASSETKIT_SPZ_RUNTIME_LIBRARY "${ASSETKIT_SPZ_LIBRARY}")
+  set(ASSETKIT_DS_RUNTIME_LIBRARY "${ASSETKIT_DS_LIBRARY}")
 endif()
 
 if(NOT ASSETKIT_INCLUDE_DIR)
@@ -236,6 +257,7 @@ function(assetkit_blender_copy_runtime_library runtime_library runtime_label)
 endfunction()
 
 assetkit_blender_copy_runtime_library("${ASSETKIT_RUNTIME_LIBRARY}" "core")
+assetkit_blender_copy_runtime_library("${ASSETKIT_DS_RUNTIME_LIBRARY}" "ds")
 
 function(assetkit_blender_copy_decoder decoder_library decoder_label)
   if(NOT decoder_library)

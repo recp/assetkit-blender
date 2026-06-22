@@ -184,6 +184,11 @@ def clean_native_artifacts() -> None:
         "libassetkit*.so.*",
         "assetkit*.dll",
         "libassetkit*.dll",
+        "libds*.dylib",
+        "libds*.so",
+        "libds*.so.*",
+        "ds*.dll",
+        "libds*.dll",
     ]
     for pattern in patterns:
         for path in PACKAGE_DIR.glob(pattern):
