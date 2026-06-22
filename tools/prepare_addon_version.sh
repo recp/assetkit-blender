@@ -139,7 +139,7 @@ else
 fi
 
 mkdir -p "$ROOT_DIR/$out_dir"
-rm -f "$ROOT_DIR/$out_dir"/assetkit_blender-"$version"-*.zip
+rm -f "$ROOT_DIR/$out_dir"/assetkit_blender-*.zip
 rm -f "$ROOT_DIR/$out_dir"/SHA256SUMS
 
 expected=()
