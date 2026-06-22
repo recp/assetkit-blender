@@ -133,6 +133,11 @@ _MATERIAL_TEMPLATE_CACHE: dict[object, bpy.types.Material] = {}
 _ACTIVE_TEXTURE_NODE_CACHE: dict[object, object] | None = None
 _ACTIVE_SEPARATE_COLOR_CACHE: dict[int, object] | None = None
 _ACTIVE_TEXTURE_LOAD_MODE = "IMMEDIATE"
+_ACTIVE_MATERIAL_TEMPLATE_CLONING = True
+_ACTIVE_PREBUILT_MATERIALS_BY_ID: dict[int, bpy.types.Material | None] | None = None
+_MATERIAL_NOT_PREBUILT = object()
+_MATERIAL_TEMPLATE_CLONE_PRIMITIVE_LIMIT = 1024
+_MATERIAL_PREBUILD_PRIMITIVE_LIMIT = 1024
 _DEFERRED_TEXTURE_WAITERS: dict[tuple[str, str], list[object]] = {}
 _DEFERRED_TEXTURE_KEYS: deque[tuple[str, str]] = deque()
 _DEFERRED_TEXTURE_TIMER_ACTIVE = False
@@ -366,16 +371,26 @@ def import_assetkit_file(
     objects: list[bpy.types.Object] = []
     build_started_at = time.perf_counter() if profile_detail else 0.0
     import_units = _mesh_import_units(primitives)
-    global _ACTIVE_TEXTURE_LOAD_MODE
+    global _ACTIVE_MATERIAL_TEMPLATE_CLONING, _ACTIVE_PREBUILT_MATERIALS_BY_ID, _ACTIVE_TEXTURE_LOAD_MODE
     previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
+    previous_material_template_cloning = _ACTIVE_MATERIAL_TEMPLATE_CLONING
+    previous_prebuilt_materials = _ACTIVE_PREBUILT_MATERIALS_BY_ID
     _ACTIVE_TEXTURE_LOAD_MODE = texture_load_mode
+    _ACTIVE_MATERIAL_TEMPLATE_CLONING = len(primitives) <= _MATERIAL_TEMPLATE_CLONE_PRIMITIVE_LIMIT
     try:
+        _ACTIVE_PREBUILT_MATERIALS_BY_ID = _prebuild_material_cache(
+            primitives,
+            state[_S_MATERIAL_CACHE],
+            texture_load_mode,
+        )
         objects.extend(_create_curve_objects(curves, state, collection or bpy.context.collection))
         for unit in import_units:
             objects.extend(_create_import_unit(unit, state, collection or bpy.context.collection, shading_mode))
         _apply_deferred_bind_pose_skins(state)
     finally:
         _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
+        _ACTIVE_MATERIAL_TEMPLATE_CLONING = previous_material_template_cloning
+        _ACTIVE_PREBUILT_MATERIALS_BY_ID = previous_prebuilt_materials
         _reset_material_template_cache()
     if profile_detail:
         _profile_log(
@@ -1074,6 +1089,57 @@ def _mesh_node_parent(state: dict, node_index: int) -> tuple[bpy.types.Object | 
     return result
 
 
+def _prebuild_material_cache(
+    primitives: list[MeshPrimitiveData],
+    material_cache: dict[object, bpy.types.Material],
+    texture_load_mode: str,
+) -> dict[int, bpy.types.Material | None] | None:
+    if texture_load_mode == "DEFERRED" or len(primitives) <= _MATERIAL_PREBUILD_PRIMITIVE_LIMIT:
+        return None
+
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+    started_at = time.perf_counter() if profile_detail else 0.0
+    prebuilt: dict[int, bpy.types.Material | None] = {}
+    created = 0
+    skipped = 0
+    for primitive in primitives:
+        if not _has_material_data(primitive):
+            prebuilt[id(primitive)] = None
+            skipped += 1
+            continue
+        cache_key = _material_cache_key(primitive)
+        if cache_key in material_cache:
+            prebuilt[id(primitive)] = material_cache[cache_key]
+            skipped += 1
+            continue
+        material = _create_material(primitive, material_cache)
+        prebuilt[id(primitive)] = material
+        if material is not None:
+            created += 1
+        else:
+            skipped += 1
+
+    if profile_detail and (created or skipped):
+        _profile_log(
+            "prebuild_material_cache "
+            f"created={created} skipped={skipped} cached={len(material_cache)} "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+    return prebuilt
+
+
+def _material_for_data(
+    data: MeshPrimitiveData,
+    material_cache: dict[object, bpy.types.Material] | None,
+) -> bpy.types.Material | None:
+    prebuilt = _ACTIVE_PREBUILT_MATERIALS_BY_ID
+    if prebuilt is not None:
+        material = prebuilt.get(id(data), _MATERIAL_NOT_PREBUILT)
+        if material is not _MATERIAL_NOT_PREBUILT:
+            return material
+    return _create_material(data, material_cache)
+
+
 def _create_import_object(
     primitive: MeshPrimitiveData,
     state: dict,
@@ -1495,9 +1561,9 @@ def _create_grouped_mesh_object_bulk(
     if has_materials:
         for primitive in primitives:
             if not _try_defer_material_assignment(mesh, obj, primitive, material_cache, False):
-                material = _create_material(primitive, material_cache)
+                material = _material_for_data(primitive, material_cache)
                 if material:
-                    mesh.materials.append(material)
+                    _assign_mesh_material(obj, mesh, material)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"materials={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -2663,12 +2729,9 @@ def _finish_mesh_object(
         phase_started_at = now
     if assign_material:
         if not _try_defer_material_assignment(mesh, obj, data, material_cache, object_material_slot):
-            material = _create_material(data, material_cache)
+            material = _material_for_data(data, material_cache)
             if material:
-                if object_material_slot:
-                    _assign_object_material_slot(obj, material)
-                else:
-                    mesh.materials.append(material)
+                _assign_mesh_material(obj, mesh, material, object_material_slot=object_material_slot)
     if profile_detail:
         now = time.perf_counter()
         material_ms = (now - phase_started_at) * 1000.0
@@ -2796,10 +2859,7 @@ def _try_defer_material_assignment(
     if isinstance(cached, _DeferredMaterialSpec):
         spec = cached
     elif cached is not None:
-        if object_material_slot:
-            _assign_object_material_slot(obj, cached)
-        else:
-            mesh.materials.append(cached)
+        _assign_mesh_material(obj, mesh, cached, object_material_slot=object_material_slot)
         return True
     else:
         material_name = data.material_name or f"{data.name}_Material"
@@ -2845,7 +2905,7 @@ def _try_defer_material_assignment(
         _queue_deferred_material_slot(spec)
 
     slot_index = -1
-    spec.slots.append((mesh, obj if object_material_slot else None, slot_index, object_material_slot))
+    spec.slots.append((mesh, obj, slot_index, object_material_slot))
     return True
 
 
@@ -2853,6 +2913,22 @@ def _ensure_object_material_slot(mesh: bpy.types.Mesh) -> int:
     if not mesh.materials:
         mesh.materials.append(None)
     return 0
+
+
+def _assign_mesh_material(
+    obj: bpy.types.Object,
+    mesh: bpy.types.Mesh,
+    material: bpy.types.Material,
+    *,
+    object_material_slot: bool = False,
+) -> None:
+    if object_material_slot:
+        _assign_object_material_slot(obj, material)
+        return
+    if not mesh.materials:
+        obj.active_material = material
+        return
+    mesh.materials.append(material)
 
 
 def _assign_object_material_slot(obj: bpy.types.Object, material: bpy.types.Material) -> None:
@@ -7475,7 +7551,10 @@ def _apply_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
                 slot.material = mat
             else:
                 if slot_index < 0:
-                    mesh.materials.append(mat)
+                    if obj is not None and _object_ref_alive(obj):
+                        _assign_mesh_material(obj, mesh, mat)
+                    else:
+                        mesh.materials.append(mat)
                 elif slot_index < len(mesh.materials):
                     mesh.materials[slot_index] = mat
         except Exception:
@@ -7531,6 +7610,10 @@ def _configure_base_color_texture_fast_material(
     data: MeshPrimitiveData,
     base_color: tuple[float, float, float, float],
 ) -> bool:
+    tex_info = _texture_info(data, "base_color")
+    if tex_info is None:
+        return _configure_plain_base_color_texture_fast_material(mat, data, base_color)
+
     mat.diffuse_color = base_color
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
@@ -7550,7 +7633,6 @@ def _configure_base_color_texture_fast_material(
         if socket:
             socket.default_value = data.roughness
 
-    tex_info = _texture_info(data, "base_color")
     colorspace = _texture_color_space(tex_info, "sRGB")
     path = data.base_color_texture
     image = _cached_texture_image(path, colorspace) if _should_defer_texture_image(path) else _load_texture_image(path, colorspace)
@@ -7578,11 +7660,56 @@ def _configure_base_color_texture_fast_material(
     return True
 
 
+def _configure_plain_base_color_texture_fast_material(
+    mat: bpy.types.Material,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> bool:
+    mat.diffuse_color = base_color
+    mat.use_nodes = True
+    mat.use_backface_culling = not _is_double_sided_material(data)
+
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if not tree or not bsdf:
+        return False
+
+    bsdf_inputs = bsdf.inputs
+    if abs(float(data.metallic)) > 1e-6:
+        socket = bsdf_inputs.get("Metallic")
+        if socket:
+            socket.default_value = data.metallic
+    if abs(float(data.roughness) - 0.5) > 1e-6:
+        socket = bsdf_inputs.get("Roughness")
+        if socket:
+            socket.default_value = data.roughness
+
+    path = data.base_color_texture
+    image = _cached_texture_image(path, "sRGB") if _should_defer_texture_image(path) else _load_texture_image(path, "sRGB")
+    if not image and not _should_defer_texture_image(path):
+        return False
+
+    tex = tree.nodes.new("ShaderNodeTexImage")
+    if image:
+        tex.image = image
+    else:
+        _queue_deferred_texture_image(tex, path, "sRGB", store_props=False)
+
+    color_socket = bsdf_inputs.get("Base Color")
+    color_output = tex.outputs.get("Color")
+    if color_socket and color_output:
+        tree.links.new(color_output, color_socket)
+    return True
+
+
 def _copy_base_color_texture_template_material(
     name: str,
     data: MeshPrimitiveData,
     base_color: tuple[float, float, float, float],
 ) -> bpy.types.Material | None:
+    if not _ACTIVE_MATERIAL_TEMPLATE_CLONING:
+        return _copy_base_color_texture_empty_template_material(name, data, base_color)
+
     key = _base_color_texture_template_key(data)
     if key is None:
         return None
@@ -7629,6 +7756,74 @@ def _copy_base_color_texture_template_material(
     return mat
 
 
+def _copy_base_color_texture_empty_template_material(
+    name: str,
+    data: MeshPrimitiveData,
+    base_color: tuple[float, float, float, float],
+) -> bpy.types.Material | None:
+    key = ("base-color-texture-empty-template", int(data.material_type))
+    template = _MATERIAL_TEMPLATE_CACHE.get(key)
+    if template is not None and not _material_ref_alive(template):
+        _MATERIAL_TEMPLATE_CACHE.pop(key, None)
+        template = None
+
+    if template is None:
+        template = bpy.data.materials.new(".AssetKit_BaseColorTexture_EmptyTemplate")
+        try:
+            template["assetkit_internal_template"] = True
+        except Exception:
+            pass
+        template.use_nodes = True
+        if not template.node_tree or not template.node_tree.nodes.get("Principled BSDF"):
+            try:
+                bpy.data.materials.remove(template)
+            except Exception:
+                pass
+            return None
+        _MATERIAL_TEMPLATE_CACHE[key] = template
+
+    try:
+        mat = template.copy()
+    except Exception:
+        return None
+
+    mat.name = name
+    mat.diffuse_color = base_color
+    mat.use_backface_culling = not _is_double_sided_material(data)
+    _set_material_alpha_mode(mat, data)
+
+    tree = mat.node_tree
+    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+    if not tree or not bsdf:
+        return mat
+
+    bsdf_inputs = bsdf.inputs
+    if abs(float(data.metallic)) > 1e-6:
+        socket = bsdf_inputs.get("Metallic")
+        if socket:
+            socket.default_value = data.metallic
+    if abs(float(data.roughness) - 0.5) > 1e-6:
+        socket = bsdf_inputs.get("Roughness")
+        if socket:
+            socket.default_value = data.roughness
+    specular_level = _pbr_specular_level(data)
+    if abs(float(specular_level) - 0.5) > 1e-6:
+        _set_first_input(bsdf, ("Specular IOR Level", "Specular"), specular_level)
+
+    tex_info = _texture_info(data, "base_color")
+    tex = _new_fast_image_texture_node(
+        tree,
+        data.base_color_texture,
+        tex_info,
+        _texture_color_space(tex_info, "sRGB"),
+    )
+    color_socket = bsdf_inputs.get("Base Color")
+    color_output = tex.outputs.get("Color") if tex else None
+    if color_socket and color_output:
+        tree.links.new(color_output, color_socket)
+    return mat
+
+
 def _base_color_texture_template_key(data: MeshPrimitiveData) -> object | None:
     tex_info = _texture_info(data, "base_color")
     colorspace = _texture_color_space(tex_info, "sRGB")
@@ -7643,6 +7838,9 @@ def _copy_classic_texture_template_material(
     data: MeshPrimitiveData,
     base_color: tuple[float, float, float, float],
 ) -> bpy.types.Material | None:
+    if not _ACTIVE_MATERIAL_TEMPLATE_CLONING:
+        return None
+
     key = _classic_texture_template_key(data)
     if key is None:
         return None

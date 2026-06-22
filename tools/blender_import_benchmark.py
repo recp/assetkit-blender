@@ -269,7 +269,7 @@ def scene_stats() -> SceneStats:
     return stats
 
 
-def import_assetkit(path: Path, texture_loading: str, triangulate: bool) -> None:
+def import_assetkit(path: Path, texture_loading: str, triangulate: bool, shading_mode: str) -> None:
     options = make_load_options(
         coordinate_system="Z_UP",
         coordinate_conversion="TRANSFORM",
@@ -291,7 +291,7 @@ def import_assetkit(path: Path, texture_loading: str, triangulate: bool) -> None
         placement_mode="AS_AUTHORED",
         scene_was_empty=True,
         select_imported=False,
-        shading_mode="AUTO",
+        shading_mode=shading_mode,
         set_viewport_shading=False,
         clean_viewport_overlays=False,
         fit_timeline=True,
@@ -344,14 +344,21 @@ def suppress_importer_output():
         os.close(saved_stderr)
 
 
-def time_import(path: Path, engine: str, texture_loading: str, triangulate: bool, verbose_importers: bool) -> dict:
+def time_import(
+    path: Path,
+    engine: str,
+    texture_loading: str,
+    triangulate: bool,
+    verbose_importers: bool,
+    shading_mode: str = "AUTO",
+) -> dict:
     purge_scene()
     started_at = time.perf_counter()
     error = ""
     try:
         if verbose_importers:
             if engine == "assetkit":
-                import_assetkit(path, texture_loading, triangulate)
+                import_assetkit(path, texture_loading, triangulate, shading_mode)
             elif engine == "builtin":
                 import_builtin(path)
             else:
@@ -359,7 +366,7 @@ def time_import(path: Path, engine: str, texture_loading: str, triangulate: bool
         else:
             with suppress_importer_output():
                 if engine == "assetkit":
-                    import_assetkit(path, texture_loading, triangulate)
+                    import_assetkit(path, texture_loading, triangulate, shading_mode)
                 elif engine == "builtin":
                     import_builtin(path)
                 else:
@@ -495,6 +502,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="AssetKit texture loading mode. IMMEDIATE is the fairest default for full import timing.",
     )
     parser.add_argument("--triangulate", action="store_true", help="Triangulate AssetKit imports")
+    parser.add_argument(
+        "--assetkit-shading",
+        choices=("AUTO", "SMOOTH", "FLAT", "AS_IS"),
+        default="AUTO",
+        help="AssetKit shading mode. AUTO preserves source custom normals; SMOOTH/AS_IS are faster preview-style modes.",
+    )
     parser.add_argument("--jsonl", default="", help="Optional path to write raw run rows and summaries")
     parser.add_argument("--markdown", action="store_true", help="Print a markdown comparison table")
     parser.add_argument("--verbose-importers", action="store_true", help="Show importer diagnostic output")
@@ -528,7 +541,14 @@ def main(argv: list[str]) -> int:
                 if run_index % 2 == 1:
                     engines.reverse()
                 for engine in engines:
-                    row = time_import(path, engine, args.assetkit_textures, args.triangulate, args.verbose_importers)
+                    row = time_import(
+                        path,
+                        engine,
+                        args.assetkit_textures,
+                        args.triangulate,
+                        args.verbose_importers,
+                        args.assetkit_shading,
+                    )
                     row["run"] = run_index + 1
                     rows.append(row)
                     print(json.dumps({"run": row}, sort_keys=True), flush=True)
