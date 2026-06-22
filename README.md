@@ -13,56 +13,45 @@ Blender add-on for importing and exporting 3D assets through [AssetKit](https://
 
 ## Benchmarks
 
-Here are local benchmark results from an M1 Max MacBook Pro, using Blender 4.5.10 LTS to include COLLADA:
+Here are local benchmark results from an M1 Max MacBook Pro, measured with `tools/benchmark_review_imports.sh`.
 
-| File | AssetKit median | Blender median | Blender / AssetKit |
-| --- | ---: | ---: | ---: |
-| BrainStem.dae | 61.1 ms | 6106.5 ms | 99.89x |
-| Duck.dae | 1.7 ms | 5.8 ms | 3.44x |
-| GearboxAssy.dae | 50.2 ms | 211.7 ms | 4.21x |
-| NodePerformanceTest.glb | 16827.8 ms | 254056.5 ms | 15.10x |
-| BoomBox.glb | 8.2 ms | 9.2 ms | 1.11x |
-| DamagedHelmet.glb | 2.2 ms | 15.4 ms | 7.01x |
-| WaterBottle.glb | 6.7 ms | 7.3 ms | 1.09x |
-| ABeautifulGame.glb | 67.8 ms | 453.1 ms | 6.68x |
-| AntiqueCamera.glb | 2.8 ms | 25.3 ms | 9.15x |
-| MosquitoInAmber.glb | 18.5 ms | 26.9 ms | 1.45x |
-| xyzrgb_dragon.obj | 24.4 ms | 82.8 ms | 3.39x |
-| dragon_vrip.ply | 51.2 ms | 227.6 ms | 4.45x |
-| 3DBenchy.stl | 8.4 ms | 38.4 ms | 4.59x |
+DAE Blender builtin results are measured with Blender 4.5.10 LTS because Blender 5.x no longer includes the COLLADA importer. Other Blender builtin results are measured with Blender 5.1.2.
+
+
+| File | AssetKit | AssetKit Blender Addon (+AssetKit) | Blender | Blender / AssetKit Blender |
+| --- | ---: | ---: | ---: | ---: |
+| BrainStem.dae | 33.0 ms | 60.7 ms | 6309.8 ms | 104.01x |
+| Duck.dae | 0.8 ms | 1.7 ms | 5.5 ms | 3.25x |
+| GearboxAssy.dae | 30.0 ms | 53.9 ms | 216.0 ms | 4.01x |
+| NodePerformanceTest.glb | 103.6 ms | 8912.2 ms | 185195.6 ms | 20.78x |
+| BoomBox.glb | 0.3 ms | 1.8 ms | 12.5 ms | 6.94x |
+| DamagedHelmet.glb | 0.3 ms | 2.5 ms | 29.6 ms | 11.79x |
+| WaterBottle.glb | 0.3 ms | 1.7 ms | 10.1 ms | 6.09x |
+| ABeautifulGame.glb | 11.4 ms | 63.8 ms | 773.9 ms | 12.12x |
+| AntiqueCamera.glb | 0.4 ms | 2.6 ms | 42.0 ms | 16.26x |
+| MosquitoInAmber.glb | 0.4 ms | 2.9 ms | 40.6 ms | 13.92x |
+| xyzrgb_dragon.obj | 17.3 ms | 22.6 ms | 55.6 ms | 2.46x |
+| dragon_vrip.ply | 26.1 ms | 46.9 ms | 166.9 ms | 3.56x |
+| 3DBenchy.stl | 3.5 ms | 7.4 ms | 28.7 ms | 3.86x |
 ...
 
----
+The script uses AssetKit shading mode `AS_IS` and texture loading `IMMEDIATE`.
+### Reproducing the Benchmarks
 
-
-Run repeatable importer benchmarks from Blender. `--download-suite` fetches the
-review suite into the ignored `benchmark-assets/` cache, including Khronos glTF
-sample assets, Khronos `glTF-Sample-Models/sourceModels` DAE files, and OBJ,
-PLY, and STL comparison files:
-
-Use Blender 4.5 LTS for DAE comparison runs.
-
-The default suite only includes files where both importers complete. Some extra
-DAE candidates are useful robustness cases but are kept out of the performance
-table if Blender's legacy Collada importer exits during import.
-The suite also includes coverage cases where AssetKit is not faster, so results
-should be read per file rather than as a blanket speed claim.
+Run the review benchmark script:
 
 ```sh
-/path/to/blender --background --factory-startup \
-  --python tools/blender_import_benchmark.py -- \
-  --download-suite --runs 3 --warmup 1 --markdown
+tools/benchmark_review_imports.sh
 ```
 
-The node stress test is much slower with Blender's built-in importer, so it can
-be run separately by selecting the optional suite asset:
+The script downloads the benchmark assets into the ignored `benchmark-assets/` cache and writes JSONL results plus a Markdown table to `benchmark-results/`.
 
-```sh
-/path/to/blender --background --factory-startup \
-  --python tools/blender_import_benchmark.py -- \
-  --download-suite --suite-assets gltf-node-performance \
-  --runs 1 --warmup 0 --markdown
-```
+By default it uses:
+
+- Blender 5.1.2 for glTF, OBJ, PLY, and STL comparisons
+- Blender 4.5.10 LTS for DAE builtin COLLADA comparisons
+- AssetKit shading mode `AS_IS`
+- AssetKit texture loading `IMMEDIATE`
 
 ## Build
 
