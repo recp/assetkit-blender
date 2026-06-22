@@ -19,29 +19,29 @@ jobs:
         include:
           - platform: linux-x64
             runner: ubuntu-22.04
-            blender-version: "5.1.0"
+            blender-version: "5.1.2"
             blender-release-dir: Blender5.1
-            blender-file: blender-5.1.0-linux-x64.tar.xz
+            blender-file: blender-5.1.2-linux-x64.tar.xz
           - platform: windows-x64
             runner: windows-2022
-            blender-version: "5.1.0"
+            blender-version: "5.1.2"
             blender-release-dir: Blender5.1
-            blender-file: blender-5.1.0-windows-x64.zip
+            blender-file: blender-5.1.2-windows-x64.zip
           - platform: windows-arm64
             runner: windows-11-arm
-            blender-version: "5.1.0"
+            blender-version: "5.1.2"
             blender-release-dir: Blender5.1
-            blender-file: blender-5.1.0-windows-arm64.zip
+            blender-file: blender-5.1.2-windows-arm64.zip
           - platform: macos-arm64
             runner: macos-26
-            blender-version: "5.1.0"
+            blender-version: "5.1.2"
             blender-release-dir: Blender5.1
-            blender-file: blender-5.1.0-macos-arm64.dmg
+            blender-file: blender-5.1.2-macos-arm64.dmg
           - platform: macos-x64
             runner: macos-26-intel
-            blender-version: "4.5.0"
+            blender-version: "4.5.10"
             blender-release-dir: Blender4.5
-            blender-file: blender-4.5.0-macos-x64.dmg
+            blender-file: blender-4.5.10-macos-x64.dmg
     env:
       BLENDER_URL: https://download.blender.org/release/${{ matrix.blender-release-dir }}/${{ matrix.blender-file }}
     steps:
