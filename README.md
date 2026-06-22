@@ -10,7 +10,7 @@ Blender add-on for importing and exporting 3D assets through [AssetKit](https://
 - OBJ
 - STL
 - PLY
-- 
+
 ## Benchmarks
 
 Here are local benchmark results from an M1 Max MacBook Pro, using Blender 4.5.10 LTS to include COLLADA:
@@ -101,13 +101,13 @@ python3 tools/package_extension.py --blender /path/to/blender --platform auto
 ```
 
 The release script stages the extension so `blender_manifest.toml` and
-`__init__.py` are at the zip root and native AssetKit runtime libraries are
-included.
+`__init__.py` are at the zip root. Native bridge binaries and optional AssetKit
+decoder libraries are packaged as platform wheels under `wheels/`.
 
 ## Release assets
 
-Pushing a tag such as `v0.1.0` runs the package matrix ob Github Actions and attaches the
-platform zip files to the GitHub Release for that tag automatically. 
+Pushing a tag such as `v0.1.0` runs the package matrix on GitHub Actions and attaches
+the platform zip files to the GitHub Release for that tag automatically.
 
 ## Install
 

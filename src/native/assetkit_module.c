@@ -38,6 +38,18 @@
 #include "imp/import.inc"
 #include "exp/export.inc"
 
+#if ASSETKIT_BLENDER_STATIC_ASSETKIT
+void ak__init(void);
+void ak__cleanup(void);
+
+static int akb_assetkit_exit_registered = 0;
+
+static void
+akb_assetkit_cleanup(void) {
+  ak__cleanup();
+}
+#endif
+
 static PyMethodDef akb_methods[] = {
   {"load_meshes", akb_load_meshes, METH_VARARGS, "Load mesh buffers through AssetKit."},
   {"open_scene", akb_open_scene, METH_VARARGS, "Open an AssetKit scene for batched mesh reads."},
@@ -71,5 +83,12 @@ static struct PyModuleDef akb_module = {
 
 PyMODINIT_FUNC
 PyInit__assetkit_blender(void) {
+#if ASSETKIT_BLENDER_STATIC_ASSETKIT
+  ak__init();
+  if (!akb_assetkit_exit_registered) {
+    Py_AtExit(akb_assetkit_cleanup);
+    akb_assetkit_exit_registered = 1;
+  }
+#endif
   return PyModule_Create(&akb_module);
 }

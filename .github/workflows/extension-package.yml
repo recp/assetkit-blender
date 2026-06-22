@@ -117,6 +117,7 @@ jobs:
           python3 tools/release_extension.py \
             --blender "$BLENDER_BIN" \
             --platform "${{ matrix.platform }}" \
+            --native-wheels \
             --assetkit-root "$PWD/deps/assetkit" \
             --python "${{ steps.py313.outputs.python-path }}" \
             --extra-python "${{ steps.py311.outputs.python-path }}"
@@ -128,6 +129,7 @@ jobs:
           python tools\release_extension.py `
             --blender "$env:BLENDER_BIN" `
             --platform "${{ matrix.platform }}" `
+            --native-wheels `
             --assetkit-root "$pwd\deps\assetkit" `
             --python "${{ steps.py313.outputs.python-path }}" `
             --extra-python "${{ steps.py311.outputs.python-path }}"

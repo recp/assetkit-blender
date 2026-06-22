@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         "--assetkit-build-dir",
         type=Path,
         default=None,
-        help="AssetKit CMake build directory; defaults to ASSETKIT_ROOT/build",
+        help="AssetKit CMake build directory; defaults to ASSETKIT_ROOT/build-static for wheel packages",
     )
     parser.add_argument(
         "--skip-assetkit",
@@ -74,6 +74,17 @@ def parse_args() -> argparse.Namespace:
         "--no-decoders",
         action="store_true",
         help="Build without optional AssetKit decoder shim libraries",
+    )
+    parser.add_argument(
+        "--static-assetkit",
+        action="store_true",
+        help="Link AssetKit core statically into the native Blender bridge",
+    )
+    parser.add_argument(
+        "--native-wheels",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Package native bridge binaries as wheels instead of loose extension files",
     )
     parser.add_argument(
         "--skip-native",
@@ -189,6 +200,7 @@ def clean_native_artifacts() -> None:
         "libds*.so.*",
         "ds*.dll",
         "libds*.dll",
+        "wheels/*.whl",
     ]
     for pattern in patterns:
         for path in PACKAGE_DIR.glob(pattern):
@@ -264,16 +276,27 @@ def main() -> int:
     if args.python_include and len(pythons) != 1:
         raise SystemExit("--python-include can only be used when building one Python ABI")
     assetkit_root = resolve_assetkit_root(args.assetkit_root)
-    assetkit_build_dir = args.assetkit_build_dir or (assetkit_root / "build")
+    static_assetkit = args.static_assetkit or args.native_wheels
+    assetkit_build_dir = args.assetkit_build_dir or (
+        assetkit_root / ("build-static" if static_assetkit else "build")
+    )
     tag = platform_tag(args.platform)
 
     if args.clean_artifacts:
         clean_native_artifacts()
 
     if not args.skip_assetkit:
-        assetkit_options = [
-            "-DAK_SHARED=ON",
-        ]
+        if static_assetkit:
+            assetkit_options = [
+                "-DAK_SHARED=OFF",
+                "-DAK_STATIC=ON",
+                "-DAK_STATIC_INTERNAL_DEPS=ON",
+                "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+            ]
+        else:
+            assetkit_options = [
+                "-DAK_SHARED=ON",
+            ]
         if args.no_decoders:
             assetkit_options.append("-DAK_BUILD_DECODER_SHIMS=OFF")
         cmake_configure(
@@ -294,6 +317,7 @@ def main() -> int:
                 build_dir,
                 [
                     f"-DASSETKIT_ROOT={assetkit_root}",
+                    f"-DASSETKIT_BLENDER_STATIC_ASSETKIT={'ON' if static_assetkit else 'OFF'}",
                     f"-DPython3_EXECUTABLE={python}",
                     *([f"-DPython3_INCLUDE_DIR={python_include}"] if python_include else []),
                 ],
@@ -308,6 +332,7 @@ def main() -> int:
             blender,
             "--platform",
             tag,
+            *(["--native-wheels"] if args.native_wheels else []),
         ]
     )
     return 0

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import gc
+import importlib
 import os
 import time
 from dataclasses import dataclass
@@ -535,8 +536,11 @@ def _native_module():
     try:
         from . import _assetkit_blender
     except ImportError:
-        _NATIVE_MODULE_FAILED = True
-        return None
+        try:
+            _assetkit_blender = importlib.import_module("_assetkit_blender")
+        except ImportError:
+            _NATIVE_MODULE_FAILED = True
+            return None
     _NATIVE_MODULE = _assetkit_blender
     return _NATIVE_MODULE
 

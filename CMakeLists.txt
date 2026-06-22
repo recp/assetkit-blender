@@ -9,6 +9,7 @@ set(ASSETKIT_ROOT "" CACHE PATH "AssetKit source or install root")
 set(ASSETKIT_BLENDER_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assetkit_blender" CACHE PATH "Output directory for the native Python module")
 set(ASSETKIT_BLENDER_PYTHON_SOABI "" CACHE STRING "Override Python extension ABI tag, for example cpython-313-darwin")
 option(ASSETKIT_STRICT_ROOT "Only resolve AssetKit headers and libraries from ASSETKIT_ROOT" ON)
+option(ASSETKIT_BLENDER_STATIC_ASSETKIT "Link AssetKit core statically into the Python bridge" OFF)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 
@@ -81,6 +82,16 @@ set(ASSETKIT_DS_LIBRARY_HINTS)
 if(ASSETKIT_ROOT)
   list(APPEND ASSETKIT_INCLUDE_HINTS "${ASSETKIT_ROOT}/include")
   list(APPEND CGLM_INCLUDE_HINTS "${ASSETKIT_ROOT}/deps/cglm/include")
+  if(ASSETKIT_BLENDER_STATIC_ASSETKIT)
+    list(APPEND ASSETKIT_LIBRARY_HINTS
+      "${ASSETKIT_ROOT}/build-static"
+      "${ASSETKIT_ROOT}/build-static/src"
+      "${ASSETKIT_ROOT}/build-static/Release")
+    list(APPEND ASSETKIT_DS_LIBRARY_HINTS
+      "${ASSETKIT_ROOT}/build-static/deps/ds"
+      "${ASSETKIT_ROOT}/build-static/deps/ds/Release"
+      "${ASSETKIT_ROOT}/build-static/deps/ds/RelWithDebInfo")
+  endif()
   list(APPEND ASSETKIT_LIBRARY_HINTS
     "${ASSETKIT_ROOT}/build"
     "${ASSETKIT_ROOT}/build/src"
@@ -198,9 +209,22 @@ if(ASSETKIT_BLENDER_PYTHON_SOABI)
 endif()
 target_include_directories(_assetkit_blender PRIVATE "${ASSETKIT_INCLUDE_DIR}" "${CGLM_INCLUDE_DIR}")
 target_compile_definitions(_assetkit_blender PRIVATE CGLM_ALL_UNALIGNED)
+if(ASSETKIT_BLENDER_STATIC_ASSETKIT)
+  target_compile_definitions(_assetkit_blender PRIVATE
+    ASSETKIT_BLENDER_STATIC_ASSETKIT=1
+    AK_STATIC
+    DS_STATIC)
+else()
+  target_compile_definitions(_assetkit_blender PRIVATE ASSETKIT_BLENDER_STATIC_ASSETKIT=0)
+endif()
 target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_LIBRARY}")
+if(ASSETKIT_BLENDER_STATIC_ASSETKIT AND ASSETKIT_DS_LIBRARY)
+  target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_DS_LIBRARY}")
+endif()
 if(UNIX AND NOT APPLE)
-  target_link_libraries(_assetkit_blender PRIVATE m)
+  target_link_libraries(_assetkit_blender PRIVATE m ${CMAKE_DL_LIBS})
+elseif(APPLE)
+  target_link_libraries(_assetkit_blender PRIVATE ${CMAKE_DL_LIBS})
 endif()
 set_target_properties(_assetkit_blender PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${ASSETKIT_BLENDER_PACKAGE_DIR}"
@@ -256,8 +280,10 @@ function(assetkit_blender_copy_runtime_library runtime_library runtime_label)
   message(STATUS "AssetKit ${runtime_label} runtime: ${runtime_library}")
 endfunction()
 
-assetkit_blender_copy_runtime_library("${ASSETKIT_RUNTIME_LIBRARY}" "core")
-assetkit_blender_copy_runtime_library("${ASSETKIT_DS_RUNTIME_LIBRARY}" "ds")
+if(NOT ASSETKIT_BLENDER_STATIC_ASSETKIT)
+  assetkit_blender_copy_runtime_library("${ASSETKIT_RUNTIME_LIBRARY}" "core")
+  assetkit_blender_copy_runtime_library("${ASSETKIT_DS_RUNTIME_LIBRARY}" "ds")
+endif()
 
 function(assetkit_blender_copy_decoder decoder_library decoder_label)
   if(NOT decoder_library)

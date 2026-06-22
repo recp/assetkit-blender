@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import os
 import platform as host_platform
 import re
@@ -9,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import zipfile
 from pathlib import Path
 
 
@@ -29,7 +32,22 @@ PLATFORMS = {
 EXCLUDE_DIRS = {"__pycache__"}
 EXCLUDE_FILES = {".DS_Store"}
 EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
-
+WHEEL_DISTRIBUTION = "assetkit_blender_native"
+NATIVE_ARTIFACT_PATTERNS = (
+    "wheels/*.whl",
+    "_assetkit_blender*.so",
+    "_assetkit_blender*.pyd",
+    "libassetkit*.dylib",
+    "libassetkit*.so",
+    "libassetkit*.so.*",
+    "assetkit*.dll",
+    "libassetkit*.dll",
+    "libds*.dylib",
+    "libds*.so",
+    "libds*.so.*",
+    "ds*.dll",
+    "libds*.dll",
+)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -72,6 +90,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip Blender extension validate",
     )
+    parser.add_argument(
+        "--native-wheels",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Package native bridge binaries as platform wheels instead of loose files",
+    )
     return parser.parse_args()
 
 
@@ -87,20 +111,26 @@ def detected_platform() -> str:
     raise SystemExit(f"Unsupported host platform: {system} {machine}")
 
 
-def should_copy(path: Path) -> bool:
+def path_matches_any(path: Path, patterns: tuple[str, ...]) -> bool:
+    return any(path.match(pattern) for pattern in patterns)
+
+
+def should_copy(path: Path, *, include_native: bool = True) -> bool:
     if path.name in EXCLUDE_FILES:
         return False
     if path.suffix in EXCLUDE_SUFFIXES:
         return False
     if any(part in EXCLUDE_DIRS for part in path.parts):
         return False
+    if not include_native and path_matches_any(path, NATIVE_ARTIFACT_PATTERNS):
+        return False
     return True
 
 
-def copy_tree_contents(src: Path, dst: Path) -> None:
+def copy_tree_contents(src: Path, dst: Path, *, include_native: bool = True) -> None:
     for item in src.rglob("*"):
         rel = item.relative_to(src)
-        if not should_copy(rel):
+        if not should_copy(rel, include_native=include_native):
             continue
         target = dst / rel
         if item.is_dir():
@@ -237,25 +267,168 @@ def ensure_core_runtime(stage_dir: Path, platform_tag: str) -> None:
         shutil.copy2(source, target)
 
 
-def patch_manifest(text: str, platform_tag: str | None) -> str:
+def wheel_platform_tag(platform_tag: str) -> str:
+    return {
+        "linux-x64": "manylinux_2_17_x86_64",
+        "macos-arm64": "macosx_11_0_arm64",
+        "macos-x64": "macosx_10_15_x86_64",
+        "windows-arm64": "win_arm64",
+        "windows-x64": "win_amd64",
+    }[platform_tag]
+
+
+def python_tag_for_native_module(path: Path) -> str:
+    match = re.search(r"(?:cpython-|cp)(\d)(\d+)", path.name)
+    if not match:
+        raise SystemExit(f"Could not determine Python ABI tag from {path.name}")
+    return f"cp{match.group(1)}{match.group(2)}"
+
+
+def wheel_hash(data: bytes) -> str:
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+    return f"sha256={digest.decode('ascii')}"
+
+
+def zip_writestr_recorded(
+    zf: zipfile.ZipFile,
+    records: list[tuple[str, str, int]],
+    name: str,
+    data: bytes,
+) -> None:
+    zf.writestr(name, data)
+    records.append((name, wheel_hash(data), len(data)))
+
+
+def zip_write_file_recorded(
+    zf: zipfile.ZipFile,
+    records: list[tuple[str, str, int]],
+    source: Path,
+    name: str | None = None,
+) -> None:
+    data = source.read_bytes()
+    arcname = name or source.name
+    zf.writestr(arcname, data)
+    records.append((arcname, wheel_hash(data), len(data)))
+
+
+def native_support_files() -> list[Path]:
+    files: list[Path] = []
+    for pattern in NATIVE_ARTIFACT_PATTERNS:
+        files.extend(
+            path
+            for path in PACKAGE_DIR.glob(pattern)
+            if path.is_file() and not path.name.startswith("_assetkit_blender")
+        )
+    return sorted(set(files))
+
+
+def build_native_wheel(
+    module_path: Path,
+    wheel_dir: Path,
+    *,
+    version: str,
+    platform_tag: str,
+) -> Path:
+    python_tag = python_tag_for_native_module(module_path)
+    abi_tag = python_tag
+    platform = wheel_platform_tag(platform_tag)
+    dist_info = f"{WHEEL_DISTRIBUTION}-{version}.dist-info"
+    wheel_name = f"{WHEEL_DISTRIBUTION}-{version}-{python_tag}-{abi_tag}-{platform}.whl"
+    wheel_path = wheel_dir / wheel_name
+    wheel_dir.mkdir(parents=True, exist_ok=True)
+
+    records: list[tuple[str, str, int]] = []
+    with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zip_write_file_recorded(zf, records, module_path)
+        for support_file in native_support_files():
+            zip_write_file_recorded(zf, records, support_file)
+
+        metadata = (
+            "Metadata-Version: 2.1\n"
+            f"Name: {WHEEL_DISTRIBUTION.replace('_', '-')}\n"
+            f"Version: {version}\n"
+            "Summary: Native AssetKit bridge for Blender\n"
+        ).encode("utf-8")
+        wheel = (
+            "Wheel-Version: 1.0\n"
+            "Generator: assetkit-blender package_extension.py\n"
+            "Root-Is-Purelib: false\n"
+            f"Tag: {python_tag}-{abi_tag}-{platform}\n"
+        ).encode("utf-8")
+        zip_writestr_recorded(zf, records, f"{dist_info}/METADATA", metadata)
+        zip_writestr_recorded(zf, records, f"{dist_info}/WHEEL", wheel)
+
+        record_name = f"{dist_info}/RECORD"
+        record_lines = [
+            f"{name},{digest},{size}" for name, digest, size in records
+        ]
+        record_lines.append(f"{record_name},,")
+        zf.writestr(record_name, "\n".join(record_lines).encode("utf-8"))
+
+    return wheel_path
+
+
+def build_native_wheels(stage_dir: Path, manifest: dict, platform_tag: str) -> list[Path]:
+    modules: list[Path] = []
+    for pattern in native_module_patterns(platform_tag):
+        modules.extend(path for path in PACKAGE_DIR.glob(pattern) if path.is_file())
+    if not modules:
+        patterns = ", ".join(native_module_patterns(platform_tag))
+        raise SystemExit(f"Missing native Python module for wheel build: {patterns}")
+
+    wheel_dir = stage_dir / "wheels"
+    version = str(manifest["version"])
+    return [
+        build_native_wheel(module, wheel_dir, version=version, platform_tag=platform_tag)
+        for module in sorted(set(modules))
+    ]
+
+
+def remove_manifest_array(text: str, key: str) -> str:
+    return re.sub(
+        rf"(?ms)^{key}\s*=\s*\[[^\]]*\]\n*",
+        "",
+        text,
+    )
+
+
+def patch_manifest(text: str, platform_tag: str | None, wheel_paths: list[Path] | None = None) -> str:
+    wheel_paths = wheel_paths or []
+    text = remove_manifest_array(text, "wheels")
     if platform_tag is None:
         text = re.sub(r"(?m)^platforms\s*=\s*\[[^\n]*\]\n?", "", text)
-        return text
+    else:
+        platforms_line = f'platforms = ["{platform_tag}"]'
+        if re.search(r"(?m)^platforms\s*=", text):
+            text = re.sub(r"(?m)^platforms\s*=\s*\[[^\n]*\]", platforms_line, text)
+        else:
+            permissions_match = re.search(r"(?m)^\[permissions\]\s*$", text)
+            insert_at = permissions_match.start() if permissions_match else len(text)
+            prefix = text[:insert_at].rstrip() + "\n"
+            suffix = text[insert_at:].lstrip("\n")
+            text = f"{prefix}{platforms_line}\n\n{suffix}"
 
-    platforms_line = f'platforms = ["{platform_tag}"]'
-    if re.search(r"(?m)^platforms\s*=", text):
-        return re.sub(r"(?m)^platforms\s*=\s*\[[^\n]*\]", platforms_line, text)
+    if not wheel_paths:
+        return text
 
     permissions_match = re.search(r"(?m)^\[permissions\]\s*$", text)
     insert_at = permissions_match.start() if permissions_match else len(text)
     prefix = text[:insert_at].rstrip() + "\n"
     suffix = text[insert_at:].lstrip("\n")
-    return f"{prefix}{platforms_line}\n\n{suffix}"
+    wheel_lines = ["wheels = ["]
+    for path in wheel_paths:
+        wheel_lines.append(f'  "./wheels/{path.name}",')
+    wheel_lines.append("]")
+    return f"{prefix}{chr(10).join(wheel_lines)}\n\n{suffix}"
 
 
-def write_staged_manifest(stage_dir: Path, platform_tag: str | None) -> dict:
+def write_staged_manifest(
+    stage_dir: Path,
+    platform_tag: str | None,
+    wheel_paths: list[Path] | None = None,
+) -> dict:
     text = MANIFEST.read_text(encoding="utf-8")
-    staged_text = patch_manifest(text, platform_tag)
+    staged_text = patch_manifest(text, platform_tag, wheel_paths)
     (stage_dir / "blender_manifest.toml").write_text(staged_text, encoding="utf-8")
     return tomllib.loads(staged_text)
 
@@ -270,13 +443,19 @@ def copy_metadata(stage_dir: Path) -> None:
         shutil.copytree(licenses, stage_dir / "LICENSES", dirs_exist_ok=True)
 
 
-def prepare_stage(stage_dir: Path, platform_tag: str | None) -> dict:
+def prepare_stage(stage_dir: Path, platform_tag: str | None, *, native_wheels: bool = False) -> dict:
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
     stage_dir.mkdir(parents=True)
-    copy_tree_contents(PACKAGE_DIR, stage_dir)
+    copy_tree_contents(PACKAGE_DIR, stage_dir, include_native=not native_wheels)
     copy_metadata(stage_dir)
-    return write_staged_manifest(stage_dir, platform_tag)
+    manifest = tomllib.loads(patch_manifest(MANIFEST.read_text(encoding="utf-8"), platform_tag))
+    wheel_paths: list[Path] = []
+    if native_wheels:
+        if platform_tag is None:
+            raise SystemExit("--native-wheels requires a concrete platform tag")
+        wheel_paths = build_native_wheels(stage_dir, manifest, platform_tag)
+    return write_staged_manifest(stage_dir, platform_tag, wheel_paths)
 
 
 def blender_command(args: argparse.Namespace) -> str:
@@ -325,11 +504,15 @@ def main() -> int:
         valid = ", ".join(sorted(PLATFORMS))
         raise SystemExit(f"Unknown platform '{platform_tag}'. Expected one of: {valid}")
 
-    manifest = prepare_stage(args.stage_dir, platform_tag)
-    if platform_tag is not None:
+    manifest = prepare_stage(args.stage_dir, platform_tag, native_wheels=args.native_wheels)
+    if platform_tag is not None and not args.native_wheels:
         ensure_core_runtime(args.stage_dir, platform_tag)
     if not args.allow_source_only:
-        require_native_artifacts(args.stage_dir, platform_tag)
+        if args.native_wheels:
+            if not any((args.stage_dir / "wheels").glob("*.whl")):
+                raise SystemExit("Missing native wheels")
+        else:
+            require_native_artifacts(args.stage_dir, platform_tag)
 
     output = build_zip(args, manifest, platform_tag)
     print(f"Staged extension source: {args.stage_dir}")
