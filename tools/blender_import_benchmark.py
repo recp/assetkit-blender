@@ -32,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from assetkit_blender.assetkit import native_load_meshes  # noqa: E402
 from assetkit_blender.importer import import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
@@ -270,18 +271,7 @@ def scene_stats() -> SceneStats:
 
 
 def import_assetkit(path: Path, texture_loading: str, triangulate: bool, shading_mode: str) -> None:
-    options = make_load_options(
-        coordinate_system="Z_UP",
-        coordinate_conversion="TRANSFORM",
-        convert_triangle_strip=True,
-        convert_triangle_fan=True,
-        import_lines=True,
-        convert_line_loop=True,
-        convert_line_strip=True,
-        triangulate=triangulate,
-        generate_normals=False,
-        texture_loading=texture_loading,
-    )
+    options = _assetkit_load_options(texture_loading, triangulate)
     import_assetkit_file(
         os.fspath(path),
         "",
@@ -296,6 +286,46 @@ def import_assetkit(path: Path, texture_loading: str, triangulate: bool, shading
         clean_viewport_overlays=False,
         fit_timeline=True,
     )
+
+
+def _assetkit_load_options(texture_loading: str, triangulate: bool) -> tuple[int, ...]:
+    return make_load_options(
+        coordinate_system="Z_UP",
+        coordinate_conversion="TRANSFORM",
+        convert_triangle_strip=True,
+        convert_triangle_fan=True,
+        import_lines=True,
+        convert_line_loop=True,
+        convert_line_strip=True,
+        triangulate=triangulate,
+        generate_normals=False,
+        texture_loading=texture_loading,
+    )
+
+
+def load_assetkit_native(path: Path, texture_loading: str, triangulate: bool) -> SceneStats:
+    loaded = native_load_meshes(os.fspath(path), _assetkit_load_options(texture_loading, triangulate))
+    if loaded is None:
+        raise RuntimeError("AssetKit native bridge is not available")
+
+    stats = SceneStats(
+        meshes=len(loaded.meshes),
+        curves=len(loaded.curves or ()),
+        images=len(loaded.images or ()),
+    )
+    material_keys = set()
+    for mesh in loaded.meshes:
+        stats.verts += int(mesh.vertex_count or 0)
+        stats.faces += int(mesh.face_count or 0)
+        stats.loops += int(mesh.loop_count or 0)
+        stats.edges += int(mesh.edge_count or 0)
+        stats.tris += int(mesh.face_count or 0)
+        material_key = int(getattr(mesh, "material_key", 0) or 0)
+        if material_key:
+            material_keys.add(material_key)
+    stats.materials = len(material_keys)
+    stats.objects = stats.meshes + stats.curves
+    return stats
 
 
 def import_builtin(path: Path) -> None:
@@ -353,28 +383,39 @@ def time_import(
     shading_mode: str = "AUTO",
 ) -> dict:
     purge_scene()
-    started_at = time.perf_counter()
     error = ""
+    elapsed_ms = 0.0
+    stats: SceneStats | None = None
+
+    def run_engine() -> SceneStats | None:
+        if engine == "native":
+            return load_assetkit_native(path, texture_loading, triangulate)
+        if engine == "assetkit":
+            import_assetkit(path, texture_loading, triangulate, shading_mode)
+            return None
+        if engine == "builtin":
+            import_builtin(path)
+            return None
+        raise ValueError(engine)
+
     try:
         if verbose_importers:
-            if engine == "assetkit":
-                import_assetkit(path, texture_loading, triangulate, shading_mode)
-            elif engine == "builtin":
-                import_builtin(path)
-            else:
-                raise ValueError(engine)
+            started_at = time.perf_counter()
+            try:
+                stats = run_engine()
+            finally:
+                elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         else:
             with suppress_importer_output():
-                if engine == "assetkit":
-                    import_assetkit(path, texture_loading, triangulate, shading_mode)
-                elif engine == "builtin":
-                    import_builtin(path)
-                else:
-                    raise ValueError(engine)
+                started_at = time.perf_counter()
+                try:
+                    stats = run_engine()
+                finally:
+                    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
     except Exception as exc:  # noqa: BLE001 - benchmark tool should report importer failures
         error = f"{type(exc).__name__}: {exc}"
-    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-    stats = scene_stats()
+    if stats is None:
+        stats = scene_stats()
     purge_scene()
     row = {
         "engine": engine,
@@ -437,11 +478,12 @@ def comparison_rows(summaries: list[dict]) -> list[dict]:
     for file_path, engines in sorted(by_file.items()):
         assetkit = engines.get("assetkit")
         builtin = engines.get("builtin")
+        native = engines.get("native")
         if not assetkit or not builtin or assetkit.get("error") or builtin.get("error"):
             continue
         assetkit_ms = float(assetkit["median_ms"])
         builtin_ms = float(builtin["median_ms"])
-        rows.append({
+        row = {
             "file": file_path,
             "assetkit_median_ms": assetkit_ms,
             "builtin_median_ms": builtin_ms,
@@ -450,7 +492,10 @@ def comparison_rows(summaries: list[dict]) -> list[dict]:
             "objects_builtin": builtin["objects"],
             "tris_assetkit": assetkit["tris"],
             "tris_builtin": builtin["tris"],
-        })
+        }
+        if native and not native.get("error"):
+            row["native_median_ms"] = float(native["median_ms"])
+        rows.append(row)
     return rows
 
 
@@ -458,18 +503,32 @@ def print_markdown(summaries: list[dict]) -> None:
     comparisons = comparison_rows(summaries)
     if not comparisons:
         return
-    print("\n| File | AssetKit median | Blender median | Blender / AssetKit | Tris AssetKit | Tris Blender |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: |")
+    has_native = any("native_median_ms" in row for row in comparisons)
+    if has_native:
+        print("\n| File | AssetKit native | AssetKit Blender | Blender | Blender / AssetKit Blender |")
+        print("| --- | ---: | ---: | ---: | ---: |")
+    else:
+        print("\n| File | AssetKit Blender | Blender | Blender / AssetKit Blender |")
+        print("| --- | ---: | ---: | ---: |")
     for row in comparisons:
         name = Path(row["file"]).name
-        print(
-            f"| {name} | "
-            f"{row['assetkit_median_ms']:.1f} ms | "
-            f"{row['builtin_median_ms']:.1f} ms | "
-            f"{row['builtin_over_assetkit']:.2f}x | "
-            f"{row['tris_assetkit']} | "
-            f"{row['tris_builtin']} |"
-        )
+        if has_native:
+            native = row.get("native_median_ms")
+            native_text = f"{native:.1f} ms" if native is not None else ""
+            print(
+                f"| {name} | "
+                f"{native_text} | "
+                f"{row['assetkit_median_ms']:.1f} ms | "
+                f"{row['builtin_median_ms']:.1f} ms | "
+                f"{row['builtin_over_assetkit']:.2f}x |"
+            )
+        else:
+            print(
+                f"| {name} | "
+                f"{row['assetkit_median_ms']:.1f} ms | "
+                f"{row['builtin_median_ms']:.1f} ms | "
+                f"{row['builtin_over_assetkit']:.2f}x |"
+            )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -477,7 +536,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("paths", nargs="*", help="Input .gltf, .glb, .dae, .obj, .ply, or .stl files")
     parser.add_argument("--runs", type=int, default=5, help="Samples per importer")
     parser.add_argument("--warmup", type=int, default=1, help="Successful samples to drop from summaries")
-    parser.add_argument("--engines", nargs="+", choices=("assetkit", "builtin"), default=("assetkit", "builtin"))
+    parser.add_argument("--engines", nargs="+", choices=("native", "assetkit", "builtin"), default=("assetkit", "builtin"))
     parser.add_argument(
         "--download-suite",
         action="store_true",
