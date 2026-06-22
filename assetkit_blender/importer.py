@@ -47,6 +47,7 @@ from .load_options import (
     AKB_LOAD_DEFER_NORMALS_YES,
     AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
     AKB_LOAD_OPT_TEXTURE_LOADING,
+    AKB_LOAD_OPT_PRESERVE_TANGENTS,
     AKB_LOAD_TEXTURE_AUTO,
     AKB_LOAD_TEXTURE_DEFERRED,
     AKB_LOAD_TEXTURE_IMMEDIATE,
@@ -230,7 +231,8 @@ _CH_KEYS = (
     _S_HAS_NODE_ANIMATION,
     _S_DYNAMIC_SKIN_ANIMATION_SKIP,
     _S_NODE_PARENT_CACHE,
-) = range(18)
+    _S_PRESERVE_TANGENTS,
+) = range(19)
 _SKIN_CACHE_DEFER_BIND_SKINS = object()
 
 
@@ -328,6 +330,7 @@ def import_assetkit_file(
     texture_load_mode = _texture_load_mode(load_options)
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
+    preserve_tangents = _preserve_tangents(load_options)
     total_started_at = time.perf_counter() if profile_detail else 0.0
     load_started_at = total_started_at
     primitives, curves, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = _load_assetkit_scene(
@@ -352,6 +355,7 @@ def import_assetkit_file(
         doc_images,
         curves=curves,
         defer_custom_normals=defer_custom_normals,
+        preserve_tangents=preserve_tangents,
     )
     if profile_detail:
         _profile_log(
@@ -660,6 +664,10 @@ def _defer_custom_normals(load_options: LoadOptions | None, shading_mode: str) -
     return True
 
 
+def _preserve_tangents(load_options: LoadOptions | None) -> bool:
+    return bool(_load_option_int(load_options, AKB_LOAD_OPT_PRESERVE_TANGENTS, 0))
+
+
 def _effective_shading_mode(data: MeshPrimitiveData, shading_mode: str) -> str:
     mode = str(shading_mode or "AUTO").upper()
     if (
@@ -729,6 +737,7 @@ def _begin_scene_build(
     create_all_nodes: bool = False,
     required_node_indices: object = _REQUIRED_NODE_INDICES_AUTO,
     curves: list[CurveData] | None = None,
+    preserve_tangents: bool = False,
 ) -> dict:
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     started_at = time.perf_counter() if profile_detail else 0.0
@@ -802,6 +811,7 @@ def _begin_scene_build(
         _S_HAS_NODE_ANIMATION: node_animation,
         _S_DYNAMIC_SKIN_ANIMATION_SKIP: dynamic_skin_animation_skip,
         _S_NODE_PARENT_CACHE: {},
+        _S_PRESERVE_TANGENTS: preserve_tangents,
     }
 
 
@@ -1074,7 +1084,8 @@ def _create_import_object(
     parent, use_node_parent = _mesh_node_parent(state, int(primitive.node_index))
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
     node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
-    mesh_cache_key = _mesh_data_reuse_key(primitive, shading_mode)
+    preserve_tangents = bool(state[_S_PRESERVE_TANGENTS])
+    mesh_cache_key = _mesh_data_reuse_key(primitive, shading_mode, preserve_tangents)
     mesh_cache = state[_S_MESH_CACHE] if mesh_cache_key is not None else None
     if mesh_cache is not None:
         cached_mesh = mesh_cache.get(mesh_cache_key)
@@ -1113,6 +1124,7 @@ def _create_import_object(
         deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
         shading_mode=shading_mode,
         defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
+        preserve_tangents=preserve_tangents,
         collection=collection,
         object_material_slot=False,
         node_visibility_animation=node_visibility_animation,
@@ -1148,6 +1160,7 @@ def _create_grouped_mesh_object(
     parent, use_node_parent = _mesh_node_parent(state, int(first.node_index))
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
     node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
+    preserve_tangents = bool(state[_S_PRESERVE_TANGENTS])
 
     count_started_at = time.perf_counter() if profile_detail else 0.0
     total_vertex_count = sum(int(primitive.vertex_count) for primitive in primitives)
@@ -1286,6 +1299,7 @@ def _create_grouped_mesh_object(
         has_materials=has_materials,
         shading_mode=shading_mode,
         defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
+        preserve_tangents=preserve_tangents,
         collection=collection,
         node_visibility_animation=node_visibility_animation,
     )
@@ -1360,6 +1374,7 @@ def _create_grouped_mesh_object_bulk(
     has_materials: bool = True,
     shading_mode: str = "AUTO",
     defer_custom_normals: bool = False,
+    preserve_tangents: bool = False,
     collection: bpy.types.Collection | None = None,
     node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
@@ -1425,7 +1440,7 @@ def _create_grouped_mesh_object_bulk(
         detail_parts.append(f"color={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
 
-    if data.tangents_f32:
+    if preserve_tangents and data.tangents_f32:
         tangents = _buffer_view(data.tangents_f32, "f")
         if tangents is not None:
             if not _apply_vector_attribute(mesh, "assetkit_tangent", tangents, "FLOAT4", "CORNER"):
@@ -1597,7 +1612,11 @@ def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
     )
 
 
-def _mesh_data_reuse_key(primitive: MeshPrimitiveData, shading_mode: str) -> tuple | None:
+def _mesh_data_reuse_key(
+    primitive: MeshPrimitiveData,
+    shading_mode: str,
+    preserve_tangents: bool = False,
+) -> tuple | None:
     if int(primitive.primitive_type) != AK_PRIMITIVE_TRIANGLES:
         return None
     if not primitive.vertices_f32 or not primitive.indices_u32:
@@ -1630,7 +1649,7 @@ def _mesh_data_reuse_key(primitive: MeshPrimitiveData, shading_mode: str) -> tup
         int(primitive.face_count),
         bool(primitive.normals_f32),
         bool(primitive.vertex_normals_f32),
-        bool(primitive.tangents_f32),
+        bool(preserve_tangents and primitive.tangents_f32),
         bool(primitive.smooth_shading) if _uses_wavefront_smoothing(primitive) else False,
         _loop_attr_signature(primitive.uv_sets),
         _loop_attr_signature(primitive.color_sets),
@@ -2256,6 +2275,7 @@ def _create_mesh_object(
     deferred_skin_animations: list | None = None,
     shading_mode: str = "AUTO",
     defer_custom_normals: bool = False,
+    preserve_tangents: bool = False,
     collection: bpy.types.Collection | None = None,
     object_material_slot: bool = False,
     node_visibility_animation: bool = True,
@@ -2277,6 +2297,7 @@ def _create_mesh_object(
             deferred_skin_animations=deferred_skin_animations,
             shading_mode=effective_shading,
             defer_custom_normals=defer_custom_normals,
+            preserve_tangents=preserve_tangents,
             collection=collection,
             object_material_slot=object_material_slot,
             node_visibility_animation=node_visibility_animation,
@@ -2330,6 +2351,7 @@ def _create_mesh_object_bulk(
     deferred_skin_animations: list | None = None,
     shading_mode: str = "AUTO",
     defer_custom_normals: bool = False,
+    preserve_tangents: bool = False,
     collection: bpy.types.Collection | None = None,
     object_material_slot: bool = False,
     node_visibility_animation: bool = True,
@@ -2448,7 +2470,7 @@ def _create_mesh_object_bulk(
             _set_render_color_index(mesh)
     lap_detail("color")
 
-    if data.tangents_f32:
+    if preserve_tangents and data.tangents_f32:
         tangents = _buffer_view(data.tangents_f32, "f")
         if tangents is not None:
             if not _apply_vector_attribute(mesh, "assetkit_tangent", tangents, "FLOAT4", "CORNER"):
