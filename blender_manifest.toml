@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "assetkit_blender"
-version = "0.1.2"
+version = "0.1.3"
 name = "AssetKit"
 tagline = "3D assets IO through AssetKit"
 maintainer = "Recep Aslantas"

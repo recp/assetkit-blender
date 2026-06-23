@@ -579,7 +579,7 @@ def _export_stl_batch_scene(
 
 
 def _assetkit_blender_authoring_tool() -> str:
-    root_name = __package__.split(".", 1)[0]
+    root_name = __package__[:-4] if __package__.endswith(".exp") else __package__
     root_mod = sys.modules.get(root_name)
     version_text = getattr(root_mod, "__version__", "") if root_mod is not None else ""
     if version_text:
