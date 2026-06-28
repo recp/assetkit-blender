@@ -142,6 +142,7 @@ def export_scene(
     coordinate_conversion: int | None = None,
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
+    lighting_bake_mode: str = "OFF",
     export_visible: bool = True,
     export_renderable: bool = True,
     export_cameras: bool = True,
@@ -192,10 +193,15 @@ def export_scene(
     if path.suffix.lower() != suffix:
         path = path.with_suffix(suffix)
     material_export_mode = _material_export_mode_id(material_export_mode)
+    lighting_bake_mode = _lighting_bake_mode_id(lighting_bake_mode)
     if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY} or not export_materials:
         material_export_mode = "NONE"
+        lighting_bake_mode = "OFF"
+    elif file_type == AK_FILE_TYPE_3MF:
+        lighting_bake_mode = "OFF"
     elif not export_images:
         material_export_mode = "DIRECT"
+        lighting_bake_mode = "OFF"
     material_bake_size = _material_bake_size(material_bake_size)
     stl_export_format = _stl_export_format_id(stl_format)
     mesh_apply_modifiers = _resolve_apply_modifiers(
@@ -240,6 +246,7 @@ def export_scene(
             coordinate_conversion=coordinate_conversion,
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
+            lighting_bake_mode=lighting_bake_mode,
             export_visible=bool(export_visible),
             export_renderable=bool(export_renderable),
             export_cameras=bool(export_cameras),
@@ -288,6 +295,7 @@ def export_scene(
         coordinate_conversion=coordinate_conversion,
         material_export_mode=material_export_mode,
         material_bake_size=material_bake_size,
+        lighting_bake_mode=lighting_bake_mode,
         export_visible=bool(export_visible),
         export_renderable=bool(export_renderable),
         export_cameras=bool(export_cameras),
@@ -334,6 +342,7 @@ def _export_scene_once(
     coordinate_conversion: int | None,
     material_export_mode: str,
     material_bake_size: int,
+    lighting_bake_mode: str,
     export_visible: bool,
     export_renderable: bool,
     export_cameras: bool,
@@ -383,6 +392,7 @@ def _export_scene_once(
             mesh_cleanup=mesh_cleanup,
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
+            lighting_bake_mode=lighting_bake_mode,
             export_visible=export_visible,
             export_renderable=export_renderable,
             export_cameras=export_cameras,
@@ -496,6 +506,7 @@ def _export_stl_batch_scene(
     coordinate_conversion: int | None,
     material_export_mode: str,
     material_bake_size: int,
+    lighting_bake_mode: str,
     export_visible: bool,
     export_renderable: bool,
     export_cameras: bool,
@@ -546,6 +557,7 @@ def _export_stl_batch_scene(
             coordinate_conversion=coordinate_conversion,
             material_export_mode=material_export_mode,
             material_bake_size=material_bake_size,
+            lighting_bake_mode=lighting_bake_mode,
             export_visible=export_visible,
             export_renderable=export_renderable,
             export_cameras=export_cameras,
@@ -596,6 +608,13 @@ def _material_export_mode_id(value: str | None) -> str:
     if mode not in {"DIRECT", "AUTO", "BAKE", "NONE"}:
         return "AUTO"
     return mode
+
+
+def _lighting_bake_mode_id(value: str | None) -> str:
+    mode = (value or "OFF").upper()
+    if mode in {"FINAL", "FINAL_COLOR", "ON", "TRUE"}:
+        return "FINAL"
+    return "OFF"
 
 
 def _stl_export_format_id(value: str | None) -> int:
@@ -755,6 +774,7 @@ def _collect_scene_items(
     mesh_cleanup: list,
     material_export_mode: str,
     material_bake_size: int,
+    lighting_bake_mode: str,
     export_visible: bool,
     export_renderable: bool,
     export_cameras: bool,
@@ -807,6 +827,7 @@ def _collect_scene_items(
             mesh_cleanup,
             material_export_mode,
             material_bake_size,
+            lighting_bake_mode,
             export_uv,
             export_normals,
             export_tangents,
@@ -1059,6 +1080,7 @@ def _collect_scene_items(
                     material_cache,
                     material_export_mode,
                     material_bake_size,
+                    lighting_bake_mode,
                     skin_setup=skin_setup,
                     export_uv=export_uv,
                     export_normals=export_normals,
@@ -1084,6 +1106,7 @@ def _collect_scene_items(
                     None
                     if (
                         _mesh_material_bake_required(obj, material_export_mode)
+                        or lighting_bake_mode == "FINAL"
                         or (static_mesh_export and _static_mesh_requires_evaluated_mesh(obj, apply_modifiers))
                     )
                     else _shared_mesh_payload_key(
@@ -1105,6 +1128,7 @@ def _collect_scene_items(
                         material_cache,
                         material_export_mode,
                         material_bake_size,
+                        lighting_bake_mode,
                         skin_setup=None,
                         export_uv=export_uv,
                         export_normals=export_normals,
@@ -1145,6 +1169,7 @@ def _collect_scene_items(
                             material_cache,
                             material_export_mode,
                             material_bake_size,
+                            lighting_bake_mode,
                             skin_setup=None,
                             export_uv=export_uv,
                             export_normals=export_normals,
@@ -1201,6 +1226,7 @@ def _collect_static_mesh_scene_items(
     mesh_cleanup: list,
     material_export_mode: str,
     material_bake_size: int,
+    lighting_bake_mode: str,
     export_uv: bool,
     export_normals: bool,
     export_tangents: bool,
@@ -1243,6 +1269,7 @@ def _collect_static_mesh_scene_items(
             None
             if (
                 _mesh_material_bake_required(obj, material_export_mode)
+                or lighting_bake_mode == "FINAL"
                 or _static_mesh_requires_evaluated_mesh(obj, apply_modifiers)
             )
             else _shared_mesh_payload_key(
@@ -1277,6 +1304,7 @@ def _collect_static_mesh_scene_items(
                     material_cache,
                     material_export_mode,
                     material_bake_size,
+                    lighting_bake_mode,
                     skin_setup=None,
                     export_uv=export_uv,
                     export_normals=export_normals,
@@ -2589,6 +2617,7 @@ def _mesh_payload(
     material_cache: dict[tuple, tuple | None],
     material_export_mode: str,
     material_bake_size: int,
+    lighting_bake_mode: str,
     *,
     skin_setup: tuple | None = None,
     export_uv: bool = True,
@@ -2679,6 +2708,7 @@ def _mesh_payload(
         file_type,
         material_export_mode,
         material_bake_size,
+        lighting_bake_mode,
         variant_payload=None if is_static_mesh else _material_variant_payload(obj),
         skin_setup=None if is_static_mesh else skin_setup,
         morph_targets=morph_targets,
@@ -2715,6 +2745,7 @@ def _native_mesh_payload(
     file_type: int,
     material_export_mode: str,
     material_bake_size: int,
+    lighting_bake_mode: str,
     *,
     variant_payload: tuple | None = None,
     skin_setup: tuple | None = None,
@@ -2747,6 +2778,7 @@ def _native_mesh_payload(
                 file_type,
                 material_export_mode,
                 material_bake_size,
+                lighting_bake_mode,
                 export_images,
             )
             for index in range(len(mesh.materials))
@@ -2856,11 +2888,12 @@ def _cached_material_tuple(
     file_type: int,
     material_export_mode: str,
     material_bake_size: int,
+    lighting_bake_mode: str,
     export_images: bool = True,
 ) -> tuple | None:
     if material is None:
         return None
-    if _material_bake_required(material, material_export_mode):
+    if lighting_bake_mode == "FINAL" or _material_bake_required(material, material_export_mode):
         key = (
             int(material.as_pointer()),
             int(obj.as_pointer()),
@@ -2869,6 +2902,7 @@ def _cached_material_tuple(
             uv_names,
             material_export_mode,
             int(material_bake_size),
+            lighting_bake_mode,
             int(file_type or 0),
             bool(export_images),
         )
@@ -2889,6 +2923,7 @@ def _cached_material_tuple(
         file_type=file_type,
         material_export_mode=material_export_mode,
         material_bake_size=material_bake_size,
+        lighting_bake_mode=lighting_bake_mode,
         export_images=export_images,
     )
     material_cache[key] = cached

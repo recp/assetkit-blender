@@ -345,6 +345,15 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="1024",
     )
+    lighting_bake_mode: bpy.props.EnumProperty(
+        name="Lighting Bake",
+        description="Bake scene lighting into the exported material texture",
+        items=(
+            ("OFF", "Off", "Export lights and materials without baking scene lighting"),
+            ("FINAL", "Final Color", "Bake the final lit material result into the diffuse/base color texture"),
+        ),
+        default="OFF",
+    )
     stl_format: bpy.props.EnumProperty(
         name="Format",
         description="STL file encoding",
@@ -558,7 +567,8 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             if materials:
                 materials.prop(self, "export_images")
                 materials.prop(self, "material_export_mode")
-                if self.material_export_mode != "DIRECT":
+                materials.prop(self, "lighting_bake_mode")
+                if self.material_export_mode != "DIRECT" or self.lighting_bake_mode != "OFF":
                     materials.prop(self, "material_bake_size")
 
         if has_shape_key_settings:
@@ -657,6 +667,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 coordinate_conversion=_coord_conversion_id(coord_conversion),
                 material_export_mode=self.material_export_mode,
                 material_bake_size=int(self.material_bake_size),
+                lighting_bake_mode=self.lighting_bake_mode,
                 export_visible=self.export_visible,
                 export_renderable=self.export_renderable,
                 export_cameras=self.export_cameras if self.export_format in _SCENE_DATA_FORMATS else False,

@@ -85,6 +85,7 @@ def _material_tuple(
     file_type: int = 0,
     material_export_mode: str = "AUTO",
     material_bake_size: int = 1024,
+    lighting_bake_mode: str = "OFF",
     export_images: bool = True,
 ) -> tuple | None:
     if material is None:
@@ -149,6 +150,7 @@ def _material_tuple(
     unlit_emission = None
     baked_base_color_texture = None
     baked_visual_only = False
+    lighting_baked = False
 
     if (
         context is not None
@@ -156,19 +158,33 @@ def _material_tuple(
         and mesh is not None
         and material_index >= 0
         and export_images
-        and _material_bake_required(material, material_export_mode)
     ):
-        baked_visual_only = not _material_surface_extractable(material)
-        baked_base_color_texture = image_store.shader_bake_path(
-            context,
-            obj,
-            mesh,
-            material,
-            int(material_index),
-            int(material_bake_size),
-            f"{obj.name}_{material.name}",
-            _bake_uv_key(uv_slot_by_name),
-        )
+        bake_name = f"{obj.name}_{material.name}"
+        bake_uv = _bake_uv_key(uv_slot_by_name)
+        if (lighting_bake_mode or "OFF").upper() == "FINAL":
+            baked_base_color_texture = image_store.lighting_bake_path(
+                context,
+                obj,
+                mesh,
+                material,
+                int(material_index),
+                int(material_bake_size),
+                bake_name,
+                bake_uv,
+            )
+            lighting_baked = baked_base_color_texture is not None
+        if baked_base_color_texture is None and _material_bake_required(material, material_export_mode):
+            baked_visual_only = not _material_surface_extractable(material)
+            baked_base_color_texture = image_store.shader_bake_path(
+                context,
+                obj,
+                mesh,
+                material,
+                int(material_index),
+                int(material_bake_size),
+                bake_name,
+                bake_uv,
+            )
 
     if material.use_nodes and material.node_tree and not baked_visual_only:
         bsdf = _principled_bsdf(material)
@@ -328,6 +344,30 @@ def _material_tuple(
             opacity_texture = None
             opacity_info = None
             opacity_slot = 0
+        if lighting_baked:
+            metallic = 0.0
+            roughness = 1.0
+            metallic_image = None
+            roughness_image = None
+            metallic_texture = None
+            roughness_texture = None
+            metallic_info = None
+            roughness_info = None
+            obj_metallic_texture = None
+            obj_roughness_texture = None
+            normal_texture = None
+            normal_info = None
+            normal_slot = 0
+            normal_scale = 1.0
+            occlusion_texture = None
+            occlusion_info = None
+            occlusion_slot = 0
+            occlusion_strength = 1.0
+            emissive_texture = None
+            emissive_info = None
+            emissive_slot = 0
+            emissive_color = [0.0, 0.0, 0.0, 1.0]
+            emissive_strength = 1.0
 
     if len(base_color) < 4:
         base_color = [*base_color[:3], alpha]
@@ -407,9 +447,11 @@ def _material_tuple(
         metallic_roughness_slot = roughness_slot if roughness_image is not None else metallic_slot
 
     material_type = _material_type(material, bsdf, unlit_emission)
-    if baked_base_color_texture is not None and bsdf is None:
+    if lighting_baked:
         material_type = _MATERIAL_TYPE_UNLIT
-    animations = _material_animation_payload(material, bsdf, base_color, fps)
+    elif baked_base_color_texture is not None and bsdf is None:
+        material_type = _MATERIAL_TYPE_UNLIT
+    animations = None if lighting_baked else _material_animation_payload(material, bsdf, base_color, fps)
 
     return (
         material.name,

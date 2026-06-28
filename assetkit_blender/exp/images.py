@@ -20,6 +20,7 @@ class _ExportImageStore:
         self._rgb_channel_cache: dict[tuple[int, int, float], str | None] = {}
         self._spec_gloss_cache: dict[tuple[int, int, int, int, bytes, float], str | None] = {}
         self._shader_bake_cache: dict[tuple[int, int, int, int, str], str | None] = {}
+        self._lighting_bake_cache: dict[tuple[int, int, int, int, str], str | None] = {}
         self._counter = 0
 
     def path_for(self, image: bpy.types.Image) -> str | None:
@@ -225,6 +226,49 @@ class _ExportImageStore:
             str(uv_name or ""),
         )
         self._shader_bake_cache[key] = path
+        return path
+
+    def lighting_bake_path(
+        self,
+        context: bpy.types.Context,
+        obj: bpy.types.Object,
+        mesh: bpy.types.Mesh,
+        material: bpy.types.Material,
+        material_index: int,
+        size: int,
+        name: str,
+        uv_name: str = "",
+    ) -> str | None:
+        if obj.type != "MESH":
+            return None
+        uv_layers = getattr(mesh, "uv_layers", None) if mesh is not None else None
+        if uv_layers is None or len(uv_layers) == 0:
+            return None
+
+        size = max(64, min(8192, int(size)))
+        key = (
+            int(obj.as_pointer()),
+            int(mesh.as_pointer()),
+            int(material_index),
+            int(size),
+            str(uv_name or ""),
+        )
+        if key in self._lighting_bake_cache:
+            return self._lighting_bake_cache[key]
+
+        path = self._write_shader_bake(
+            context,
+            obj,
+            mesh,
+            material,
+            int(material_index),
+            size,
+            name,
+            str(uv_name or ""),
+            "COMBINED",
+            "lightingBake",
+        )
+        self._lighting_bake_cache[key] = path
         return path
 
     def _source_path(self, image: bpy.types.Image) -> str | None:
@@ -589,6 +633,8 @@ class _ExportImageStore:
         size: int,
         name: str,
         uv_name: str,
+        bake_type: str = "DIFFUSE",
+        output_suffix: str = "shaderBake",
     ) -> str | None:
         scene = context.scene
         view_layer = context.view_layer
@@ -653,24 +699,27 @@ class _ExportImageStore:
                 scene.render.engine = "CYCLES"
             except Exception:
                 pass
-            if cycles is not None and old_cycles_samples is not None:
+            if bake_type != "COMBINED" and cycles is not None and old_cycles_samples is not None:
                 cycles.samples = min(max(int(old_cycles_samples), 1), 32)
 
-            try:
-                bpy.ops.object.bake(
-                    type="DIFFUSE",
-                    pass_filter={"COLOR"},
-                    margin=4,
-                    use_clear=True,
-                )
-            except TypeError:
-                bpy.ops.object.bake(type="DIFFUSE", margin=4, use_clear=True)
+            if bake_type == "COMBINED":
+                bpy.ops.object.bake(type="COMBINED", margin=4, use_clear=True)
+            else:
+                try:
+                    bpy.ops.object.bake(
+                        type="DIFFUSE",
+                        pass_filter={"COLOR"},
+                        margin=4,
+                        use_clear=True,
+                    )
+                except TypeError:
+                    bpy.ops.object.bake(type="DIFFUSE", margin=4, use_clear=True)
 
             pixels = self._image_pixels(image)
             if pixels is None:
                 return None
             width, height, rgba = pixels
-            return self._write_rgba_pixels(f"{name}_shaderBake", width, height, rgba)
+            return self._write_rgba_pixels(f"{name}_{output_suffix}", width, height, rgba)
         except Exception:
             return None
         finally:
