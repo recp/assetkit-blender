@@ -77,6 +77,17 @@ EXPORT_FORMATS = (
 _AKB_NATIVE_MESH_PAYLOAD = 0x414B4D46
 _AKB_NATIVE_CURVE_PAYLOAD = 0x414B4356
 _MESH_EXPORT_OBJECT_TYPES = {"MESH", "CURVE", "SURFACE", "FONT", "META"}
+_ANIMATED_SCENE_FORMATS = frozenset((AK_FILE_TYPE_GLTF, AK_FILE_TYPE_GLB, AK_FILE_TYPE_DAE))
+_STATIC_SCENE_MESH_FORMATS = frozenset(
+    (AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT)
+)
+_NATIVE_STATIC_MESH_PAYLOAD_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
+_NO_MATERIAL_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
+_NO_UV_COLOR_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL))
+_STATIC_SCALE_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT))
+_RAW_Z_UP_FORMATS = frozenset(
+    (AK_FILE_TYPE_3MF, AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT)
+)
 
 _TRANSFORM_ANIMATION_PATHS = {
     "location",
@@ -196,7 +207,7 @@ def export_scene(
     material_export_mode = _material_export_mode_id(material_export_mode)
     lighting_bake_mode = _lighting_bake_mode_id(lighting_bake_mode)
     animation_bake_mode = _animation_bake_mode_id(animation_bake_mode)
-    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY} or not export_materials:
+    if file_type in _NO_MATERIAL_FORMATS or not export_materials:
         material_export_mode = "NONE"
         lighting_bake_mode = "OFF"
     elif file_type == AK_FILE_TYPE_3MF:
@@ -205,7 +216,7 @@ def export_scene(
         material_export_mode = "DIRECT"
         lighting_bake_mode = "OFF"
     if (
-        file_type not in {AK_FILE_TYPE_GLTF, AK_FILE_TYPE_GLB, AK_FILE_TYPE_DAE}
+        file_type not in _ANIMATED_SCENE_FORMATS
         or not export_animations
         or not export_shape_keys
         or not export_shape_key_animations
@@ -440,23 +451,16 @@ def _export_scene_once(
         try:
             native_started_at = time.perf_counter() if profile else 0.0
             doc_extra = _export_document_extra(context) if export_custom_properties else None
-            raw_z_up_formats = {
-                AK_FILE_TYPE_3MF,
-                AK_FILE_TYPE_DAE,
-                AK_FILE_TYPE_PLY,
-                AK_FILE_TYPE_STL,
-                AK_FILE_TYPE_WAVEFRONT,
-            }
             export_coord_system = (
                 AKB_LOAD_COORD_Z_UP
-                if coordinate_system is None and file_type in raw_z_up_formats
+                if coordinate_system is None and file_type in _RAW_Z_UP_FORMATS
                 else AKB_LOAD_COORD_Y_UP
                 if coordinate_system is None
                 else int(coordinate_system)
             )
             export_coord_conversion = (
                 AKB_LOAD_COORD_RAW
-                if coordinate_conversion is None and file_type in raw_z_up_formats
+                if coordinate_conversion is None and file_type in _RAW_Z_UP_FORMATS
                 else AKB_LOAD_COORD_TRANSFORM
                 if coordinate_conversion is None
                 else int(coordinate_conversion)
@@ -673,7 +677,7 @@ def _resolve_apply_modifiers(
         return bool(stl_value)
     if file_type == AK_FILE_TYPE_PLY and ply_value is not None:
         return bool(ply_value)
-    return file_type in {AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT}
+    return file_type in _STATIC_SCENE_MESH_FORMATS
 
 
 def _resolve_format_bool(value: bool | None, legacy_value: bool | None, default: bool) -> bool:
@@ -706,7 +710,7 @@ def _static_mesh_effective_scale(
     global_scale: float,
     use_scene_unit: bool,
 ) -> float:
-    if file_type not in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT}:
+    if file_type not in _STATIC_SCALE_FORMATS:
         return 1.0
 
     try:
@@ -824,7 +828,7 @@ def _collect_scene_items(
     ply_export_triangulated: bool,
 ) -> list[tuple]:
     profile = _profile_enabled()
-    static_mesh_export = file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
+    static_mesh_export = file_type in _STATIC_SCENE_MESH_FORMATS
     phase_started_at = time.perf_counter() if profile else 0.0
     depsgraph = context.evaluated_depsgraph_get()
     selected = set(context.selected_objects) if selected_only else None
@@ -859,10 +863,10 @@ def _collect_scene_items(
             export_attributes,
             export_materials,
             export_images,
-            export_shape_keys,
-            export_shape_key_normals,
-            export_shape_key_tangents,
-            export_shape_key_animations and export_animations,
+            False,
+            False,
+            False,
+            False,
             export_custom_properties,
             apply_modifiers,
             ply_export_normals,
@@ -893,7 +897,7 @@ def _collect_scene_items(
 
     def include_skeleton_chain(obj: bpy.types.Object) -> None:
         node = obj
-        while node is not None:
+        while node is not None and not _is_assetkit_synthetic_helper_object(node):
             included.add(node)
             node = node.parent
 
@@ -1778,8 +1782,20 @@ def _object_transform_animation(
     if not fcurves:
         return None, False
 
+    parent = obj.parent if obj.parent in included else None
+    sample_transform = _transform_fcurves_need_sampling(fcurves, {
+        "location": "location",
+        "rotation_axis_angle": "rotation_axis_angle",
+        "rotation_euler": "rotation_euler",
+        "rotation_quaternion": "rotation_quaternion",
+        "scale": "scale",
+    })
     visibility_channel = _object_visibility_animation_channel(context.scene, obj, fcurves)
-    direct = _object_transform_animation_direct(context, obj, action, fcurves)
+    direct = (
+        _object_transform_animation_direct(context, obj, action, fcurves)
+        if parent is obj.parent and not sample_transform
+        else None
+    )
     if direct is not None:
         channels = list(direct)
         if visibility_channel:
@@ -1787,6 +1803,8 @@ def _object_transform_animation(
         return (tuple(channels) if channels else None), False
 
     frames = _action_transform_keyframes(action, fcurves)
+    if sample_transform:
+        frames = _expanded_integer_sample_frames(frames)
     if len(frames) < 2:
         return ((visibility_channel,) if visibility_channel else None), False
 
@@ -1795,7 +1813,6 @@ def _object_transform_animation(
     if fps <= 0.0:
         fps = 24.0
 
-    parent = obj.parent if obj.parent in included else None
     times = array("f")
     translations = array("f")
     rotations = array("f")
@@ -1871,7 +1888,10 @@ def _pose_bone_transform_animation(
             tuple(_iter_action_fcurves(action, _animation_action_slot(getattr(armature, "animation_data", None))))
             if action is not None else ()
         )
-    direct = _pose_bone_transform_animation_direct(context, pose_bone, action, paths, fcurves) if action else None
+    # Pose-bone fcurves store deltas over the rest pose, while exported node
+    # channels need absolute local transforms. Sample the evaluated matrix so
+    # rest rotations and imported axis wrappers are preserved.
+    direct = None
     if direct is not None:
         return (direct if direct else None), False
 
@@ -1880,6 +1900,8 @@ def _pose_bone_transform_animation(
         if action is not None and fcurves
         else ()
     )
+    if action is not None and fcurves and _transform_fcurves_need_sampling(fcurves, paths):
+        frames = _expanded_integer_sample_frames(frames)
     if len(frames) < 2 and pose_bone is not None:
         frames = _pose_bone_constraint_keyframes(pose_bone)
     if len(frames) < 2:
@@ -2535,6 +2557,49 @@ def _action_transform_keyframes(action: bpy.types.Action, fcurves: tuple | None 
     return tuple(sorted(frames))
 
 
+def _expanded_integer_sample_frames(frames: tuple[float, ...]) -> tuple[float, ...]:
+    if len(frames) < 2:
+        return frames
+
+    start = math.floor(frames[0])
+    end = math.ceil(frames[-1])
+    if end <= start:
+        return frames
+
+    sampled = set(frames)
+    for frame in range(start, end + 1):
+        sampled.add(float(frame))
+    return tuple(sorted(sampled))
+
+
+def _transform_fcurves_need_sampling(fcurves: tuple, paths: dict[str, str]) -> bool:
+    if not fcurves:
+        return False
+
+    transform_paths = {path for path in paths.values() if path}
+    rotation_paths = {
+        paths[prop]
+        for prop in ("rotation_axis_angle", "rotation_euler", "rotation_quaternion")
+        if prop in paths and paths[prop]
+    }
+    if not transform_paths:
+        return False
+
+    for fcurve in fcurves:
+        path = fcurve.data_path
+        if path not in transform_paths:
+            continue
+
+        is_rotation = path in rotation_paths
+        for key in fcurve.keyframe_points:
+            interpolation = key.interpolation
+            if interpolation not in {"CONSTANT", "LINEAR"}:
+                return True
+            if is_rotation and interpolation != "CONSTANT":
+                return True
+    return False
+
+
 def _action_keyframes_for_paths(
     action: bpy.types.Action,
     paths: set[str],
@@ -2732,11 +2797,12 @@ def _mesh_skin_setup(
 
     joint_node_indices = tuple(bone_indices[(armature, bone.name)] for bone in joint_bones)
     inverse_bind_matrices = array("f")
+    mesh_world_inv = obj.matrix_world.inverted_safe()
     armature_world = armature.matrix_world
     for bone in joint_bones:
         _append_matrix_values(
             inverse_bind_matrices,
-            (armature_world @ bone.matrix_local).inverted_safe(),
+            (mesh_world_inv @ (armature_world @ bone.matrix_local)).inverted_safe(),
         )
 
     return (
@@ -2780,9 +2846,9 @@ def _mesh_payload(
 ) -> tuple | None:
     profile = _profile_enabled()
     phase_started_at = time.perf_counter() if profile else 0.0
-    is_stl = file_type in {AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL}
+    is_stl = file_type in _NO_UV_COLOR_FORMATS
     is_ply = file_type == AK_FILE_TYPE_PLY
-    is_static_mesh = file_type in {AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY}
+    is_static_mesh = file_type in _NATIVE_STATIC_MESH_PAYLOAD_FORMATS
     uv_layers = [] if is_stl or not export_uv or (is_ply and not ply_export_uv) else _uv_layers(mesh)
     color_layers = [] if is_stl or not export_vertex_colors or (is_ply and not ply_export_colors) else _color_attributes(mesh)
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
@@ -2912,7 +2978,7 @@ def _native_mesh_payload(
     export_images: bool = True,
     export_custom_properties: bool = True,
 ):
-    if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY} or not export_materials or material_export_mode == "NONE":
+    if file_type in _NO_MATERIAL_FORMATS or not export_materials or material_export_mode == "NONE":
         material_payloads = ()
         variant_payload = None
     else:
