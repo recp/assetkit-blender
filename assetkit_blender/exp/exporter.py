@@ -161,6 +161,7 @@ def export_scene(
     export_shape_key_normals: bool = True,
     export_shape_key_tangents: bool = True,
     export_shape_key_animations: bool = True,
+    animation_bake_mode: str = "OFF",
     apply_modifiers: bool | None = None,
     global_scale: float | None = None,
     use_scene_unit: bool | None = None,
@@ -194,6 +195,7 @@ def export_scene(
         path = path.with_suffix(suffix)
     material_export_mode = _material_export_mode_id(material_export_mode)
     lighting_bake_mode = _lighting_bake_mode_id(lighting_bake_mode)
+    animation_bake_mode = _animation_bake_mode_id(animation_bake_mode)
     if file_type in {AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY} or not export_materials:
         material_export_mode = "NONE"
         lighting_bake_mode = "OFF"
@@ -202,6 +204,13 @@ def export_scene(
     elif not export_images:
         material_export_mode = "DIRECT"
         lighting_bake_mode = "OFF"
+    if (
+        file_type not in {AK_FILE_TYPE_GLTF, AK_FILE_TYPE_GLB, AK_FILE_TYPE_DAE}
+        or not export_animations
+        or not export_shape_keys
+        or not export_shape_key_animations
+    ):
+        animation_bake_mode = "OFF"
     material_bake_size = _material_bake_size(material_bake_size)
     stl_export_format = _stl_export_format_id(stl_format)
     mesh_apply_modifiers = _resolve_apply_modifiers(
@@ -314,6 +323,7 @@ def export_scene(
         export_shape_key_normals=bool(export_shape_key_normals),
         export_shape_key_tangents=bool(export_shape_key_tangents),
         export_shape_key_animations=bool(export_shape_key_animations),
+        animation_bake_mode=animation_bake_mode,
         stl_export_format=stl_export_format,
         stl_scale=static_scale,
         stl_forward_axis=static_forward_axis,
@@ -361,6 +371,7 @@ def _export_scene_once(
     export_shape_key_normals: bool,
     export_shape_key_tangents: bool,
     export_shape_key_animations: bool,
+    animation_bake_mode: str,
     stl_export_format: int,
     stl_scale: float,
     stl_forward_axis: str,
@@ -411,6 +422,7 @@ def _export_scene_once(
             export_shape_key_normals=export_shape_key_normals,
             export_shape_key_tangents=export_shape_key_tangents,
             export_shape_key_animations=export_shape_key_animations,
+            animation_bake_mode=animation_bake_mode,
             apply_modifiers=apply_modifiers,
             ply_export_normals=bool(ply_export_normals),
             ply_export_uv=bool(ply_export_uv),
@@ -477,8 +489,11 @@ def _export_scene_once(
                 )
         finally:
             cleanup_started_at = time.perf_counter() if profile else 0.0
-            for obj_eval in mesh_cleanup:
-                obj_eval.to_mesh_clear()
+            for cleanup_item in mesh_cleanup:
+                if isinstance(cleanup_item, tuple) and cleanup_item and cleanup_item[0] == "mesh":
+                    bpy.data.meshes.remove(cleanup_item[1])
+                else:
+                    cleanup_item.to_mesh_clear()
             if profile:
                 _profile_log(
                     f"mesh_cleanup count={len(mesh_cleanup)} "
@@ -576,6 +591,7 @@ def _export_stl_batch_scene(
             export_shape_key_normals=export_shape_key_normals,
             export_shape_key_tangents=export_shape_key_tangents,
             export_shape_key_animations=export_shape_key_animations,
+            animation_bake_mode="OFF",
             stl_export_format=stl_export_format,
             stl_scale=stl_scale,
             stl_forward_axis=stl_forward_axis,
@@ -614,6 +630,13 @@ def _lighting_bake_mode_id(value: str | None) -> str:
     mode = (value or "OFF").upper()
     if mode in {"FINAL", "FINAL_COLOR", "ON", "TRUE"}:
         return "FINAL"
+    return "OFF"
+
+
+def _animation_bake_mode_id(value: str | None) -> str:
+    mode = (value or "OFF").upper()
+    if mode in {"EVALUATED_MESH", "MESH", "GEOMETRY_NODES", "GN"}:
+        return "EVALUATED_MESH"
     return "OFF"
 
 
@@ -793,6 +816,7 @@ def _collect_scene_items(
     export_shape_key_normals: bool,
     export_shape_key_tangents: bool,
     export_shape_key_animations: bool,
+    animation_bake_mode: str,
     apply_modifiers: bool,
     ply_export_normals: bool,
     ply_export_uv: bool,
@@ -1068,6 +1092,11 @@ def _collect_scene_items(
             if profile and armature is not None:
                 skin_setup_ms += (time.perf_counter() - skin_setup_started_at) * 1000.0
 
+            obj_animation_bake_mode = _object_animation_bake_mode(
+                obj,
+                animation_bake_mode,
+                skin_setup,
+            )
             if skin_setup is not None:
                 mesh_payload_started_at = time.perf_counter() if profile else 0.0
                 payload = _mesh_payload(
@@ -1093,6 +1122,7 @@ def _collect_scene_items(
                     export_shape_key_normals=export_shape_key_normals,
                     export_shape_key_tangents=export_shape_key_tangents,
                     export_shape_key_animations=export_shape_key_animations and export_animations,
+                    animation_bake_mode=obj_animation_bake_mode,
                     export_custom_properties=export_custom_properties,
                     ply_export_normals=ply_export_normals,
                     ply_export_uv=ply_export_uv,
@@ -1107,6 +1137,7 @@ def _collect_scene_items(
                     if (
                         _mesh_material_bake_required(obj, material_export_mode)
                         or lighting_bake_mode == "FINAL"
+                        or obj_animation_bake_mode == "EVALUATED_MESH"
                         or (static_mesh_export and _static_mesh_requires_evaluated_mesh(obj, apply_modifiers))
                     )
                     else _shared_mesh_payload_key(
@@ -1141,6 +1172,7 @@ def _collect_scene_items(
                         export_shape_key_normals=export_shape_key_normals,
                         export_shape_key_tangents=export_shape_key_tangents,
                         export_shape_key_animations=export_shape_key_animations and export_animations,
+                        animation_bake_mode=obj_animation_bake_mode,
                         export_custom_properties=export_custom_properties,
                         ply_export_normals=ply_export_normals,
                         ply_export_uv=ply_export_uv,
@@ -1151,45 +1183,63 @@ def _collect_scene_items(
                         mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
                     mesh_payload_cache[shared_key] = payload
                 else:
-                    obj_eval = obj.evaluated_get(depsgraph)
-                    to_mesh_started_at = time.perf_counter() if profile else 0.0
-                    mesh = obj_eval.to_mesh()
-                    if profile:
-                        to_mesh_ms += (time.perf_counter() - to_mesh_started_at) * 1000.0
-                    if mesh is not None:
-                        mesh_cleanup.append(obj_eval)
-                        mesh_payload_started_at = time.perf_counter() if profile else 0.0
-                        payload = _mesh_payload(
-                            context,
-                            obj,
-                            mesh,
-                            obj.data if obj.type == "MESH" else None,
-                            file_type,
-                            image_store,
-                            material_cache,
-                            material_export_mode,
-                            material_bake_size,
-                            lighting_bake_mode,
-                            skin_setup=None,
-                            export_uv=export_uv,
-                            export_normals=export_normals,
-                            export_tangents=export_tangents,
-                            export_vertex_colors=export_vertex_colors,
-                            export_attributes=export_attributes,
-                            export_materials=export_materials,
-                            export_images=export_images,
-                            export_shape_keys=export_shape_keys,
-                            export_shape_key_normals=export_shape_key_normals,
-                            export_shape_key_tangents=export_shape_key_tangents,
-                            export_shape_key_animations=export_shape_key_animations and export_animations,
-                            export_custom_properties=export_custom_properties,
-                            ply_export_normals=ply_export_normals,
-                            ply_export_uv=ply_export_uv,
-                            ply_export_colors=ply_export_colors,
-                            ply_export_triangulated=ply_export_triangulated,
-                        )
+                    scene = context.scene
+                    saved_frame = scene.frame_current
+                    saved_subframe = scene.frame_subframe
+                    eval_depsgraph = depsgraph
+                    if obj_animation_bake_mode == "EVALUATED_MESH":
+                        _set_scene_frame(scene, float(scene.frame_start))
+                        eval_depsgraph = context.evaluated_depsgraph_get()
+                    try:
+                        obj_eval = obj.evaluated_get(eval_depsgraph)
+                        to_mesh_started_at = time.perf_counter() if profile else 0.0
+                        if obj_animation_bake_mode == "EVALUATED_MESH":
+                            mesh = bpy.data.meshes.new_from_object(obj_eval, depsgraph=eval_depsgraph)
+                        else:
+                            mesh = obj_eval.to_mesh()
                         if profile:
-                            mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
+                            to_mesh_ms += (time.perf_counter() - to_mesh_started_at) * 1000.0
+                        if mesh is not None:
+                            if obj_animation_bake_mode == "EVALUATED_MESH":
+                                mesh_cleanup.append(("mesh", mesh))
+                            else:
+                                mesh_cleanup.append(obj_eval)
+                            mesh_payload_started_at = time.perf_counter() if profile else 0.0
+                            payload = _mesh_payload(
+                                context,
+                                obj,
+                                mesh,
+                                obj.data if obj.type == "MESH" else None,
+                                file_type,
+                                image_store,
+                                material_cache,
+                                material_export_mode,
+                                material_bake_size,
+                                lighting_bake_mode,
+                                skin_setup=None,
+                                export_uv=export_uv,
+                                export_normals=export_normals,
+                                export_tangents=export_tangents,
+                                export_vertex_colors=export_vertex_colors,
+                                export_attributes=export_attributes,
+                                export_materials=export_materials,
+                                export_images=export_images,
+                                export_shape_keys=export_shape_keys,
+                                export_shape_key_normals=export_shape_key_normals,
+                                export_shape_key_tangents=export_shape_key_tangents,
+                                export_shape_key_animations=export_shape_key_animations and export_animations,
+                                animation_bake_mode=obj_animation_bake_mode,
+                                export_custom_properties=export_custom_properties,
+                                ply_export_normals=ply_export_normals,
+                                ply_export_uv=ply_export_uv,
+                                ply_export_colors=ply_export_colors,
+                                ply_export_triangulated=ply_export_triangulated,
+                            )
+                            if profile:
+                                mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
+                    finally:
+                        if obj_animation_bake_mode == "EVALUATED_MESH":
+                            scene.frame_set(saved_frame, subframe=saved_subframe)
 
         if payload is None:
             out[item_index][0] = AKB_EXPORT_ITEM_NODE
@@ -1511,6 +1561,28 @@ def _static_mesh_requires_evaluated_mesh(obj: bpy.types.Object, apply_modifiers:
         except (TypeError, ValueError):
             return True
     return False
+
+
+def _object_animation_bake_mode(
+    obj: bpy.types.Object,
+    animation_bake_mode: str,
+    skin_setup: tuple | None,
+) -> str:
+    if animation_bake_mode != "EVALUATED_MESH" or skin_setup is not None or obj.type != "MESH":
+        return "OFF"
+    mesh = getattr(obj, "data", None)
+    if mesh is None:
+        return "OFF"
+    if getattr(obj, "modifiers", None):
+        return "EVALUATED_MESH"
+    mesh_anim = getattr(mesh, "animation_data", None)
+    if mesh_anim is not None and mesh_anim.action is not None:
+        return "EVALUATED_MESH"
+    shape_keys = getattr(mesh, "shape_keys", None)
+    key_anim = getattr(shape_keys, "animation_data", None) if shape_keys is not None else None
+    if key_anim is not None and key_anim.action is not None:
+        return "EVALUATED_MESH"
+    return "OFF"
 
 
 def _mesh_material_bake_required(obj: bpy.types.Object, material_export_mode: str) -> bool:
@@ -2631,6 +2703,7 @@ def _mesh_payload(
     export_shape_key_normals: bool = True,
     export_shape_key_tangents: bool = True,
     export_shape_key_animations: bool = True,
+    animation_bake_mode: str = "OFF",
     export_custom_properties: bool = True,
     ply_export_normals: bool = False,
     ply_export_uv: bool = True,
@@ -2685,12 +2758,24 @@ def _mesh_payload(
     if fps <= 0.0:
         fps = 24.0
 
-    morph_targets = _shape_key_targets(mesh, source_mesh) if export_shape_keys else []
-    morph_animation = (
-        _shape_key_weight_animation(context, source_mesh, morph_targets)
-        if export_shape_key_animations
-        else None
-    )
+    if export_shape_keys and animation_bake_mode == "EVALUATED_MESH":
+        baked = _evaluated_mesh_animation_bake(context, obj, mesh)
+        if baked is not None:
+            morph_targets, morph_animation = baked
+        else:
+            morph_targets = _shape_key_targets(mesh, source_mesh)
+            morph_animation = (
+                _shape_key_weight_animation(context, source_mesh, morph_targets)
+                if export_shape_key_animations
+                else None
+            )
+    else:
+        morph_targets = _shape_key_targets(mesh, source_mesh) if export_shape_keys else []
+        morph_animation = (
+            _shape_key_weight_animation(context, source_mesh, morph_targets)
+            if export_shape_key_animations
+            else None
+        )
     morph_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
 
@@ -3080,6 +3165,153 @@ def _color_attribute_exportable(mesh: bpy.types.Mesh, attr) -> bool:
     if attr.domain == "CORNER":
         return len(attr.data) >= len(mesh.loops)
     return len(attr.data) >= len(mesh.vertices)
+
+
+class _EvaluatedMeshPositionData:
+    __slots__ = ("_coords", "_count")
+
+    def __init__(self, coords: array):
+        self._coords = coords
+        self._count = len(coords) // 3
+
+    def __len__(self) -> int:
+        return self._count
+
+    def foreach_get(self, prop: str, buffer) -> None:
+        if prop != "co":
+            raise AttributeError(prop)
+        buffer[:] = self._coords
+
+
+class _EvaluatedMeshShapeKey:
+    __slots__ = ("name", "data")
+
+    def __init__(self, name: str, coords: array):
+        self.name = name
+        self.data = _EvaluatedMeshPositionData(coords)
+
+
+def _mesh_position_array(mesh: bpy.types.Mesh) -> array:
+    coords = array("f", [0.0]) * (len(mesh.vertices) * 3)
+    if coords:
+        mesh.vertices.foreach_get("co", coords)
+    return coords
+
+
+def _mesh_topology_signature(mesh: bpy.types.Mesh) -> tuple | None:
+    vertex_count = len(mesh.vertices)
+    loop_count = len(mesh.loops)
+    polygon_count = len(mesh.polygons)
+    if vertex_count == 0 or loop_count == 0 or polygon_count == 0:
+        return None
+
+    loop_vertices = array("i", [0]) * loop_count
+    poly_loop_starts = array("i", [0]) * polygon_count
+    poly_loop_totals = array("i", [0]) * polygon_count
+    poly_materials = array("i", [0]) * polygon_count
+    mesh.loops.foreach_get("vertex_index", loop_vertices)
+    mesh.polygons.foreach_get("loop_start", poly_loop_starts)
+    mesh.polygons.foreach_get("loop_total", poly_loop_totals)
+    mesh.polygons.foreach_get("material_index", poly_materials)
+    return (
+        vertex_count,
+        loop_count,
+        polygon_count,
+        loop_vertices,
+        poly_loop_starts,
+        poly_loop_totals,
+        poly_materials,
+    )
+
+
+def _float_array_matches(a: array, b: array, epsilon: float = 1.0e-6) -> bool:
+    if len(a) != len(b):
+        return False
+    for index, value in enumerate(a):
+        if abs(float(value) - float(b[index])) > epsilon:
+            return False
+    return True
+
+
+def _evaluated_mesh_frame_name(frame: int) -> str:
+    return f"Frame_{frame:04d}" if frame >= 0 else f"Frame_m{abs(frame):04d}"
+
+
+def _evaluated_mesh_animation_frames(scene: bpy.types.Scene) -> tuple[int, ...]:
+    start = int(scene.frame_start)
+    end = int(scene.frame_end)
+    if end <= start:
+        return ()
+    return tuple(range(start, end + 1))
+
+
+def _evaluated_mesh_animation_bake(
+    context: bpy.types.Context,
+    obj: bpy.types.Object,
+    base_mesh: bpy.types.Mesh,
+) -> tuple[list, tuple] | None:
+    scene = context.scene
+    frames = _evaluated_mesh_animation_frames(scene)
+    if len(frames) < 2:
+        return None
+
+    topology = _mesh_topology_signature(base_mesh)
+    if topology is None:
+        return None
+
+    basis_coords = _mesh_position_array(base_mesh)
+    positions: list[tuple[int, array]] = [(frames[0], basis_coords)]
+    changed = False
+    saved_frame = scene.frame_current
+    saved_subframe = scene.frame_subframe
+    try:
+        for frame in frames[1:]:
+            _set_scene_frame(scene, float(frame))
+            depsgraph = context.evaluated_depsgraph_get()
+            obj_eval = obj.evaluated_get(depsgraph)
+            sample_mesh = bpy.data.meshes.new_from_object(obj_eval, depsgraph=depsgraph)
+            try:
+                if sample_mesh is None or _mesh_topology_signature(sample_mesh) != topology:
+                    return None
+                coords = _mesh_position_array(sample_mesh)
+                if not changed and not _float_array_matches(coords, basis_coords):
+                    changed = True
+                positions.append((frame, coords))
+            finally:
+                if sample_mesh is not None:
+                    bpy.data.meshes.remove(sample_mesh)
+    finally:
+        scene.frame_set(saved_frame, subframe=saved_subframe)
+
+    if not changed or len(positions) < 2:
+        return None
+
+    target_count = len(positions) - 1
+    basis = _EvaluatedMeshShapeKey("Basis", basis_coords)
+    morph_targets = []
+    for frame, coords in positions[1:]:
+        name = _evaluated_mesh_frame_name(frame)
+        morph_targets.append((name, basis, _EvaluatedMeshShapeKey(name, coords), 0.0))
+
+    fps = float(scene.render.fps) / float(scene.render.fps_base or 1.0)
+    if fps <= 0.0:
+        fps = 24.0
+
+    times = array("f")
+    values = array("f")
+    for sample_index, (frame, _coords) in enumerate(positions):
+        times.append(float(frame) / fps)
+        active_target = sample_index - 1
+        for target_index in range(target_count):
+            values.append(1.0 if target_index == active_target else 0.0)
+
+    return morph_targets, (
+        times.tobytes(),
+        values.tobytes(),
+        len(times),
+        target_count,
+        AK_INTERPOLATION_LINEAR,
+    )
 
 
 def _shape_key_targets(mesh: bpy.types.Mesh, source_mesh: bpy.types.Mesh | None) -> list:

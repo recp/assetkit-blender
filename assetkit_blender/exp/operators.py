@@ -251,6 +251,15 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         description="Export shape key weight animations",
         default=True,
     )
+    animation_bake_mode: bpy.props.EnumProperty(
+        name="Animation Bake",
+        description="Bake evaluated mesh animation into morph targets when topology stays constant",
+        items=(
+            ("OFF", "Off", "Export authored transform, bone, material, and shape key animations"),
+            ("EVALUATED_MESH", "Evaluated Mesh", "Sample evaluated mesh frames and export them as morph target animation"),
+        ),
+        default="OFF",
+    )
     global_scale: bpy.props.FloatProperty(
         name="Scale",
         description="Scale factor for mesh export",
@@ -600,8 +609,12 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 "Animation",
                 default_closed=True,
             )
-            if animation and self.export_shape_keys:
-                animation.prop(self, "export_shape_key_animations")
+            if animation:
+                if self.export_shape_keys:
+                    animation.prop(self, "export_shape_key_animations")
+                bake = animation.column()
+                bake.active = self.export_shape_keys and self.export_shape_key_animations
+                bake.prop(self, "animation_bake_mode")
 
     def check(self, _context):
         path_changed = self.filepath != self.assetkit_last_filepath
@@ -693,6 +706,9 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 ),
                 export_shape_key_animations=(
                     self.export_shape_key_animations if self.export_format in _ANIMATION_FORMATS else True
+                ),
+                animation_bake_mode=(
+                    self.animation_bake_mode if self.export_format in _ANIMATION_FORMATS else "OFF"
                 ),
                 apply_modifiers=self.apply_modifiers if use_apply_modifiers else None,
                 global_scale=self.global_scale if use_mesh_transform else None,
