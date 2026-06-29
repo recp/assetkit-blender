@@ -4233,7 +4233,7 @@ def _new_scene_node_object(node: SceneNodeData, index: int, visible: bool) -> bp
 
     obj = bpy.data.objects.new(name, None)
     obj.empty_display_type = "PLAIN_AXES"
-    obj.empty_display_size = 0.35
+    obj.empty_display_size = 0.0001
     _set_node_visibility(obj, visible)
     _set_assetkit_node_props(obj, node)
     return obj
@@ -4332,7 +4332,7 @@ def _create_coord_root(
 
         root = bpy.data.objects.new("AssetKit Root", None)
         root.empty_display_type = "ARROWS"
-        root.empty_display_size = 0.5
+        root.empty_display_size = 0.0001
         root.matrix_local = matrix
         root["assetkit_helper_object"] = True
         root["assetkit_coordinate_root"] = True
@@ -4346,7 +4346,7 @@ def _create_coord_root(
 
         root = bpy.data.objects.new("AssetKit Root", None)
         root.empty_display_type = "ARROWS"
-        root.empty_display_size = 0.5
+        root.empty_display_size = 0.0001
         root.matrix_local = matrix
         root["assetkit_helper_object"] = True
         root["assetkit_coordinate_root"] = True
