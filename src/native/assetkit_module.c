@@ -63,6 +63,7 @@ static PyMethodDef akb_methods[] = {
   {"export_pack_specular_glossiness", akb_export_pack_specular_glossiness, METH_VARARGS, "Pack glTF specular-glossiness pixels for export."},
   {"decode_ktx2", akb_decode_ktx2, METH_VARARGS, "Decode a KTX2 texture to float RGBA pixels."},
   {"anim_coords", akb_anim_coords, METH_VARARGS, "Build an interleaved FCurve coordinate buffer for an animation channel."},
+  {"anim_quat_slerp_coords", akb_anim_quat_slerp_coords, METH_VARARGS, "Build sampled quaternion slerp FCurve coordinates."},
   {"anim_component_constant", akb_anim_component_constant, METH_VARARGS, "Return true when an animation channel component is constant."},
   {"offset_i32", akb_offset_i32, METH_VARARGS, "Build an int32 buffer with a constant offset added to each element."},
   {"write_offset_i32", akb_write_offset_i32, METH_VARARGS, "Write an int32 buffer with a constant offset into a writable destination buffer."},

@@ -959,6 +959,20 @@ def native_animation_coords(channel: object, component: int, fps: float) -> memo
     return memoryview(coords).cast("f")
 
 
+def native_animation_quat_slerp_coords(channel: object, component: int, fps: float) -> memoryview | None:
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        coords = _assetkit_blender.anim_quat_slerp_coords(channel, int(component), float(fps))
+    except Exception:
+        return None
+    if not coords:
+        return None
+    return memoryview(coords).cast("f")
+
+
 def native_animation_component_constant(
     channel: object,
     component: int,

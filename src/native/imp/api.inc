@@ -791,6 +791,232 @@ akb_anim_coords(PyObject *self, PyObject *args) {
   return coords;
 }
 
+static void
+akb_quat_normalize_wxyz(float q[4]) {
+  float len2;
+  float inv_len;
+
+  len2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+  if (len2 <= 1.0e-20f || !isfinite(len2)) {
+    q[0] = 1.0f;
+    q[1] = 0.0f;
+    q[2] = 0.0f;
+    q[3] = 0.0f;
+    return;
+  }
+
+  inv_len = 1.0f / sqrtf(len2);
+  q[0] *= inv_len;
+  q[1] *= inv_len;
+  q[2] *= inv_len;
+  q[3] *= inv_len;
+}
+
+static void
+akb_quat_slerp_wxyz(float       out[4],
+                    const float a_in[4],
+                    const float b_in[4],
+                    float       t) {
+  float a[4];
+  float b[4];
+  float dot;
+  float theta0;
+  float theta;
+  float sin_theta0;
+  float s0;
+  float s1;
+  uint32_t i;
+
+  memcpy(a, a_in, sizeof(a));
+  memcpy(b, b_in, sizeof(b));
+  akb_quat_normalize_wxyz(a);
+  akb_quat_normalize_wxyz(b);
+
+  dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+  if (dot < 0.0f) {
+    dot = -dot;
+    b[0] = -b[0];
+    b[1] = -b[1];
+    b[2] = -b[2];
+    b[3] = -b[3];
+  }
+  if (dot > 1.0f)
+    dot = 1.0f;
+
+  if (dot > 0.9995f) {
+    for (i = 0; i < 4; i++)
+      out[i] = a[i] + t * (b[i] - a[i]);
+    akb_quat_normalize_wxyz(out);
+    return;
+  }
+
+  theta0 = acosf(dot);
+  sin_theta0 = sinf(theta0);
+  if (fabsf(sin_theta0) <= 1.0e-8f) {
+    memcpy(out, a, sizeof(a));
+    return;
+  }
+
+  theta = theta0 * t;
+  s0 = cosf(theta) - dot * sinf(theta) / sin_theta0;
+  s1 = sinf(theta) / sin_theta0;
+  for (i = 0; i < 4; i++)
+    out[i] = s0 * a[i] + s1 * b[i];
+  akb_quat_normalize_wxyz(out);
+}
+
+static PyObject *
+akb_anim_quat_slerp_coords(PyObject *self, PyObject *args) {
+  PyObject *channel;
+  PyObject *times_obj;
+  PyObject *values_obj;
+  PyObject *coords;
+  Py_buffer times_view;
+  Py_buffer values_view;
+  const float *times;
+  const float *values;
+  float *out;
+  double fps;
+  double start_frame_d;
+  double end_frame_d;
+  double duration_d;
+  unsigned long count_ul;
+  unsigned long value_width_ul;
+  unsigned long interpolation_ul;
+  uint32_t count;
+  uint32_t sample_count;
+  uint32_t interval;
+  uint32_t i;
+  int component;
+
+  (void)self;
+
+  memset(&times_view, 0, sizeof(times_view));
+  memset(&values_view, 0, sizeof(values_view));
+
+  if (!PyArg_ParseTuple(args, "Oid", &channel, &component, &fps))
+    return NULL;
+
+  if (!PyTuple_Check(channel)
+      || PyTuple_GET_SIZE(channel) < AKB_PY_ANIM_FIELD_COUNT
+      || component < 0
+      || component > 3
+      || fps <= 0.0) {
+    Py_RETURN_NONE;
+  }
+
+  count_ul = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(channel, AKB_PY_ANIM_COUNT));
+  if (PyErr_Occurred())
+    return NULL;
+  value_width_ul = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(channel, AKB_PY_ANIM_VALUE_WIDTH));
+  if (PyErr_Occurred())
+    return NULL;
+  interpolation_ul = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(channel, AKB_PY_ANIM_INTERPOLATION));
+  if (PyErr_Occurred())
+    return NULL;
+  if (count_ul < 2
+      || count_ul > UINT32_MAX
+      || value_width_ul != 4
+      || interpolation_ul != AK_INTERPOLATION_LINEAR) {
+    Py_RETURN_NONE;
+  }
+
+  count = (uint32_t)count_ul;
+  times_obj = PyTuple_GET_ITEM(channel, AKB_PY_ANIM_TIMES_F32);
+  values_obj = PyTuple_GET_ITEM(channel, AKB_PY_ANIM_VALUES_F32);
+  if (PyObject_GetBuffer(times_obj, &times_view, PyBUF_SIMPLE) < 0)
+    return NULL;
+  if (PyObject_GetBuffer(values_obj, &values_view, PyBUF_SIMPLE) < 0) {
+    PyBuffer_Release(&times_view);
+    return NULL;
+  }
+
+  if ((size_t)times_view.len < (size_t)count * sizeof(float)
+      || (size_t)values_view.len < (size_t)count * 4 * sizeof(float)) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    Py_RETURN_NONE;
+  }
+
+  times = (const float *)times_view.buf;
+  values = (const float *)values_view.buf;
+  start_frame_d = (double)times[0] * fps;
+  end_frame_d = (double)times[count - 1] * fps;
+  duration_d = end_frame_d - start_frame_d;
+  if (!isfinite(start_frame_d) || !isfinite(end_frame_d) || duration_d <= 0.0) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    Py_RETURN_NONE;
+  }
+
+  if (duration_d > (double)(UINT32_MAX - 1u)) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    PyErr_SetString(PyExc_OverflowError, "quaternion animation is too long to sample");
+    return NULL;
+  }
+
+  sample_count = (uint32_t)ceil(duration_d) + 1u;
+  if (sample_count <= count) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    Py_RETURN_NONE;
+  }
+  if ((size_t)sample_count > (SIZE_MAX / (2 * sizeof(float)))) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    PyErr_SetString(PyExc_OverflowError, "quaternion animation coordinate buffer is too large");
+    return NULL;
+  }
+
+  coords = PyBytes_FromStringAndSize(NULL,
+                                     (Py_ssize_t)((size_t)sample_count * 2 * sizeof(float)));
+  if (!coords) {
+    PyBuffer_Release(&values_view);
+    PyBuffer_Release(&times_view);
+    return NULL;
+  }
+
+  out = (float *)PyBytes_AS_STRING(coords);
+  interval = 0;
+  for (i = 0; i < sample_count; i++) {
+    double frame;
+    double time_value;
+    float t;
+    float q[4];
+
+    frame = i + 1u == sample_count ? end_frame_d : start_frame_d + (double)i;
+    time_value = frame / fps;
+    while (interval + 1u < count - 1u && time_value > (double)times[interval + 1u])
+      interval++;
+
+    if (time_value <= (double)times[0]) {
+      memcpy(q, values, sizeof(q));
+    } else if (time_value >= (double)times[count - 1]) {
+      memcpy(q, values + (size_t)(count - 1u) * 4u, sizeof(q));
+    } else {
+      const float *a = values + (size_t)interval * 4u;
+      const float *b = values + (size_t)(interval + 1u) * 4u;
+      double prev_time = (double)times[interval];
+      double next_time = (double)times[interval + 1u];
+
+      if (next_time <= prev_time)
+        t = 0.0f;
+      else
+        t = (float)((time_value - prev_time) / (next_time - prev_time));
+      akb_quat_slerp_wxyz(q, a, b, t);
+    }
+
+    akb_quat_normalize_wxyz(q);
+    out[i * 2] = (float)frame;
+    out[i * 2 + 1] = q[component];
+  }
+
+  PyBuffer_Release(&values_view);
+  PyBuffer_Release(&times_view);
+  return coords;
+}
+
 static PyObject *
 akb_anim_component_constant(PyObject *self, PyObject *args) {
   PyObject *channel;

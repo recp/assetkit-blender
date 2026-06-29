@@ -882,10 +882,7 @@ akb_extract_primitive(AkbArena *arena,
         akb_primitive_free(&out);
         return 0;
       }
-      if (node->geometry->skinner->skin
-          && node->geometry->skinner->skin->joints
-          && !node->geometry->skinner->overrideJoints
-          && !akb_skin_into_bind_pose(&out)) {
+      if (out.has_skin && !akb_skin_into_bind_pose(&out)) {
         akb_primitive_free(&out);
         return 0;
       }

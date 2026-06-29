@@ -25,6 +25,7 @@ from .assetkit import (
     _native_meshes_from_raw,
     native_animation_component_constant,
     native_animation_coords,
+    native_animation_quat_slerp_coords,
     native_load_meshes,
     native_fill_i32,
     native_fill_triangle_loop_offsets_ptr,
@@ -4704,7 +4705,14 @@ def _apply_animation(
         if not is_partial:
             if _anim_channel_can_use_native_coords(target):
                 coords_by_component: list[object | None] = [
-                    native_animation_coords(channel, component, fps)
+                    (
+                        native_animation_quat_slerp_coords(channel, component, fps)
+                        if target == _ANIM_ROTATION_QUAT
+                        and interpolation == "LINEAR"
+                        and component_count == 4
+                        and value_width == 4
+                        else native_animation_coords(channel, component, fps)
+                    )
                     for component in range(component_count)
                 ]
             else:
@@ -6139,7 +6147,14 @@ def _apply_bone_animations(
                     coords_by_component = [
                         None
                         if skip_components[component]
-                        else native_animation_coords(channel, component, fps)
+                        else (
+                            native_animation_quat_slerp_coords(channel, component, fps)
+                            if target == _ANIM_ROTATION_QUAT
+                            and interpolation == "LINEAR"
+                            and component_count == 4
+                            and value_width == 4
+                            else native_animation_coords(channel, component, fps)
+                        )
                         for component in range(component_count)
                     ]
                     if profile_detail:
