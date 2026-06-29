@@ -752,7 +752,7 @@ def _material_animation_payload(
     if fps <= 0.0:
         fps = 24.0
 
-    fcurves = tuple(_iter_action_fcurves(action))
+    fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(anim_data)))
     if not fcurves:
         return None
 
@@ -1019,17 +1019,31 @@ def _texture_transform_channel(
     return int(target), times.tobytes(), values.tobytes(), len(times), int(interpolation)
 
 
-def _iter_action_fcurves(action: bpy.types.Action):
+def _animation_action_slot(animation_data):
+    return getattr(animation_data, "action_slot", None) if animation_data is not None else None
+
+
+def _iter_action_fcurves(action: bpy.types.Action, slot=None):
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None and len(fcurves) > 0:
         yield from fcurves
         return
 
+    action_slots = tuple(getattr(action, "slots", []) or ())
+    if slot is not None:
+        slots = (slot,)
+    elif len(action_slots) == 1:
+        slots = action_slots
+    else:
+        return
+    if not slots:
+        return
+
     for layer in getattr(action, "layers", []) or []:
         for strip in getattr(layer, "strips", []) or []:
-            for slot in getattr(action, "slots", []) or []:
+            for current_slot in slots:
                 try:
-                    channelbag = strip.channelbag(slot)
+                    channelbag = strip.channelbag(current_slot)
                 except (AttributeError, TypeError, RuntimeError):
                     channelbag = None
                 if channelbag is not None:
@@ -1249,7 +1263,7 @@ def _mapping_has_texture_transform_animation(mapping) -> bool:
     if not paths:
         return False
 
-    for curve in _iter_action_fcurves(action):
+    for curve in _iter_action_fcurves(action, _animation_action_slot(anim_data)):
         if curve.data_path in paths:
             return True
     return False

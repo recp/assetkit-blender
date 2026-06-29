@@ -1739,15 +1739,14 @@ def _collect_bone_animations(
         for armature in armatures:
             animation_data = armature.animation_data
             action = animation_data.action if animation_data else None
-            if action is None:
-                continue
-            fcurves = tuple(_iter_action_fcurves(action))
-            if not fcurves:
-                continue
+            fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(animation_data))) if action else ()
             pose = getattr(armature, "pose", None)
             if pose is None:
                 continue
             for pose_bone in getattr(pose, "bones", []) or []:
+                constraints = getattr(pose_bone, "constraints", None)
+                if not fcurves and (constraints is None or len(constraints) == 0):
+                    continue
                 payload, changed = _pose_bone_transform_animation(
                     context,
                     armature,
@@ -1775,7 +1774,7 @@ def _object_transform_animation(
     if action is None:
         return None, False
 
-    fcurves = tuple(_iter_action_fcurves(action))
+    fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(animation_data)))
     if not fcurves:
         return None, False
 
@@ -1787,7 +1786,7 @@ def _object_transform_animation(
             channels.append(visibility_channel)
         return (tuple(channels) if channels else None), False
 
-    frames = _action_transform_keyframes(action)
+    frames = _action_transform_keyframes(action, fcurves)
     if len(frames) < 2:
         return ((visibility_channel,) if visibility_channel else None), False
 
@@ -1830,7 +1829,7 @@ def _object_transform_animation(
             times.tobytes(),
             translations.tobytes(),
             count,
-            _action_interpolation(action, _LOCATION_ANIMATION_PATHS),
+            _action_interpolation(action, _LOCATION_ANIMATION_PATHS, fcurves),
         ))
     if _float_samples_changed(rotations, 4):
         channels.append((
@@ -1838,7 +1837,7 @@ def _object_transform_animation(
             times.tobytes(),
             rotations.tobytes(),
             count,
-            _action_interpolation(action, _ROTATION_ANIMATION_PATHS),
+            _action_interpolation(action, _ROTATION_ANIMATION_PATHS, fcurves),
         ))
     if _float_samples_changed(scales, 3):
         channels.append((
@@ -1846,7 +1845,7 @@ def _object_transform_animation(
             times.tobytes(),
             scales.tobytes(),
             count,
-            _action_interpolation(action, _SCALE_ANIMATION_PATHS),
+            _action_interpolation(action, _SCALE_ANIMATION_PATHS, fcurves),
         ))
     if visibility_channel:
         channels.append(visibility_channel)
@@ -1858,7 +1857,7 @@ def _pose_bone_transform_animation(
     context: bpy.types.Context,
     armature: bpy.types.Object,
     bone_name: str,
-    action: bpy.types.Action,
+    action: bpy.types.Action | None,
     fcurves: tuple | None = None,
 ) -> tuple[tuple | None, bool]:
     paths = _pose_bone_paths(armature, bone_name)
@@ -1868,12 +1867,21 @@ def _pose_bone_transform_animation(
     pose = getattr(armature, "pose", None)
     pose_bone = pose.bones.get(bone_name) if pose else None
     if fcurves is None:
-        fcurves = tuple(_iter_action_fcurves(action))
-    direct = _pose_bone_transform_animation_direct(context, pose_bone, action, paths, fcurves)
+        fcurves = (
+            tuple(_iter_action_fcurves(action, _animation_action_slot(getattr(armature, "animation_data", None))))
+            if action is not None else ()
+        )
+    direct = _pose_bone_transform_animation_direct(context, pose_bone, action, paths, fcurves) if action else None
     if direct is not None:
         return (direct if direct else None), False
 
-    frames = _action_keyframes_for_paths(action, set(paths.values()))
+    frames = (
+        _action_keyframes_for_paths(action, set(paths.values()), fcurves)
+        if action is not None and fcurves
+        else ()
+    )
+    if len(frames) < 2 and pose_bone is not None:
+        frames = _pose_bone_constraint_keyframes(pose_bone)
     if len(frames) < 2:
         return None, False
 
@@ -1914,25 +1922,36 @@ def _pose_bone_transform_animation(
         return None
 
     channels = []
+    loc_interp = (
+        _action_interpolation(action, set(paths[prop] for prop in ("location",) if prop in paths), fcurves)
+        if action is not None and fcurves else AK_INTERPOLATION_LINEAR
+    )
+    rot_interp = (
+        _action_interpolation(action, {
+            paths[prop] for prop in ("rotation_axis_angle", "rotation_euler", "rotation_quaternion")
+            if prop in paths
+        }, fcurves)
+        if action is not None and fcurves else AK_INTERPOLATION_LINEAR
+    )
+    scale_interp = (
+        _action_interpolation(action, set(paths[prop] for prop in ("scale",) if prop in paths), fcurves)
+        if action is not None and fcurves else AK_INTERPOLATION_LINEAR
+    )
     if _float_samples_changed(translations, 3):
         channels.append((
             AK_TARGET_POSITION,
             times.tobytes(),
             translations.tobytes(),
             count,
-            _action_interpolation(action, set(paths[prop] for prop in ("location",) if prop in paths)),
+            loc_interp,
         ))
-    rotation_paths = {
-        paths[prop] for prop in ("rotation_axis_angle", "rotation_euler", "rotation_quaternion")
-        if prop in paths
-    }
     if _float_samples_changed(rotations, 4):
         channels.append((
             AK_TARGET_QUAT,
             times.tobytes(),
             rotations.tobytes(),
             count,
-            _action_interpolation(action, rotation_paths),
+            rot_interp,
         ))
     if _float_samples_changed(scales, 3):
         channels.append((
@@ -1940,7 +1959,7 @@ def _pose_bone_transform_animation(
             times.tobytes(),
             scales.tobytes(),
             count,
-            _action_interpolation(action, set(paths[prop] for prop in ("scale",) if prop in paths)),
+            scale_interp,
         ))
 
     return (tuple(channels) if channels else None), changed_frame
@@ -1953,7 +1972,7 @@ def _object_transform_animation_direct(
     fcurves: tuple | None = None,
 ) -> tuple | None:
     if fcurves is None:
-        fcurves = tuple(_iter_action_fcurves(action))
+        fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(getattr(obj, "animation_data", None))))
     if not fcurves:
         return None
     if getattr(obj, "constraints", None):
@@ -2506,9 +2525,9 @@ def _pose_bone_transform_defaults(pose_bone) -> dict[str, tuple[float, ...]]:
     }
 
 
-def _action_transform_keyframes(action: bpy.types.Action) -> tuple[float, ...]:
+def _action_transform_keyframes(action: bpy.types.Action, fcurves: tuple | None = None) -> tuple[float, ...]:
     frames: set[float] = set()
-    for fcurve in _iter_action_fcurves(action):
+    for fcurve in (fcurves if fcurves is not None else _iter_action_fcurves(action)):
         if fcurve.data_path not in _TRANSFORM_ANIMATION_PATHS:
             continue
         for key in fcurve.keyframe_points:
@@ -2516,11 +2535,15 @@ def _action_transform_keyframes(action: bpy.types.Action) -> tuple[float, ...]:
     return tuple(sorted(frames))
 
 
-def _action_keyframes_for_paths(action: bpy.types.Action, paths: set[str]) -> tuple[float, ...]:
+def _action_keyframes_for_paths(
+    action: bpy.types.Action,
+    paths: set[str],
+    fcurves: tuple | None = None,
+) -> tuple[float, ...]:
     frames: set[float] = set()
     if not paths:
         return ()
-    for fcurve in _iter_action_fcurves(action):
+    for fcurve in (fcurves if fcurves is not None else _iter_action_fcurves(action)):
         if fcurve.data_path not in paths:
             continue
         for key in fcurve.keyframe_points:
@@ -2528,11 +2551,15 @@ def _action_keyframes_for_paths(action: bpy.types.Action, paths: set[str]) -> tu
     return tuple(sorted(frames))
 
 
-def _action_interpolation(action: bpy.types.Action, paths: set[str]) -> int:
+def _action_interpolation(
+    action: bpy.types.Action,
+    paths: set[str],
+    fcurves: tuple | None = None,
+) -> int:
     if not paths:
         return AK_INTERPOLATION_LINEAR
     found = False
-    for fcurve in _iter_action_fcurves(action):
+    for fcurve in (fcurves if fcurves is not None else _iter_action_fcurves(action)):
         if fcurve.data_path not in paths:
             continue
         for key in fcurve.keyframe_points:
@@ -2542,17 +2569,31 @@ def _action_interpolation(action: bpy.types.Action, paths: set[str]) -> int:
     return AK_INTERPOLATION_STEP if found else AK_INTERPOLATION_LINEAR
 
 
-def _iter_action_fcurves(action: bpy.types.Action):
+def _animation_action_slot(animation_data):
+    return getattr(animation_data, "action_slot", None) if animation_data is not None else None
+
+
+def _iter_action_fcurves(action: bpy.types.Action, slot=None):
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None and len(fcurves) > 0:
         yield from fcurves
         return
 
+    action_slots = tuple(getattr(action, "slots", []) or ())
+    if slot is not None:
+        slots = (slot,)
+    elif len(action_slots) == 1:
+        slots = action_slots
+    else:
+        return
+    if not slots:
+        return
+
     for layer in getattr(action, "layers", []) or []:
         for strip in getattr(layer, "strips", []) or []:
-            for slot in getattr(action, "slots", []) or []:
+            for current_slot in slots:
                 try:
-                    channelbag = strip.channelbag(slot)
+                    channelbag = strip.channelbag(current_slot)
                 except Exception:
                     channelbag = None
                 if channelbag is not None:
@@ -2572,6 +2613,33 @@ def _pose_bone_paths(armature: bpy.types.Object, bone_name: str) -> dict[str, st
         except Exception:
             pass
     return out
+
+
+def _pose_bone_constraint_keyframes(pose_bone) -> tuple[float, ...]:
+    frames: set[float] = set()
+    for constraint in getattr(pose_bone, "constraints", []) or []:
+        target = getattr(constraint, "target", None)
+        if target is not None:
+            _collect_object_animation_keyframes(target, frames)
+    return tuple(sorted(frames))
+
+
+def _collect_object_animation_keyframes(obj: bpy.types.Object, frames: set[float]) -> None:
+    seen: set[int] = set()
+    while obj is not None:
+        key = int(obj.as_pointer())
+        if key in seen:
+            return
+        seen.add(key)
+
+        animation_data = obj.animation_data
+        action = animation_data.action if animation_data else None
+        if action is not None:
+            for fcurve in _iter_action_fcurves(action, _animation_action_slot(animation_data)):
+                for point in fcurve.keyframe_points:
+                    frames.add(float(point.co.x))
+
+        obj = obj.parent
 
 
 def _pose_bone_local_matrix(pose_bone):
@@ -3348,6 +3416,9 @@ def _shape_key_weight_animation(
     action = animation_data.action if animation_data else None
     if action is None:
         return None
+    fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(animation_data)))
+    if not fcurves:
+        return None
 
     path_to_index: dict[str, int] = {}
     defaults = array("f")
@@ -3366,7 +3437,7 @@ def _shape_key_weight_animation(
 
     fcurves_by_index: dict[int, bpy.types.FCurve] = {}
     frames: set[float] = set()
-    for fcurve in _iter_action_fcurves(action):
+    for fcurve in fcurves:
         index = path_to_index.get(fcurve.data_path)
         if index is None:
             continue
@@ -3393,7 +3464,7 @@ def _shape_key_weight_animation(
     if not _float_samples_changed(values, target_count):
         return None
 
-    interpolation = _action_interpolation(action, set(path_to_index))
+    interpolation = _action_interpolation(action, set(path_to_index), fcurves)
     return (
         times.tobytes(),
         values.tobytes(),
@@ -3462,7 +3533,7 @@ def _object_uses_parent_source_visibility(obj: bpy.types.Object) -> bool:
         return True
     animation_data = parent.animation_data
     action = animation_data.action if animation_data else None
-    return action is not None and _action_has_visibility_animation(action)
+    return action is not None and _action_has_visibility_animation(action, _animation_action_slot(animation_data))
 
 
 def _object_has_ancestor_source_visibility(obj: bpy.types.Object) -> bool:
@@ -3474,14 +3545,14 @@ def _object_has_ancestor_source_visibility(obj: bpy.types.Object) -> bool:
             return True
         animation_data = parent.animation_data
         action = animation_data.action if animation_data else None
-        if action is not None and _action_has_visibility_animation(action):
+        if action is not None and _action_has_visibility_animation(action, _animation_action_slot(animation_data)):
             return True
         parent = getattr(parent, "parent", None)
     return False
 
 
-def _action_has_visibility_animation(action: bpy.types.Action) -> bool:
-    for fcurve in _iter_action_fcurves(action):
+def _action_has_visibility_animation(action: bpy.types.Action, slot=None) -> bool:
+    for fcurve in _iter_action_fcurves(action, slot):
         if fcurve.data_path in _VISIBILITY_ANIMATION_PATHS:
             return True
     return False
