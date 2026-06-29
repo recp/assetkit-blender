@@ -111,6 +111,7 @@ _ROTATION_ANIMATION_PATHS = {
 }
 _SCALE_ANIMATION_PATHS = {"scale", "delta_scale"}
 _VISIBILITY_ANIMATION_PATHS = {"hide_viewport", "hide_render"}
+_ANIMATION_FRAME_EPSILON = 1.0e-4
 _BONE_TRANSFORM_PROPERTIES = {
     "location",
     "rotation_axis_angle",
@@ -2564,12 +2565,39 @@ def _expanded_integer_sample_frames(frames: tuple[float, ...]) -> tuple[float, .
     start = math.floor(frames[0])
     end = math.ceil(frames[-1])
     if end <= start:
+        return _dedupe_animation_frames(frames)
+
+    sampled = [float(frame) for frame in range(start, end + 1)]
+    for frame in frames:
+        value = _canonical_animation_frame(frame)
+        nearest = round(value)
+        if start <= nearest <= end and abs(value - nearest) <= _ANIMATION_FRAME_EPSILON:
+            continue
+        sampled.append(value)
+    return _dedupe_animation_frames(tuple(sorted(sampled)))
+
+
+def _canonical_animation_frame(frame: float) -> float:
+    value = float(frame)
+    nearest = round(value)
+    if abs(value - nearest) <= _ANIMATION_FRAME_EPSILON:
+        return float(nearest)
+    return value
+
+
+def _dedupe_animation_frames(frames: tuple[float, ...]) -> tuple[float, ...]:
+    if len(frames) < 2:
         return frames
 
-    sampled = set(frames)
-    for frame in range(start, end + 1):
-        sampled.add(float(frame))
-    return tuple(sorted(sampled))
+    out: list[float] = []
+    previous: float | None = None
+    for frame in frames:
+        value = _canonical_animation_frame(frame)
+        if previous is not None and abs(value - previous) <= _ANIMATION_FRAME_EPSILON:
+            continue
+        out.append(value)
+        previous = value
+    return tuple(out)
 
 
 def _transform_fcurves_need_sampling(fcurves: tuple, paths: dict[str, str]) -> bool:

@@ -179,7 +179,7 @@ _DEFERRED_NORMAL_TIMER_ACTIVE = False
 _ACTION_CHANNELBAGS: dict[tuple[int, int], tuple[object, object]] = {}
 _ACTION_CHANNEL_GROUPS: dict[tuple[int, str], object] = {}
 _IMPORT_SHARED_ACTIONS: dict[tuple[int, str, str], bpy.types.Action] = {}
-_ACTION_FRAME_RANGES: dict[int, tuple[float, float]] = {}
+_ACTION_FRAME_RANGES: dict[tuple[int, int], tuple[float, float]] = {}
 _KEYFRAME_ENUM_VALUES: dict[tuple[str, str], int] = {}
 _KEYFRAME_ENUM_ARRAYS: dict[tuple[int, int], array] = {}
 _BOOL_ARRAYS: dict[tuple[int, int], array] = {}
@@ -1871,10 +1871,22 @@ def _set_scene_frame_range(min_frame: float, max_frame: float) -> None:
         pass
 
 
-def _action_frame_range(action: bpy.types.Action) -> tuple[float, float] | None:
-    cached = _ACTION_FRAME_RANGES.get(action.as_pointer())
-    if cached is not None:
-        return cached
+def _action_frame_range(action: bpy.types.Action, owner: bpy.types.ID | None = None) -> tuple[float, float] | None:
+    action_ptr = action.as_pointer()
+    if owner is not None:
+        cached = _ACTION_FRAME_RANGES.get(_action_frame_range_key(action, owner))
+        if cached is not None:
+            return cached
+
+    min_frame: float | None = None
+    max_frame: float | None = None
+    for (cached_action, _cached_owner), frame_range in _ACTION_FRAME_RANGES.items():
+        if cached_action != action_ptr:
+            continue
+        min_frame = frame_range[0] if min_frame is None else min(min_frame, frame_range[0])
+        max_frame = frame_range[1] if max_frame is None else max(max_frame, frame_range[1])
+    if min_frame is not None and max_frame is not None:
+        return min_frame, max_frame
 
     for attr in ("curve_frame_range", "frame_range"):
         value = getattr(action, attr, None)
@@ -4069,7 +4081,7 @@ def _apply_effective_node_visibility_animation(
 
         action = _visibility_action_for(obj, channels[0])
         actions.append(action)
-        _register_action_frame_range(action, key_times[0] * fps, key_times[-1] * fps)
+        _register_action_frame_range(action, key_times[0] * fps, key_times[-1] * fps, obj)
         coords = array("f", [0.0]) * (len(key_times) * 2)
         for key_index, time_value in enumerate(key_times):
             coords[key_index * 2] = time_value * fps
@@ -4599,6 +4611,10 @@ def _merge_frame_bounds(
     return min(bounds[0], float(start)), max(bounds[1], float(end))
 
 
+def _action_frame_range_key(action: bpy.types.Action, owner: bpy.types.ID | None = None) -> tuple[int, int]:
+    return action.as_pointer(), owner.as_pointer() if owner is not None else 0
+
+
 def _channel_frame_bounds(
     channel: object,
     fps: float,
@@ -4616,10 +4632,15 @@ def _channel_frame_bounds(
     return start, end
 
 
-def _register_action_frame_range(action: bpy.types.Action, start: float, end: float) -> None:
+def _register_action_frame_range(
+    action: bpy.types.Action,
+    start: float,
+    end: float,
+    owner: bpy.types.ID | None = None,
+) -> None:
     if end < start:
         return
-    key = action.as_pointer()
+    key = _action_frame_range_key(action, owner)
     existing = _ACTION_FRAME_RANGES.get(key)
     _ACTION_FRAME_RANGES[key] = _merge_frame_bounds(existing, start, end)
 
@@ -4630,8 +4651,8 @@ def _register_actions_frame_range(
 ) -> None:
     if not actions or bounds is None:
         return
-    for _owner, action in actions.values():
-        _register_action_frame_range(action, bounds[0], bounds[1])
+    for owner, action in actions.values():
+        _register_action_frame_range(action, bounds[0], bounds[1], owner)
 
 
 def _apply_animation(
@@ -4798,8 +4819,8 @@ def _apply_animation(
 
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
-    _stash_animation_actions(actions)
     _register_actions_frame_range(actions, frame_bounds)
+    _stash_animation_actions(actions)
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
 
@@ -4980,7 +5001,7 @@ def _safe_action_name(name: str) -> str:
 
 def _stash_animation_actions(actions: dict[tuple[int, int, str], tuple[bpy.types.ID, bpy.types.Action]]) -> None:
     for owner, action in actions.values():
-        if not action or _action_frame_range(action) is None:
+        if not action or _action_frame_range(action, owner) is None:
             continue
         _stash_animation_action(owner, action)
 
@@ -5004,7 +5025,7 @@ def _stash_animation_action(owner: bpy.types.ID, action: bpy.types.Action) -> No
         return
 
     _set_nla_strip_action_slot(strip, action, owner)
-    frame_range = _action_frame_range(action)
+    frame_range = _action_frame_range(action, owner)
     if frame_range is not None:
         strip.action_frame_start = frame_range[0]
         strip.action_frame_end = frame_range[1]
@@ -5078,7 +5099,7 @@ def _apply_light_spot_cone_animations(
     action = _animation_action_for(obj, data, actions, "_Data", first_channel)
     interpolation = _merged_animation_interpolation(cone_channels[_ANIM_LIGHT_SPOT_INNER] + cone_channels[_ANIM_LIGHT_SPOT_OUTER])
     converted: set[int] = set()
-    _register_action_frame_range(action, start_frame + key_times[0] * fps, start_frame + key_times[-1] * fps)
+    _register_action_frame_range(action, start_frame + key_times[0] * fps, start_frame + key_times[-1] * fps, data)
 
     if cone_channels[_ANIM_LIGHT_SPOT_OUTER]:
         coords = array("f", [0.0]) * (len(key_times) * 2)
@@ -5317,8 +5338,8 @@ def _apply_shape_key_animation(obj: bpy.types.Object, data: MeshPrimitiveData) -
 
         end_frame = max(end_frame, int(start_frame + times[count - 1] * fps + 0.5))
 
-    _stash_animation_actions(actions)
     _register_actions_frame_range(actions, frame_bounds)
+    _stash_animation_actions(actions)
     if end_frame > scene.frame_end:
         scene.frame_end = end_frame
 
@@ -6260,10 +6281,10 @@ def _apply_bone_animations(
 
             end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
+    _register_actions_frame_range(actions, frame_bounds)
     if profile_detail:
         before_stash_at = time.perf_counter()
     _stash_animation_actions(actions)
-    _register_actions_frame_range(actions, frame_bounds)
     if profile_detail:
         stash_ms = (time.perf_counter() - before_stash_at) * 1000.0
     else:
@@ -8564,8 +8585,8 @@ def _apply_material_animation(
 
         end_frame = max(end_frame, int(times[count - 1] * fps + 0.5))
 
-    _stash_animation_actions(actions)
     _register_actions_frame_range(actions, frame_bounds)
+    _stash_animation_actions(actions)
     if actions:
         mat["assetkit_material_animation_applied"] = True
     if end_frame > scene.frame_end:
