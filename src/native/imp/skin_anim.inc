@@ -2610,6 +2610,158 @@ akb_animation_new_baked(AkDoc *doc,
   return animation;
 }
 
+static int
+akb_animation_prepare_baked_channel(AkbAnimChannel *channel,
+                                    const float *times,
+                                    uint32_t count,
+                                    uint32_t target,
+                                    uint32_t width,
+                                    uint32_t clip_index,
+                                    const char *clip_name) {
+  size_t time_bytes;
+  size_t value_bytes;
+
+  if (!channel || !times || !count || !target || !width)
+    return 0;
+
+  memset(channel, 0, sizeof(*channel));
+
+  time_bytes = (size_t)count * sizeof(float);
+  value_bytes = (size_t)count * width * sizeof(float);
+
+  channel->times = (float *)malloc(time_bytes);
+  channel->values = (float *)malloc(value_bytes);
+  if (!channel->times || !channel->values) {
+    free(channel->times);
+    free(channel->values);
+    memset(channel, 0, sizeof(*channel));
+    return 0;
+  }
+
+  memcpy(channel->times, times, time_bytes);
+
+  channel->target = target;
+  channel->value_width = width;
+  channel->count = count;
+  channel->interpolation = AK_INTERPOLATION_LINEAR;
+  channel->clip_index = clip_index;
+  channel->clip_name = clip_name;
+  return 1;
+}
+
+static int
+akb_animation_append_baked_clip(AkbAnimation *animation,
+                               AkBakedAnimation *baked,
+                               uint32_t clip_index,
+                               const char *clip_name) {
+  AkbAnimChannel channels[3];
+  uint32_t i;
+  int pushed;
+
+  if (!animation || !baked || !baked->count || !baked->times || !baked->matrices)
+    return 1;
+
+  memset(channels, 0, sizeof(channels));
+
+  if (!akb_animation_prepare_baked_channel(&channels[0],
+                                           baked->times,
+                                           baked->count,
+                                           AKB_ANIM_TRANSLATION,
+                                           3,
+                                           clip_index,
+                                           clip_name)
+      || !akb_animation_prepare_baked_channel(&channels[1],
+                                             baked->times,
+                                             baked->count,
+                                             AKB_ANIM_ROTATION_QUAT,
+                                             4,
+                                             clip_index,
+                                             clip_name)
+      || !akb_animation_prepare_baked_channel(&channels[2],
+                                             baked->times,
+                                             baked->count,
+                                             AKB_ANIM_SCALE,
+                                             3,
+                                             clip_index,
+                                             clip_name)) {
+    for (i = 0; i < 3; i++) {
+      free(channels[i].times);
+      free(channels[i].values);
+    }
+    return 0;
+  }
+
+  for (i = 0; i < baked->count; i++) {
+    akb_baked_matrix_to_trs(baked->matrices + (size_t)i * 16,
+                            channels[0].values + (size_t)i * 3,
+                            channels[1].values + (size_t)i * 4,
+                            channels[2].values + (size_t)i * 3,
+                            i > 0 ? channels[1].values + (size_t)(i - 1) * 4 : NULL);
+  }
+
+  for (pushed = 0; pushed < 3; pushed++) {
+    if (!akb_animation_push(animation, &channels[pushed])) {
+      for (i = (uint32_t)pushed; i < 3; i++) {
+        free(channels[i].times);
+        free(channels[i].values);
+      }
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+static AkbAnimation *
+akb_animation_new_baked_indexed(AkDoc *doc,
+                                AkbSharedDoc *doc_owner,
+                                AkNode *node,
+                                int *ok) {
+  AkbAnimation *animation;
+  AkAnimation *source;
+  AkBakedAnimation *baked;
+  uint32_t clip_index;
+
+  if (!doc || !doc->lib.animations.first || !node)
+    return NULL;
+
+  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+  if (!animation) {
+    *ok = 0;
+    return NULL;
+  }
+
+  animation->refcount = 1;
+  animation->doc_owner = doc_owner;
+  akb_shared_doc_retain(doc_owner);
+
+  clip_index = 0;
+  for (source = doc->lib.animations.first; source; source = source->next, clip_index++) {
+    baked = ak_nodeBakeAnimationForAnimation(doc, node, source);
+    if (!baked)
+      continue;
+
+    if (!akb_animation_append_baked_clip(animation,
+                                        baked,
+                                        clip_index,
+                                        source->name)) {
+      ak_free(baked);
+      akb_animation_release(animation);
+      *ok = 0;
+      return NULL;
+    }
+
+    ak_free(baked);
+  }
+
+  if (!animation->count) {
+    akb_animation_release(animation);
+    return NULL;
+  }
+
+  return animation;
+}
+
 static AkbAnimation *
 akb_animation_new(AkDoc *doc,
                   AkbSharedDoc *doc_owner,
@@ -2633,7 +2785,9 @@ akb_animation_new(AkDoc *doc,
   needs_bake = ak_nodeNeedsBaking(node) || (!is_gltf && akb_node_has_rotate(node));
 
   if (needs_bake) {
-    animation = akb_animation_new_baked(doc, doc_owner, node, ok);
+    animation = index
+      ? akb_animation_new_baked_indexed(doc, doc_owner, node, ok)
+      : akb_animation_new_baked(doc, doc_owner, node, ok);
     if (!animation || !*ok)
       return animation;
     binding_count = akb_node_visibility_bindings(node, bindings, 64);
@@ -2765,4 +2919,3 @@ akb_morph_animation_new(AkDoc *doc,
 
   return animation;
 }
-

@@ -18,6 +18,10 @@ from ..enums import (
     AKB_ANIM_MATERIAL_METALLIC,
     AKB_ANIM_MATERIAL_ROUGHNESS,
 )
+from .animation import (
+    animation_action_slot,
+    animation_channels_with_clip,
+)
 from .images import _ExportImageStore
 
 _AK_WRAP_REPEAT = 1
@@ -752,7 +756,7 @@ def _material_animation_payload(
     if fps <= 0.0:
         fps = 24.0
 
-    fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(anim_data)))
+    fcurves = tuple(_iter_action_fcurves(action, animation_action_slot(anim_data)))
     if not fcurves:
         return None
 
@@ -762,7 +766,7 @@ def _material_animation_payload(
         channels.append(base_channel)
     channels.extend(_principled_material_animation_channels(bsdf, fcurves, fps))
     channels.extend(_texture_transform_animation_channels(material, fcurves, fps))
-    return tuple(channels) if channels else None
+    return animation_channels_with_clip(channels, action) if channels else None
 
 
 def _base_color_animation_channel(bsdf, fcurves: tuple, base_color: list[float], fps: float):
@@ -1019,10 +1023,6 @@ def _texture_transform_channel(
     return int(target), times.tobytes(), values.tobytes(), len(times), int(interpolation)
 
 
-def _animation_action_slot(animation_data):
-    return getattr(animation_data, "action_slot", None) if animation_data is not None else None
-
-
 def _iter_action_fcurves(action: bpy.types.Action, slot=None):
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None and len(fcurves) > 0:
@@ -1263,7 +1263,7 @@ def _mapping_has_texture_transform_animation(mapping) -> bool:
     if not paths:
         return False
 
-    for curve in _iter_action_fcurves(action, _animation_action_slot(anim_data)):
+    for curve in _iter_action_fcurves(action, animation_action_slot(anim_data)):
         if curve.data_path in paths:
             return True
     return False

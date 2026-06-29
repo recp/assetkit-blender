@@ -399,6 +399,124 @@ akb_export_anim_sampler_input(AkHeap         *heap,
 }
 
 static int
+akb_export_anim_channel_clip(PyObject     *channel_obj,
+                             uint32_t     *clip_index,
+                             const char  **clip_name) {
+  PyObject *item;
+  unsigned long index;
+  Py_ssize_t size;
+
+  if (!clip_index || !clip_name)
+    return 0;
+
+  *clip_index = 0;
+  *clip_name  = NULL;
+
+  if (!PyTuple_Check(channel_obj))
+    return 1;
+
+  size = PyTuple_GET_SIZE(channel_obj);
+  if (size >= 6) {
+    item = PyTuple_GET_ITEM(channel_obj, 5);
+    if (item && item != Py_None) {
+      index = PyLong_AsUnsignedLong(item);
+      if (PyErr_Occurred())
+        return 0;
+      if (index > UINT32_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "animation clip index is too large");
+        return 0;
+      }
+      *clip_index = (uint32_t)index;
+    }
+  }
+
+  if (size >= 7) {
+    item = PyTuple_GET_ITEM(channel_obj, 6);
+    if (item && item != Py_None) {
+      *clip_name = PyUnicode_AsUTF8(item);
+      if (!*clip_name)
+        return 0;
+      if (!(*clip_name)[0])
+        *clip_name = NULL;
+    }
+  }
+
+  return 1;
+}
+
+static AkAnimation *
+akb_export_find_animation_by_name(AkDoc *doc, const char *name) {
+  AkAnimation *animation;
+
+  if (!doc || !name || !name[0])
+    return NULL;
+
+  for (animation = doc->lib.animations.first;
+       animation;
+       animation = animation->next) {
+    if (animation->name && strcmp(animation->name, name) == 0)
+      return animation;
+  }
+
+  return NULL;
+}
+
+static AkAnimation *
+akb_export_append_animation(AkDoc *doc, const char *name, int copy_name) {
+  AkHeap *heap;
+  AkAnimation *animation;
+
+  if (!doc)
+    return NULL;
+
+  heap = ak_heap_getheap(doc);
+  if (!heap)
+    return NULL;
+
+  animation = ak_heap_calloc(heap, doc, sizeof(*animation));
+  if (!animation)
+    return NULL;
+
+  if (name && name[0]) {
+    animation->name = copy_name ? ak_heap_strdup(heap, animation, name) : name;
+    if (!animation->name)
+      return NULL;
+  }
+
+  AKB_LIB_APPEND(doc->lib.animations, animation, next);
+  return animation;
+}
+
+static AkAnimation *
+akb_export_animation_for_channel(AkDoc       *doc,
+                                 PyObject    *channel_obj,
+                                 const char  *fallback_name,
+                                 AkAnimation **fallback_animation) {
+  const char *clip_name;
+  uint32_t clip_index;
+  AkAnimation *animation;
+
+  if (!akb_export_anim_channel_clip(channel_obj, &clip_index, &clip_name))
+    return NULL;
+
+  if (clip_name) {
+    animation = akb_export_find_animation_by_name(doc, clip_name);
+    if (animation)
+      return animation;
+    return akb_export_append_animation(doc, clip_name, 1);
+  }
+
+  if (fallback_animation && *fallback_animation)
+    return *fallback_animation;
+
+  animation = akb_export_append_animation(doc, fallback_name, 0);
+  if (fallback_animation)
+    *fallback_animation = animation;
+  (void)clip_index;
+  return animation;
+}
+
+static int
 akb_export_add_transform_animation_channel(AkDoc       *doc,
                                            AkAnimation *animation,
                                            AkNode      *node,
@@ -425,6 +543,8 @@ akb_export_add_transform_animation_channel(AkDoc       *doc,
   AkTargetPropertyType channel_target_type;
   int target_type_int;
   int interpolation_int;
+  unsigned int clip_index_unused;
+  char *clip_name_unused;
   int ok;
 
   if (!doc || !animation || !node || !channel_obj)
@@ -433,14 +553,20 @@ akb_export_add_transform_animation_channel(AkDoc       *doc,
   memset(&times_view, 0, sizeof(times_view));
   memset(&values_view, 0, sizeof(values_view));
 
+  clip_index_unused = 0;
+  clip_name_unused = NULL;
   if (!PyArg_ParseTuple(channel_obj,
-                        "iOOni",
+                        "iOOni|Iz",
                         &target_type_int,
                         &times_obj,
                         &values_obj,
                         &count_py,
-                        &interpolation_int))
+                        &interpolation_int,
+                        &clip_index_unused,
+                        &clip_name_unused))
     return 0;
+  (void)clip_index_unused;
+  (void)clip_name_unused;
 
   if (count_py <= 0 || count_py > UINT32_MAX) {
     PyErr_SetString(PyExc_ValueError, "animation sample count is invalid");
@@ -558,7 +684,6 @@ akb_export_add_transform_animations(AkDoc    *doc,
   PyObject *seq;
   Py_ssize_t count;
   Py_ssize_t i;
-  int channel_count;
 
   if (!doc || !node || !animation_obj || animation_obj == Py_None)
     return 1;
@@ -579,33 +704,32 @@ akb_export_add_transform_animations(AkDoc    *doc,
     return 0;
   }
 
-  animation = ak_heap_calloc(heap, doc, sizeof(*animation));
-  if (!animation) {
-    Py_DECREF(seq);
-    PyErr_NoMemory();
-    return 0;
-  }
-  animation->name = node->name;
-
-  channel_count = 0;
+  animation = NULL;
   for (i = 0; i < count; i++) {
     PyObject *channel_obj;
+    AkAnimation *channel_animation;
 
     channel_obj = PySequence_Fast_GET_ITEM(seq, i);
+    channel_animation = akb_export_animation_for_channel(doc,
+                                                         channel_obj,
+                                                         node->name,
+                                                         &animation);
+    if (!channel_animation) {
+      Py_DECREF(seq);
+      if (!PyErr_Occurred())
+        PyErr_NoMemory();
+      return 0;
+    }
     if (!akb_export_add_transform_animation_channel(doc,
-                                                    animation,
+                                                    channel_animation,
                                                     node,
                                                     channel_obj)) {
       Py_DECREF(seq);
       return 0;
     }
-    channel_count++;
   }
 
   Py_DECREF(seq);
-  if (channel_count > 0)
-    AKB_LIB_APPEND(doc->lib.animations, animation, next);
-
   return 1;
 }
 
@@ -973,6 +1097,8 @@ akb_export_add_material_animation_channel(AkDoc       *doc,
   AkTargetPropertyType target_type;
   int target_int;
   int interpolation_int;
+  unsigned int clip_index_unused;
+  char *clip_name_unused;
   int ok;
 
   if (!doc || !animation || !mat || !mat->surface || !channel_obj)
@@ -981,14 +1107,20 @@ akb_export_add_material_animation_channel(AkDoc       *doc,
   memset(&times_view, 0, sizeof(times_view));
   memset(&values_view, 0, sizeof(values_view));
 
+  clip_index_unused = 0;
+  clip_name_unused = NULL;
   if (!PyArg_ParseTuple(channel_obj,
-                        "iOOni",
+                        "iOOni|Iz",
                         &target_int,
                         &times_obj,
                         &values_obj,
                         &count_py,
-                        &interpolation_int))
+                        &interpolation_int,
+                        &clip_index_unused,
+                        &clip_name_unused))
     return 0;
+  (void)clip_index_unused;
+  (void)clip_name_unused;
 
   if (!akb_export_material_anim_target(mat,
                                        (uint32_t)target_int,
@@ -1095,7 +1227,6 @@ akb_export_add_material_animations(AkDoc      *doc,
   PyObject *seq;
   Py_ssize_t count;
   Py_ssize_t i;
-  int channel_count;
 
   if (!doc || !mat || !animation_obj || animation_obj == Py_None)
     return 1;
@@ -1116,33 +1247,32 @@ akb_export_add_material_animations(AkDoc      *doc,
     return 0;
   }
 
-  animation = ak_heap_calloc(heap, doc, sizeof(*animation));
-  if (!animation) {
-    Py_DECREF(seq);
-    PyErr_NoMemory();
-    return 0;
-  }
-  animation->name = mat->name;
-
-  channel_count = 0;
+  animation = NULL;
   for (i = 0; i < count; i++) {
     PyObject *channel_obj;
+    AkAnimation *channel_animation;
 
     channel_obj = PySequence_Fast_GET_ITEM(seq, i);
+    channel_animation = akb_export_animation_for_channel(doc,
+                                                         channel_obj,
+                                                         mat->name,
+                                                         &animation);
+    if (!channel_animation) {
+      Py_DECREF(seq);
+      if (!PyErr_Occurred())
+        PyErr_NoMemory();
+      return 0;
+    }
     if (!akb_export_add_material_animation_channel(doc,
-                                                   animation,
+                                                   channel_animation,
                                                    mat,
                                                    channel_obj)) {
       Py_DECREF(seq);
       return 0;
     }
-    channel_count++;
   }
 
   Py_DECREF(seq);
-  if (channel_count > 0)
-    AKB_LIB_APPEND(doc->lib.animations, animation, next);
-
   return 1;
 }
 
@@ -1445,4 +1575,3 @@ akb_export_add_skin_to_instance(AkDoc              *doc,
 
   return 1;
 }
-

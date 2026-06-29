@@ -61,6 +61,11 @@ from ..enums import (
     AKB_LOAD_COORD_Y_UP,
     AKB_LOAD_COORD_Z_UP,
 )
+from .animation import (
+    animation_action_slot,
+    animation_channel_with_clip,
+    animation_channels_with_clip,
+)
 from .images import _ExportImageStore
 from .materials import _material_bake_required, _material_tuple
 
@@ -1744,7 +1749,7 @@ def _collect_bone_animations(
         for armature in armatures:
             animation_data = armature.animation_data
             action = animation_data.action if animation_data else None
-            fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(animation_data))) if action else ()
+            fcurves = tuple(_iter_action_fcurves(action, animation_action_slot(animation_data))) if action else ()
             pose = getattr(armature, "pose", None)
             if pose is None:
                 continue
@@ -1779,7 +1784,7 @@ def _object_transform_animation(
     if action is None:
         return None, False
 
-    fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(animation_data)))
+    fcurves = tuple(_iter_action_fcurves(action, animation_action_slot(animation_data)))
     if not fcurves:
         return None, False
 
@@ -1801,13 +1806,16 @@ def _object_transform_animation(
         channels = list(direct)
         if visibility_channel:
             channels.append(visibility_channel)
-        return (tuple(channels) if channels else None), False
+        return (animation_channels_with_clip(channels, action) if channels else None), False
 
     frames = _action_transform_keyframes(action, fcurves)
     if sample_transform:
         frames = _expanded_integer_sample_frames(frames)
     if len(frames) < 2:
-        return ((visibility_channel,) if visibility_channel else None), False
+        return (
+            (animation_channel_with_clip(visibility_channel, action),)
+            if visibility_channel else None
+        ), False
 
     scene = context.scene
     fps = float(scene.render.fps) / float(scene.render.fps_base or 1.0)
@@ -1868,7 +1876,7 @@ def _object_transform_animation(
     if visibility_channel:
         channels.append(visibility_channel)
 
-    return (tuple(channels) if channels else None), changed_frame
+    return (animation_channels_with_clip(channels, action) if channels else None), changed_frame
 
 
 def _pose_bone_transform_animation(
@@ -1886,7 +1894,7 @@ def _pose_bone_transform_animation(
     pose_bone = pose.bones.get(bone_name) if pose else None
     if fcurves is None:
         fcurves = (
-            tuple(_iter_action_fcurves(action, _animation_action_slot(getattr(armature, "animation_data", None))))
+            tuple(_iter_action_fcurves(action, animation_action_slot(getattr(armature, "animation_data", None))))
             if action is not None else ()
         )
     # Pose-bone fcurves store deltas over the rest pose, while exported node
@@ -1985,7 +1993,7 @@ def _pose_bone_transform_animation(
             scale_interp,
         ))
 
-    return (tuple(channels) if channels else None), changed_frame
+    return (animation_channels_with_clip(channels, action) if channels else None), changed_frame
 
 
 def _object_transform_animation_direct(
@@ -1995,7 +2003,7 @@ def _object_transform_animation_direct(
     fcurves: tuple | None = None,
 ) -> tuple | None:
     if fcurves is None:
-        fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(getattr(obj, "animation_data", None))))
+        fcurves = tuple(_iter_action_fcurves(action, animation_action_slot(getattr(obj, "animation_data", None))))
     if not fcurves:
         return None
     if getattr(obj, "constraints", None):
@@ -2662,10 +2670,6 @@ def _action_interpolation(
     return AK_INTERPOLATION_STEP if found else AK_INTERPOLATION_LINEAR
 
 
-def _animation_action_slot(animation_data):
-    return getattr(animation_data, "action_slot", None) if animation_data is not None else None
-
-
 def _iter_action_fcurves(action: bpy.types.Action, slot=None):
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None and len(fcurves) > 0:
@@ -2728,7 +2732,7 @@ def _collect_object_animation_keyframes(obj: bpy.types.Object, frames: set[float
         animation_data = obj.animation_data
         action = animation_data.action if animation_data else None
         if action is not None:
-            for fcurve in _iter_action_fcurves(action, _animation_action_slot(animation_data)):
+            for fcurve in _iter_action_fcurves(action, animation_action_slot(animation_data)):
                 for point in fcurve.keyframe_points:
                     frames.add(float(point.co.x))
 
@@ -3510,7 +3514,7 @@ def _shape_key_weight_animation(
     action = animation_data.action if animation_data else None
     if action is None:
         return None
-    fcurves = tuple(_iter_action_fcurves(action, _animation_action_slot(animation_data)))
+    fcurves = tuple(_iter_action_fcurves(action, animation_action_slot(animation_data)))
     if not fcurves:
         return None
 
@@ -3627,7 +3631,7 @@ def _object_uses_parent_source_visibility(obj: bpy.types.Object) -> bool:
         return True
     animation_data = parent.animation_data
     action = animation_data.action if animation_data else None
-    return action is not None and _action_has_visibility_animation(action, _animation_action_slot(animation_data))
+    return action is not None and _action_has_visibility_animation(action, animation_action_slot(animation_data))
 
 
 def _object_has_ancestor_source_visibility(obj: bpy.types.Object) -> bool:
@@ -3639,7 +3643,7 @@ def _object_has_ancestor_source_visibility(obj: bpy.types.Object) -> bool:
             return True
         animation_data = parent.animation_data
         action = animation_data.action if animation_data else None
-        if action is not None and _action_has_visibility_animation(action, _animation_action_slot(animation_data)):
+        if action is not None and _action_has_visibility_animation(action, animation_action_slot(animation_data)):
             return True
         parent = getattr(parent, "parent", None)
     return False
