@@ -188,6 +188,11 @@ _TRI_LOOP_START_CACHE_LIMIT = 65536
 _ACTION_SLOTS_SUPPORTED: bool | None = None
 _USE_SHARED_ACTION_SLOTS = False
 _PROFILE_MATERIAL_STATS: dict[str, float | int] | None = None
+_ACTIVE_IMPORT_ANIMATION_SCOPE = ""
+_IMPORT_ANIMATION_SCOPE_SERIAL = 0
+_AK_ACTION_CLIP_INDEX_PROP = "assetkit_animation_clip_index"
+_AK_ACTION_CLIP_NAME_PROP = "assetkit_animation_clip_name"
+_AK_ACTION_CLIP_EXPORT_NAME_PROP = "assetkit_animation_clip_export_name"
 _CH_KEYS = (
     "target",
     "target_offset",
@@ -330,9 +335,11 @@ def import_assetkit_file(
     clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
+    global _ACTIVE_IMPORT_ANIMATION_SCOPE
     _reset_action_cache()
     _reset_material_template_cache()
     _reset_material_profile()
+    _ACTIVE_IMPORT_ANIMATION_SCOPE = _new_import_animation_scope(filepath)
     existing_actions = _snapshot_actions(fit_timeline)
     texture_load_mode = _texture_load_mode(load_options)
     profile_detail = _PROFILE_MATERIAL_STATS is not None
@@ -423,7 +430,20 @@ def import_assetkit_file(
             f"elapsed={(time.perf_counter() - finish_started_at) * 1000.0:.3f}ms "
             f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
         )
-    return _import_result_objects(objects, state)
+    result = _import_result_objects(objects, state)
+    _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
+    return result
+
+
+def _new_import_animation_scope(filepath: str) -> str:
+    global _IMPORT_ANIMATION_SCOPE_SERIAL
+
+    stem = _safe_action_name(os.path.splitext(os.path.basename(filepath or ""))[0])
+    if not stem:
+        stem = "AssetKit"
+    serial = _IMPORT_ANIMATION_SCOPE_SERIAL
+    _IMPORT_ANIMATION_SCOPE_SERIAL = serial + 1
+    return f"{stem}_{serial}"
 
 
 def _load_assetkit_scene(
@@ -1885,10 +1905,15 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
     if existing_actions is None:
         return
 
+    preserve_existing = bool(existing_actions)
     if _ACTION_FRAME_RANGES:
         min_frame = min(frame_range[0] for frame_range in _ACTION_FRAME_RANGES.values())
         max_frame = max(frame_range[1] for frame_range in _ACTION_FRAME_RANGES.values())
-        _set_scene_frame_range(min_frame, max_frame)
+        min_frame, max_frame = _set_scene_frame_range(
+            min_frame,
+            max_frame,
+            preserve_existing=preserve_existing,
+        )
         _repeat_short_assetkit_actions(min_frame, max_frame)
         return
 
@@ -1907,18 +1932,31 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
     if min_frame is None or max_frame is None:
         return
 
-    _set_scene_frame_range(min_frame, max_frame)
+    min_frame, max_frame = _set_scene_frame_range(
+        min_frame,
+        max_frame,
+        preserve_existing=preserve_existing,
+    )
     _repeat_short_assetkit_actions(min_frame, max_frame)
 
 
-def _set_scene_frame_range(min_frame: float, max_frame: float) -> None:
+def _set_scene_frame_range(
+    min_frame: float,
+    max_frame: float,
+    preserve_existing: bool = False,
+) -> tuple[float, float]:
     scene = bpy.context.scene
+    if preserve_existing:
+        min_frame = min(float(scene.frame_start), min_frame)
+        max_frame = max(float(scene.frame_end), max_frame)
+
     scene.frame_start = int(math.floor(max(0.0, min_frame)))
     scene.frame_end = max(scene.frame_start + 1, int(math.ceil(max_frame)))
     try:
         scene.frame_current = scene.frame_start
     except Exception:
         pass
+    return float(scene.frame_start), float(scene.frame_end)
 
 
 def _fcurve_has_cycles(fcurve) -> bool:
@@ -4937,12 +4975,15 @@ def _animation_action_for(
     key = (owner.as_pointer(), clip_index, suffix)
     cached = actions.get(key)
     if cached:
-        return cached[1]
+        action = cached[1]
+        _tag_animation_action_clip(action, channel)
+        return action
 
     owner.animation_data_create()
     action = _shared_animation_action(suffix, channel)
     if action is None:
         action = _new_animation_action(_animation_action_name(obj.name, suffix, channel))
+    _tag_animation_action_clip(action, channel)
     if owner.animation_data.action is None or clip_index == 0:
         owner.animation_data.action = action
         slot = _ensure_action_channelbag(action, owner)[0]
@@ -5056,6 +5097,23 @@ def _set_animation_data_slot(owner: bpy.types.ID, slot) -> None:
         pass
 
 
+def _tag_animation_action_clip(action: bpy.types.Action | None, channel: dict | None) -> None:
+    if action is None or channel is None:
+        return
+
+    clip_index = _channel_clip_index(channel)
+    clip_name = _safe_action_name(_channel_clip_name(channel))
+    display_name = clip_name or f"Animation_{clip_index}"
+    scope = _ACTIVE_IMPORT_ANIMATION_SCOPE
+    export_name = f"{scope}_{display_name}" if scope else display_name
+    try:
+        action[_AK_ACTION_CLIP_INDEX_PROP] = int(clip_index)
+        action[_AK_ACTION_CLIP_NAME_PROP] = display_name
+        action[_AK_ACTION_CLIP_EXPORT_NAME_PROP] = export_name[:96]
+    except Exception:
+        pass
+
+
 def _animation_action_name(base_name: str, suffix: str, channel: dict | None) -> str:
     clip_index, clip_name = _channel_action_clip(channel)
     if clip_name:
@@ -5077,8 +5135,6 @@ def _shared_animation_action_name(suffix: str, channel: dict | None) -> str:
 def _channel_action_clip(channel: dict | None) -> tuple[int, str]:
     clip_index = _channel_clip_index(channel)
     clip_name = _safe_action_name(_channel_clip_name(channel))
-    if not clip_name:
-        clip_index = 0
     return clip_index, clip_name
 
 

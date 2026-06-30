@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import bpy
 
+_AK_ACTION_CLIP_EXPORT_NAME_PROP = "assetkit_animation_clip_export_name"
+
 
 def animation_action_slot(animation_data):
     return getattr(animation_data, "action_slot", None) if animation_data is not None else None
@@ -10,6 +12,12 @@ def animation_action_slot(animation_data):
 def animation_clip_name(action: bpy.types.Action | None) -> str:
     if action is None:
         return ""
+    try:
+        value = action.get(_AK_ACTION_CLIP_EXPORT_NAME_PROP)
+        if value:
+            return str(value).strip()[:96]
+    except Exception:
+        pass
     name = str(getattr(action, "name", "") or "").strip()
     return name[:96]
 
