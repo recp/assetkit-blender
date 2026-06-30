@@ -1587,70 +1587,85 @@ akb_animation_add_channel(AkbAnimation *animation,
 }
 
 static int
-akb_animation_collect_walk(AkbAnimation *animation,
+akb_animation_collect_list(AkbAnimation *animation,
                            AkAnimation *source,
                            AkContext *context,
                            const AkbAnimBinding *bindings,
                            int binding_count,
-                           const AkbCoordContext *coord) {
-  struct AkbAnimationStackItem {
-    AkAnimation *source;
-    uint32_t index;
-    const char *name;
-  } stack[256];
-  AkAnimation *next;
+                           const AkbCoordContext *coord,
+                           uint32_t clip_index,
+                           const char *clip_name);
+
+static int
+akb_animation_collect_tree(AkbAnimation *animation,
+                           AkAnimation *source,
+                           AkContext *context,
+                           const AkbAnimBinding *bindings,
+                           int binding_count,
+                           const AkbCoordContext *coord,
+                           uint32_t clip_index,
+                           const char *clip_name) {
   AkChannel *channel;
   AkResolvedTarget resolved;
-  const char *clip_name;
-  uint32_t clip_index;
-  int top;
   int i;
 
-  top = 0;
-  clip_index = 0;
-  clip_name = source ? source->name : NULL;
+  if (!source)
+    return 1;
+
+  for (channel = source->channel; channel; channel = channel->next) {
+    resolved = ak_channelTarget(context, channel);
+    if (!resolved.target)
+      continue;
+
+    for (i = 0; i < binding_count; i++) {
+      if (resolved.target == bindings[i].target) {
+        if (!akb_animation_add_channel(animation,
+                                       channel,
+                                       &resolved,
+                                       &bindings[i],
+                                       coord,
+                                       clip_index,
+                                       clip_name))
+          return 0;
+        break;
+      }
+    }
+  }
+
+  if (source->animation
+      && !akb_animation_collect_list(animation,
+                                     source->animation,
+                                     context,
+                                     bindings,
+                                     binding_count,
+                                     coord,
+                                     clip_index,
+                                     clip_name))
+    return 0;
+
+  return 1;
+}
+
+static int
+akb_animation_collect_list(AkbAnimation *animation,
+                           AkAnimation *source,
+                           AkContext *context,
+                           const AkbAnimBinding *bindings,
+                           int binding_count,
+                           const AkbCoordContext *coord,
+                           uint32_t clip_index,
+                           const char *clip_name) {
   while (source) {
-    for (channel = source->channel; channel; channel = channel->next) {
-      resolved = ak_channelTarget(context, channel);
-      if (!resolved.target)
-        continue;
-
-      for (i = 0; i < binding_count; i++) {
-        if (resolved.target == bindings[i].target) {
-          if (!akb_animation_add_channel(animation,
-                                         channel,
-                                         &resolved,
-                                         &bindings[i],
-                                         coord,
-                                         clip_index,
-                                         clip_name))
-            return 0;
-          break;
-        }
-      }
-    }
-
-    if (source->animation) {
-      next = source->next;
-      if (next && top < 256) {
-        stack[top].source = next;
-        stack[top].index = clip_index + 1;
-        stack[top].name = next->name;
-        top++;
-      }
-      source = source->animation;
-    } else if (source->next) {
-      source = source->next;
-      clip_index++;
-      clip_name = source->name;
-    } else if (top > 0) {
-      top--;
-      source = stack[top].source;
-      clip_index = stack[top].index;
-      clip_name = stack[top].name;
-    } else {
-      source = NULL;
-    }
+    if (!akb_animation_collect_tree(animation,
+                                    source,
+                                    context,
+                                    bindings,
+                                    binding_count,
+                                    coord,
+                                    clip_index,
+                                    clip_name))
+      return 0;
+    source = source->next;
   }
 
   return 1;
@@ -1695,56 +1710,251 @@ akb_animation_index_push(AkbAnimationIndex *index,
 }
 
 static int
-akb_animation_index_collect_walk(AkbAnimationIndex *index,
+akb_animation_index_collect_list(AkbAnimationIndex *index,
                                  AkAnimation *source,
-                                 AkContext *context) {
-  struct AkbAnimationStackItem {
-    AkAnimation *source;
-    uint32_t index;
-    const char *name;
-  } stack[256];
-  AkAnimation *next;
+                                 AkContext *context,
+                                 uint32_t clip_index,
+                                 const char *clip_name);
+
+static int
+akb_animation_index_collect_tree(AkbAnimationIndex *index,
+                                 AkAnimation *source,
+                                 AkContext *context,
+                                 uint32_t clip_index,
+                                 const char *clip_name) {
   AkChannel *channel;
   AkResolvedTarget resolved;
-  const char *clip_name;
-  uint32_t clip_index;
-  int top;
 
-  top = 0;
-  clip_index = 0;
-  clip_name = source ? source->name : NULL;
+  if (!source)
+    return 1;
+
+  for (channel = source->channel; channel; channel = channel->next) {
+    resolved = ak_channelTarget(context, channel);
+    if (!resolved.target)
+      continue;
+    if (!akb_animation_index_push(index, channel, &resolved, clip_index, clip_name))
+      return 0;
+  }
+
+  if (source->animation
+      && !akb_animation_index_collect_list(index,
+                                           source->animation,
+                                           context,
+                                           clip_index,
+                                           clip_name))
+    return 0;
+
+  return 1;
+}
+
+static int
+akb_animation_index_collect_list(AkbAnimationIndex *index,
+                                 AkAnimation *source,
+                                 AkContext *context,
+                                 uint32_t clip_index,
+                                 const char *clip_name) {
   while (source) {
-    for (channel = source->channel; channel; channel = channel->next) {
-      resolved = ak_channelTarget(context, channel);
-      if (!resolved.target)
-        continue;
-      if (!akb_animation_index_push(index, channel, &resolved, clip_index, clip_name))
-        return 0;
+    if (!akb_animation_index_collect_tree(index,
+                                          source,
+                                          context,
+                                          clip_index,
+                                          clip_name))
+      return 0;
+    source = source->next;
+  }
+
+  return 1;
+}
+
+static int
+akb_animation_channels_conflict(AkContext *context,
+                                AkChannel *a,
+                                AkChannel *b) {
+  AkResolvedTarget rta;
+  AkResolvedTarget rtb;
+
+  if (!a || !b || a == b)
+    return 0;
+
+  rta = ak_channelTarget(context, a);
+  rtb = ak_channelTarget(context, b);
+  if (!rta.target || !rtb.target || rta.target != rtb.target)
+    return 0;
+
+  if (!rta.isPartial || !rtb.isPartial)
+    return 1;
+
+  return rta.off == rtb.off;
+}
+
+static int
+akb_animation_subtree_conflicts_channel(AkContext *context,
+                                        AkAnimation *source,
+                                        AkChannel *channel);
+
+static int
+akb_animation_list_conflicts_channel(AkContext *context,
+                                     AkAnimation *source,
+                                     AkChannel *channel) {
+  while (source) {
+    if (akb_animation_subtree_conflicts_channel(context, source, channel))
+      return 1;
+    source = source->next;
+  }
+
+  return 0;
+}
+
+static int
+akb_animation_subtree_conflicts_channel(AkContext *context,
+                                        AkAnimation *source,
+                                        AkChannel *channel) {
+  AkChannel *other;
+
+  if (!source)
+    return 0;
+
+  for (other = source->channel; other; other = other->next) {
+    if (akb_animation_channels_conflict(context, channel, other))
+      return 1;
+  }
+
+  if (source->animation
+      && akb_animation_list_conflicts_channel(context,
+                                              source->animation,
+                                              channel))
+    return 1;
+
+  return 0;
+}
+
+static int
+akb_animation_subtrees_conflict(AkContext *context,
+                                AkAnimation *a,
+                                AkAnimation *b);
+
+static int
+akb_animation_list_conflicts_subtree(AkContext *context,
+                                     AkAnimation *list,
+                                     AkAnimation *b) {
+  while (list) {
+    if (akb_animation_subtrees_conflict(context, list, b))
+      return 1;
+    list = list->next;
+  }
+
+  return 0;
+}
+
+static int
+akb_animation_subtrees_conflict(AkContext *context,
+                                AkAnimation *a,
+                                AkAnimation *b) {
+  AkChannel *channel;
+
+  if (!a || !b || a == b)
+    return 0;
+
+  for (channel = a->channel; channel; channel = channel->next) {
+    if (akb_animation_subtree_conflicts_channel(context, b, channel))
+      return 1;
+  }
+
+  if (a->animation
+      && akb_animation_list_conflicts_subtree(context, a->animation, b))
+    return 1;
+
+  return 0;
+}
+
+static size_t
+akb_animation_top_level_count(const AkDoc *doc) {
+  const AkAnimation *animation;
+  size_t count;
+
+  count = 0;
+  if (!doc)
+    return 0;
+
+  for (animation = doc->lib.animations.first; animation; animation = animation->next)
+    count++;
+
+  return count;
+}
+
+static int
+akb_animation_index_build_collada(AkbAnimationIndex *index,
+                                  AkDoc *doc,
+                                  AkContext *context) {
+  AkAnimation **animations;
+  const char **group_names;
+  uint32_t *groups;
+  AkAnimation *animation;
+  size_t count;
+  size_t i;
+  size_t j;
+  uint32_t group_count;
+
+  count = akb_animation_top_level_count(doc);
+  if (!count)
+    return 1;
+
+  animations = (AkAnimation **)calloc(count, sizeof(*animations));
+  group_names = (const char **)calloc(count, sizeof(*group_names));
+  groups = (uint32_t *)calloc(count, sizeof(*groups));
+  if (!animations || !group_names || !groups) {
+    free(animations);
+    free(group_names);
+    free(groups);
+    return 0;
+  }
+
+  i = 0;
+  for (animation = doc->lib.animations.first; animation; animation = animation->next)
+    animations[i++] = animation;
+
+  group_count = 0;
+  for (i = 0; i < count; i++) {
+    uint32_t group;
+
+    for (group = 0; group < group_count; group++) {
+      int conflicts = 0;
+      for (j = 0; j < i; j++) {
+        if (groups[j] != group)
+          continue;
+        if (akb_animation_subtrees_conflict(context, animations[i], animations[j])) {
+          conflicts = 1;
+          break;
+        }
+      }
+      if (!conflicts)
+        break;
     }
 
-    if (source->animation) {
-      next = source->next;
-      if (next && top < 256) {
-        stack[top].source = next;
-        stack[top].index = clip_index + 1;
-        stack[top].name = next->name;
-        top++;
-      }
-      source = source->animation;
-    } else if (source->next) {
-      source = source->next;
-      clip_index++;
-      clip_name = source->name;
-    } else if (top > 0) {
-      top--;
-      source = stack[top].source;
-      clip_index = stack[top].index;
-      clip_name = stack[top].name;
-    } else {
-      source = NULL;
+    if (group == group_count) {
+      group_names[group_count] = animations[i]->name;
+      group_count++;
+    }
+
+    groups[i] = group;
+  }
+
+  for (i = 0; i < count; i++) {
+    if (!akb_animation_index_collect_tree(index,
+                                          animations[i],
+                                          context,
+                                          groups[i],
+                                          group_names[groups[i]])) {
+      free(animations);
+      free(group_names);
+      free(groups);
+      return 0;
     }
   }
 
+  free(animations);
+  free(group_names);
+  free(groups);
   return 1;
 }
 
@@ -1752,6 +1962,7 @@ static int
 akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
   AkAnimation *animation;
   AkContext context;
+  uint32_t clip_index;
 
   if (!index || !doc)
     return 1;
@@ -1760,8 +1971,21 @@ akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
   memset(&context, 0, sizeof(context));
   context.doc = doc;
 
-  for (animation = doc->lib.animations.first; animation; animation = animation->next) {
-    if (!akb_animation_index_collect_walk(index, animation, &context)) {
+  if (doc->inf && doc->inf->ftype == AK_FILE_TYPE_COLLADA) {
+    if (!akb_animation_index_build_collada(index, doc, &context)) {
+      akb_animation_index_free(index);
+      return 0;
+    }
+    return 1;
+  }
+
+  clip_index = 0;
+  for (animation = doc->lib.animations.first; animation; animation = animation->next, clip_index++) {
+    if (!akb_animation_index_collect_tree(index,
+                                          animation,
+                                          &context,
+                                          clip_index,
+                                          animation->name)) {
       akb_animation_index_free(index);
       return 0;
     }
@@ -1803,6 +2027,60 @@ akb_animation_collect_index(AkbAnimation *animation,
   return 1;
 }
 
+static int
+akb_animation_list_has_channel(AkAnimation *source, AkChannel *channel);
+
+static int
+akb_animation_subtree_has_channel(AkAnimation *source, AkChannel *channel) {
+  AkChannel *item;
+
+  if (!source || !channel)
+    return 0;
+
+  for (item = source->channel; item; item = item->next) {
+    if (item == channel)
+      return 1;
+  }
+
+  if (source->animation
+      && akb_animation_list_has_channel(source->animation, channel))
+    return 1;
+
+  return 0;
+}
+
+static int
+akb_animation_list_has_channel(AkAnimation *source, AkChannel *channel) {
+  while (source) {
+    if (akb_animation_subtree_has_channel(source, channel))
+      return 1;
+    source = source->next;
+  }
+
+  return 0;
+}
+
+static int
+akb_animation_index_clip_for_source(const AkbAnimationIndex *index,
+                                    AkAnimation *source,
+                                    uint32_t *clip_index,
+                                    const char **clip_name) {
+  size_t i;
+
+  if (!index || !source || !clip_index || !clip_name)
+    return 0;
+
+  for (i = 0; i < index->count; i++) {
+    if (akb_animation_subtree_has_channel(source, index->items[i].channel)) {
+      *clip_index = index->items[i].clip_index;
+      *clip_name = index->items[i].clip_name;
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
 static AkbAnimation *
 akb_animation_new_for_bindings(AkDoc *doc,
                                AkbSharedDoc *doc_owner,
@@ -1814,6 +2092,7 @@ akb_animation_new_for_bindings(AkDoc *doc,
   AkbAnimation *animation;
   AkAnimation *source;
   AkContext context;
+  uint32_t clip_index;
 
   *ok = 1;
   if (!doc || !bindings || binding_count <= 0)
@@ -1845,13 +2124,16 @@ akb_animation_new_for_bindings(AkDoc *doc,
     memset(&context, 0, sizeof(context));
     context.doc = doc;
 
-    for (source = doc->lib.animations.first; source; source = source->next) {
-      if (!akb_animation_collect_walk(animation,
+    clip_index = 0;
+    for (source = doc->lib.animations.first; source; source = source->next, clip_index++) {
+      if (!akb_animation_collect_tree(animation,
                                       source,
                                       &context,
                                       bindings,
                                       binding_count,
-                                      coord)) {
+                                      coord,
+                                      clip_index,
+                                      source->name)) {
         akb_animation_release(animation);
         *ok = 0;
         return NULL;
@@ -2715,12 +2997,15 @@ akb_animation_append_baked_clip(AkbAnimation *animation,
 static AkbAnimation *
 akb_animation_new_baked_indexed(AkDoc *doc,
                                 AkbSharedDoc *doc_owner,
+                                const AkbAnimationIndex *index,
                                 AkNode *node,
                                 int *ok) {
   AkbAnimation *animation;
   AkAnimation *source;
   AkBakedAnimation *baked;
+  const char *clip_name;
   uint32_t clip_index;
+  uint32_t source_index;
 
   if (!doc || !doc->lib.animations.first || !node)
     return NULL;
@@ -2735,16 +3020,22 @@ akb_animation_new_baked_indexed(AkDoc *doc,
   animation->doc_owner = doc_owner;
   akb_shared_doc_retain(doc_owner);
 
-  clip_index = 0;
-  for (source = doc->lib.animations.first; source; source = source->next, clip_index++) {
+  source_index = 0;
+  for (source = doc->lib.animations.first; source; source = source->next, source_index++) {
     baked = ak_nodeBakeAnimationForAnimation(doc, node, source);
     if (!baked)
       continue;
 
+    clip_index = source_index;
+    clip_name = source->name;
+    (void)akb_animation_index_clip_for_source(index,
+                                              source,
+                                              &clip_index,
+                                              &clip_name);
     if (!akb_animation_append_baked_clip(animation,
                                         baked,
                                         clip_index,
-                                        source->name)) {
+                                        clip_name)) {
       ak_free(baked);
       akb_animation_release(animation);
       *ok = 0;
@@ -2773,6 +3064,7 @@ akb_animation_new(AkDoc *doc,
   AkAnimation *source;
   AkbAnimBinding bindings[64];
   AkContext context;
+  uint32_t clip_index;
   int binding_count;
   int needs_bake;
   int is_gltf;
@@ -2781,12 +3073,15 @@ akb_animation_new(AkDoc *doc,
   if ((index && !index->count) || (!index && (!doc || !doc->lib.animations.first)))
     return NULL;
 
-  is_gltf = doc && doc->inf && doc->inf->ftype == AK_FILE_TYPE_GLTF;
+  is_gltf = doc
+            && doc->inf
+            && (doc->inf->ftype == AK_FILE_TYPE_GLTF
+                || doc->inf->ftype == AK_FILE_TYPE_GLB);
   needs_bake = ak_nodeNeedsBaking(node) || (!is_gltf && akb_node_has_rotate(node));
 
   if (needs_bake) {
     animation = index
-      ? akb_animation_new_baked_indexed(doc, doc_owner, node, ok)
+      ? akb_animation_new_baked_indexed(doc, doc_owner, index, node, ok)
       : akb_animation_new_baked(doc, doc_owner, node, ok);
     if (!animation || !*ok)
       return animation;
@@ -2830,13 +3125,16 @@ akb_animation_new(AkDoc *doc,
     memset(&context, 0, sizeof(context));
     context.doc = doc;
 
-    for (source = doc->lib.animations.first; source; source = source->next) {
-      if (!akb_animation_collect_walk(animation,
+    clip_index = 0;
+    for (source = doc->lib.animations.first; source; source = source->next, clip_index++) {
+      if (!akb_animation_collect_tree(animation,
                                       source,
                                       &context,
                                       bindings,
                                       binding_count,
-                                      coord)) {
+                                      coord,
+                                      clip_index,
+                                      source->name)) {
         akb_animation_release(animation);
         *ok = 0;
         return NULL;
@@ -2863,6 +3161,7 @@ akb_morph_animation_new(AkDoc *doc,
   AkbAnimBinding binding = {0};
   AkAnimation *source;
   AkContext context;
+  uint32_t clip_index;
 
   *ok = 1;
   if (!morpher || !morpher->morph || !morpher->morph->targetCount)
@@ -2898,13 +3197,16 @@ akb_morph_animation_new(AkDoc *doc,
     memset(&context, 0, sizeof(context));
     context.doc = doc;
 
-    for (source = doc->lib.animations.first; source; source = source->next) {
-      if (!akb_animation_collect_walk(animation,
+    clip_index = 0;
+    for (source = doc->lib.animations.first; source; source = source->next, clip_index++) {
+      if (!akb_animation_collect_tree(animation,
                                       source,
                                       &context,
                                       &binding,
                                       1,
-                                      coord)) {
+                                      coord,
+                                      clip_index,
+                                      source->name)) {
         akb_animation_release(animation);
         *ok = 0;
         return NULL;
