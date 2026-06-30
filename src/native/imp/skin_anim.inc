@@ -1767,194 +1767,21 @@ akb_animation_index_collect_list(AkbAnimationIndex *index,
 }
 
 static int
-akb_animation_channels_conflict(AkContext *context,
-                                AkChannel *a,
-                                AkChannel *b) {
-  AkResolvedTarget rta;
-  AkResolvedTarget rtb;
-
-  if (!a || !b || a == b)
-    return 0;
-
-  rta = ak_channelTarget(context, a);
-  rtb = ak_channelTarget(context, b);
-  if (!rta.target || !rtb.target || rta.target != rtb.target)
-    return 0;
-
-  if (!rta.isPartial || !rtb.isPartial)
-    return 1;
-
-  return rta.off == rtb.off;
-}
-
-static int
-akb_animation_subtree_conflicts_channel(AkContext *context,
-                                        AkAnimation *source,
-                                        AkChannel *channel);
-
-static int
-akb_animation_list_conflicts_channel(AkContext *context,
-                                     AkAnimation *source,
-                                     AkChannel *channel) {
-  while (source) {
-    if (akb_animation_subtree_conflicts_channel(context, source, channel))
-      return 1;
-    source = source->next;
-  }
-
-  return 0;
-}
-
-static int
-akb_animation_subtree_conflicts_channel(AkContext *context,
-                                        AkAnimation *source,
-                                        AkChannel *channel) {
-  AkChannel *other;
-
-  if (!source)
-    return 0;
-
-  for (other = source->channel; other; other = other->next) {
-    if (akb_animation_channels_conflict(context, channel, other))
-      return 1;
-  }
-
-  if (source->animation
-      && akb_animation_list_conflicts_channel(context,
-                                              source->animation,
-                                              channel))
-    return 1;
-
-  return 0;
-}
-
-static int
-akb_animation_subtrees_conflict(AkContext *context,
-                                AkAnimation *a,
-                                AkAnimation *b);
-
-static int
-akb_animation_list_conflicts_subtree(AkContext *context,
-                                     AkAnimation *list,
-                                     AkAnimation *b) {
-  while (list) {
-    if (akb_animation_subtrees_conflict(context, list, b))
-      return 1;
-    list = list->next;
-  }
-
-  return 0;
-}
-
-static int
-akb_animation_subtrees_conflict(AkContext *context,
-                                AkAnimation *a,
-                                AkAnimation *b) {
-  AkChannel *channel;
-
-  if (!a || !b || a == b)
-    return 0;
-
-  for (channel = a->channel; channel; channel = channel->next) {
-    if (akb_animation_subtree_conflicts_channel(context, b, channel))
-      return 1;
-  }
-
-  if (a->animation
-      && akb_animation_list_conflicts_subtree(context, a->animation, b))
-    return 1;
-
-  return 0;
-}
-
-static size_t
-akb_animation_top_level_count(const AkDoc *doc) {
-  const AkAnimation *animation;
-  size_t count;
-
-  count = 0;
-  if (!doc)
-    return 0;
-
-  for (animation = doc->lib.animations.first; animation; animation = animation->next)
-    count++;
-
-  return count;
-}
-
-static int
 akb_animation_index_build_collada(AkbAnimationIndex *index,
                                   AkDoc *doc,
                                   AkContext *context) {
-  AkAnimation **animations;
-  const char **group_names;
-  uint32_t *groups;
   AkAnimation *animation;
-  size_t count;
-  size_t i;
-  size_t j;
-  uint32_t group_count;
 
-  count = akb_animation_top_level_count(doc);
-  if (!count)
-    return 1;
-
-  animations = (AkAnimation **)calloc(count, sizeof(*animations));
-  group_names = (const char **)calloc(count, sizeof(*group_names));
-  groups = (uint32_t *)calloc(count, sizeof(*groups));
-  if (!animations || !group_names || !groups) {
-    free(animations);
-    free(group_names);
-    free(groups);
-    return 0;
-  }
-
-  i = 0;
-  for (animation = doc->lib.animations.first; animation; animation = animation->next)
-    animations[i++] = animation;
-
-  group_count = 0;
-  for (i = 0; i < count; i++) {
-    uint32_t group;
-
-    for (group = 0; group < group_count; group++) {
-      int conflicts = 0;
-      for (j = 0; j < i; j++) {
-        if (groups[j] != group)
-          continue;
-        if (akb_animation_subtrees_conflict(context, animations[i], animations[j])) {
-          conflicts = 1;
-          break;
-        }
-      }
-      if (!conflicts)
-        break;
-    }
-
-    if (group == group_count) {
-      group_names[group_count] = animations[i]->name;
-      group_count++;
-    }
-
-    groups[i] = group;
-  }
-
-  for (i = 0; i < count; i++) {
+  for (animation = doc->lib.animations.first; animation; animation = animation->next) {
     if (!akb_animation_index_collect_tree(index,
-                                          animations[i],
+                                          animation,
                                           context,
-                                          groups[i],
-                                          group_names[groups[i]])) {
-      free(animations);
-      free(group_names);
-      free(groups);
+                                          0,
+                                          NULL)) {
       return 0;
     }
   }
 
-  free(animations);
-  free(group_names);
-  free(groups);
   return 1;
 }
 

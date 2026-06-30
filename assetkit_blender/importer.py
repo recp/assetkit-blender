@@ -186,6 +186,7 @@ _BOOL_ARRAYS: dict[tuple[int, int], array] = {}
 _TRI_LOOP_START_ARRAYS: dict[int, array] = {}
 _TRI_LOOP_START_CACHE_LIMIT = 65536
 _ACTION_SLOTS_SUPPORTED: bool | None = None
+_USE_SHARED_ACTION_SLOTS = False
 _PROFILE_MATERIAL_STATS: dict[str, float | int] | None = None
 _CH_KEYS = (
     "target",
@@ -1744,10 +1745,57 @@ def _select_imported_objects(objects: list[bpy.types.Object]) -> None:
     if not objects:
         return
 
+    selection = _import_selection_objects(objects)
     _clear_selection()
-    for obj in objects:
+    for obj in selection:
         obj.select_set(True)
-    bpy.context.view_layer.objects.active = objects[-1]
+    bpy.context.view_layer.objects.active = selection[-1]
+
+
+def _import_selection_objects(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
+    selection: list[bpy.types.Object] = []
+    seen: set[int] = set()
+    animated: list[bpy.types.Object] = []
+    animated_seen: set[int] = set()
+
+    def append(obj: bpy.types.Object | None) -> None:
+        if obj is None or obj.name not in bpy.data.objects:
+            return
+        key = obj.as_pointer()
+        if key in seen:
+            return
+        seen.add(key)
+        selection.append(obj)
+
+    def mark_animated(obj: bpy.types.Object | None) -> None:
+        if obj is None or obj.name not in bpy.data.objects:
+            return
+        anim_data = getattr(obj, "animation_data", None)
+        if anim_data is None or getattr(anim_data, "action", None) is None:
+            return
+        key = obj.as_pointer()
+        if key in animated_seen:
+            return
+        animated_seen.add(key)
+        animated.append(obj)
+
+    for obj in objects:
+        append(obj)
+        mark_animated(obj)
+
+        parent = obj.parent
+        while parent is not None:
+            mark_animated(parent)
+            parent = parent.parent
+
+        for modifier in getattr(obj, "modifiers", ()) or ():
+            if getattr(modifier, "type", "") == "ARMATURE":
+                mark_animated(getattr(modifier, "object", None))
+
+    for obj in animated:
+        append(obj)
+
+    return selection or objects
 
 
 def _finish_import(
@@ -1841,6 +1889,7 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
         min_frame = min(frame_range[0] for frame_range in _ACTION_FRAME_RANGES.values())
         max_frame = max(frame_range[1] for frame_range in _ACTION_FRAME_RANGES.values())
         _set_scene_frame_range(min_frame, max_frame)
+        _repeat_short_assetkit_actions(min_frame, max_frame)
         return
 
     min_frame: float | None = None
@@ -1859,6 +1908,7 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
         return
 
     _set_scene_frame_range(min_frame, max_frame)
+    _repeat_short_assetkit_actions(min_frame, max_frame)
 
 
 def _set_scene_frame_range(min_frame: float, max_frame: float) -> None:
@@ -1869,6 +1919,45 @@ def _set_scene_frame_range(min_frame: float, max_frame: float) -> None:
         scene.frame_current = scene.frame_start
     except Exception:
         pass
+
+
+def _fcurve_has_cycles(fcurve) -> bool:
+    for modifier in getattr(fcurve, "modifiers", ()) or ():
+        if getattr(modifier, "type", None) == "CYCLES":
+            return True
+    return False
+
+
+def _add_repeat_after_cycle(fcurve) -> None:
+    if _fcurve_has_cycles(fcurve):
+        return
+    try:
+        modifier = fcurve.modifiers.new(type="CYCLES")
+    except Exception:
+        return
+    for attr, value in (("mode_before", "NONE"), ("mode_after", "REPEAT")):
+        try:
+            setattr(modifier, attr, value)
+        except Exception:
+            pass
+
+
+def _repeat_short_assetkit_actions(min_frame: float, max_frame: float) -> None:
+    if max_frame <= min_frame:
+        return
+
+    eps = 1.0e-3
+    for action in bpy.data.actions:
+        if "_AssetKit" not in action.name:
+            continue
+        frame_range = _action_frame_range(action)
+        if frame_range is None:
+            continue
+        start, end = frame_range
+        if start > min_frame + eps or end >= max_frame - eps:
+            continue
+        for fcurve in _iter_action_fcurves(action):
+            _add_repeat_after_cycle(fcurve)
 
 
 def _action_frame_range(action: bpy.types.Action, owner: bpy.types.ID | None = None) -> tuple[float, float] | None:
@@ -3852,7 +3941,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
     for record in records:
         armature = record["armature"]
         _match_object_space(armature, record["armature_source"])
-        _hide_helper_object(armature)
+        _keep_helper_object_visible(armature)
         _hide_bind_pose_skin_helpers(record["items"])
     hide_ms = lap_ms()
 
@@ -4316,6 +4405,18 @@ def _hide_helper_object(obj: bpy.types.Object, hide_empty: bool = False) -> None
     obj.hide_viewport = True
     obj.hide_render = True
     obj["assetkit_helper_hidden"] = True
+
+
+def _keep_helper_object_visible(obj: bpy.types.Object) -> None:
+    obj["assetkit_helper_object"] = True
+    obj.hide_select = False
+    obj.hide_viewport = False
+    obj.hide_render = False
+    if obj.get("assetkit_helper_hidden"):
+        try:
+            del obj["assetkit_helper_hidden"]
+        except Exception:
+            obj["assetkit_helper_hidden"] = False
 
 
 def _hide_empty_helper_object(obj: bpy.types.Object) -> None:
@@ -4852,6 +4953,8 @@ def _animation_action_for(
 
 def _shared_animation_action(suffix: str, channel: dict | None) -> bpy.types.Action | None:
     global _ACTION_SLOTS_SUPPORTED
+    if not _USE_SHARED_ACTION_SLOTS:
+        return None
     if _ACTION_SLOTS_SUPPORTED is False:
         return None
 
@@ -5782,7 +5885,7 @@ def _create_skin_armature(
         _match_object_space(armature, armature_source)
     else:
         _match_object_space(armature, armature_source)
-    _hide_helper_object(armature)
+    _keep_helper_object_visible(armature)
 
     if armature not in previous_selection:
         armature.select_set(False)
