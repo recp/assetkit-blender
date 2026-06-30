@@ -1914,7 +1914,6 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
             max_frame,
             preserve_existing=preserve_existing,
         )
-        _repeat_short_assetkit_actions(min_frame, max_frame)
         return
 
     min_frame: float | None = None
@@ -1937,7 +1936,6 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
         max_frame,
         preserve_existing=preserve_existing,
     )
-    _repeat_short_assetkit_actions(min_frame, max_frame)
 
 
 def _set_scene_frame_range(
@@ -1957,45 +1955,6 @@ def _set_scene_frame_range(
     except Exception:
         pass
     return float(scene.frame_start), float(scene.frame_end)
-
-
-def _fcurve_has_cycles(fcurve) -> bool:
-    for modifier in getattr(fcurve, "modifiers", ()) or ():
-        if getattr(modifier, "type", None) == "CYCLES":
-            return True
-    return False
-
-
-def _add_repeat_after_cycle(fcurve) -> None:
-    if _fcurve_has_cycles(fcurve):
-        return
-    try:
-        modifier = fcurve.modifiers.new(type="CYCLES")
-    except Exception:
-        return
-    for attr, value in (("mode_before", "NONE"), ("mode_after", "REPEAT")):
-        try:
-            setattr(modifier, attr, value)
-        except Exception:
-            pass
-
-
-def _repeat_short_assetkit_actions(min_frame: float, max_frame: float) -> None:
-    if max_frame <= min_frame:
-        return
-
-    eps = 1.0e-3
-    for action in bpy.data.actions:
-        if "_AssetKit" not in action.name:
-            continue
-        frame_range = _action_frame_range(action)
-        if frame_range is None:
-            continue
-        start, end = frame_range
-        if start > min_frame + eps or end >= max_frame - eps:
-            continue
-        for fcurve in _iter_action_fcurves(action):
-            _add_repeat_after_cycle(fcurve)
 
 
 def _action_frame_range(action: bpy.types.Action, owner: bpy.types.ID | None = None) -> tuple[float, float] | None:
