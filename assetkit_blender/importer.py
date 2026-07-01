@@ -341,6 +341,8 @@ def import_assetkit_file(
     _reset_material_profile()
     _ACTIVE_IMPORT_ANIMATION_SCOPE = _new_import_animation_scope(filepath)
     existing_actions = _snapshot_actions(fit_timeline)
+    existing_frame_range = _snapshot_scene_frame_range(fit_timeline)
+    scene_had_timeline_content = _scene_has_timeline_content(bpy.context.scene) if fit_timeline else False
     texture_load_mode = _texture_load_mode(load_options)
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     defer_custom_normals = _defer_custom_normals(load_options, shading_mode)
@@ -423,6 +425,8 @@ def import_assetkit_file(
         set_viewport_shading,
         clean_viewport_overlays,
         existing_actions,
+        existing_frame_range,
+        scene_had_timeline_content,
     )
     if profile_detail:
         _profile_log(
@@ -1830,6 +1834,8 @@ def _finish_import(
     set_viewport_shading: bool,
     clean_viewport_overlays: bool,
     existing_actions: set[bpy.types.Action] | None,
+    existing_frame_range: tuple[float, float] | None,
+    scene_had_timeline_content: bool,
 ) -> None:
     _apply_import_placement(objects, placement_mode, root_objects)
     if select_imported:
@@ -1837,7 +1843,11 @@ def _finish_import(
     _focus_imported_objects(objects, focus_mode, scene_was_empty, collection, focus_camera)
     if set_viewport_shading and scene_was_empty:
         _set_viewport_material_preview(clean_viewport_overlays)
-    _fit_timeline_to_new_actions(existing_actions)
+    _fit_timeline_to_new_actions(
+        existing_actions,
+        existing_frame_range,
+        preserve_existing_scene=(not scene_was_empty and scene_had_timeline_content),
+    )
 
 
 def _clear_selection() -> None:
@@ -1901,11 +1911,26 @@ def _snapshot_actions(enabled: bool) -> set[bpy.types.Action] | None:
     return set(bpy.data.actions) if enabled else None
 
 
-def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None) -> None:
+def _snapshot_scene_frame_range(enabled: bool) -> tuple[float, float] | None:
+    if not enabled:
+        return None
+    scene = bpy.context.scene
+    return float(scene.frame_start), float(scene.frame_end)
+
+
+def _scene_has_timeline_content(scene: bpy.types.Scene) -> bool:
+    return any(True for _obj in scene.objects)
+
+
+def _fit_timeline_to_new_actions(
+    existing_actions: set[bpy.types.Action] | None,
+    existing_frame_range: tuple[float, float] | None,
+    preserve_existing_scene: bool = False,
+) -> None:
     if existing_actions is None:
         return
 
-    preserve_existing = bool(existing_actions)
+    preserve_existing = preserve_existing_scene or bool(existing_actions)
     if _ACTION_FRAME_RANGES:
         min_frame = min(frame_range[0] for frame_range in _ACTION_FRAME_RANGES.values())
         max_frame = max(frame_range[1] for frame_range in _ACTION_FRAME_RANGES.values())
@@ -1913,6 +1938,7 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
             min_frame,
             max_frame,
             preserve_existing=preserve_existing,
+            existing_frame_range=existing_frame_range,
         )
         return
 
@@ -1935,6 +1961,7 @@ def _fit_timeline_to_new_actions(existing_actions: set[bpy.types.Action] | None)
         min_frame,
         max_frame,
         preserve_existing=preserve_existing,
+        existing_frame_range=existing_frame_range,
     )
 
 
@@ -1942,11 +1969,17 @@ def _set_scene_frame_range(
     min_frame: float,
     max_frame: float,
     preserve_existing: bool = False,
+    existing_frame_range: tuple[float, float] | None = None,
 ) -> tuple[float, float]:
     scene = bpy.context.scene
     if preserve_existing:
-        min_frame = min(float(scene.frame_start), min_frame)
-        max_frame = max(float(scene.frame_end), max_frame)
+        existing_start, existing_end = (
+            existing_frame_range
+            if existing_frame_range is not None
+            else (float(scene.frame_start), float(scene.frame_end))
+        )
+        min_frame = min(existing_start, min_frame)
+        max_frame = max(existing_end, max_frame)
 
     scene.frame_start = int(math.floor(max(0.0, min_frame)))
     scene.frame_end = max(scene.frame_start + 1, int(math.ceil(max_frame)))
@@ -5135,18 +5168,26 @@ def _stash_animation_action(owner: bpy.types.ID, action: bpy.types.Action) -> No
         if any(strip.action == action for strip in track.strips):
             return
 
+    frame_range = _action_frame_range(action, owner)
+    strip_start = frame_range[0] if frame_range is not None else float(bpy.context.scene.frame_start)
+
     try:
         track = tracks.new(prev=None)
         track.name = action.name
-        strip = track.strips.new(action.name, bpy.context.scene.frame_start, action)
+        strip = track.strips.new(action.name, int(math.floor(strip_start)), action)
     except Exception:
         return
 
     _set_nla_strip_action_slot(strip, action, owner)
-    frame_range = _action_frame_range(action, owner)
     if frame_range is not None:
-        strip.action_frame_start = frame_range[0]
-        strip.action_frame_end = frame_range[1]
+        start, end = frame_range
+        try:
+            strip.action_frame_start = start
+            strip.action_frame_end = end
+            strip.frame_start = start
+            strip.frame_end = max(start, end)
+        except Exception:
+            pass
     track.lock = True
     track.mute = True
 
