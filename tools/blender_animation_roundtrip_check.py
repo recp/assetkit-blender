@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise AssetKit Blender animation glTF -> DAE -> reimport regressions.
+"""Exercise AssetKit Blender animation/skinning glTF -> DAE -> reimport regressions.
 
 Run with:
   /Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
@@ -67,7 +67,20 @@ ANIMATION_ASSETS = (
             ),
         ),
     ),
+    (
+        "BrainStem",
+        Path("Models/BrainStem/glTF/BrainStem.gltf"),
+        Path("gltf/BrainStem/glTF/BrainStem.gltf"),
+        "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BrainStem/glTF/BrainStem.gltf",
+        (
+            (
+                Path("gltf/BrainStem/glTF/BrainStem0.bin"),
+                "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BrainStem/glTF/BrainStem0.bin",
+            ),
+        ),
+    ),
 )
+SKINNED_ASSETS = frozenset(("BrainStem", "CesiumMan"))
 
 
 def download_file(url: str, out_path: Path) -> None:
@@ -235,11 +248,23 @@ def scene_animation_summary(label: str) -> dict:
     linked = linked_actions()
     action_rows = [action_summary(action) for action in actions]
     unlinked = [action.name for action in actions if action not in linked and action.users <= 0]
+    armatures = [obj.name for obj in bpy.context.scene.objects if getattr(obj, "type", None) == "ARMATURE"]
+    skinned_meshes = [
+        obj.name
+        for obj in bpy.context.scene.objects
+        if getattr(obj, "type", None) == "MESH"
+        and any(
+            getattr(mod, "type", None) == "ARMATURE" and getattr(mod, "object", None) is not None
+            for mod in getattr(obj, "modifiers", []) or []
+        )
+    ]
     return {
         "label": label,
         "objects": len(bpy.context.scene.objects),
         "frame_start": int(bpy.context.scene.frame_start),
         "frame_end": int(bpy.context.scene.frame_end),
+        "armature_count": len(armatures),
+        "skinned_mesh_count": len(skinned_meshes),
         "actions": action_rows,
         "action_count": len(action_rows),
         "fcurve_count": sum(row["fcurves"] for row in action_rows),
@@ -248,7 +273,7 @@ def scene_animation_summary(label: str) -> dict:
     }
 
 
-def assert_animation_summary(summary: dict) -> None:
+def assert_animation_summary(summary: dict, *, require_skin: bool = False) -> None:
     if summary["objects"] <= 0:
         raise AssertionError(f"{summary['label']}: import produced no objects")
     if summary["action_count"] <= 0:
@@ -259,23 +284,29 @@ def assert_animation_summary(summary: dict) -> None:
         raise AssertionError(f"{summary['label']}: timeline did not fit animation")
     if summary["unlinked_actions"]:
         raise AssertionError(f"{summary['label']}: unlinked actions: {summary['unlinked_actions']}")
+    if require_skin:
+        if summary["armature_count"] <= 0:
+            raise AssertionError(f"{summary['label']}: skinned asset imported without armature")
+        if summary["skinned_mesh_count"] <= 0:
+            raise AssertionError(f"{summary['label']}: skinned asset imported without skinned mesh")
 
 
 def roundtrip_asset(source_path: Path, out_dir: Path) -> dict:
     stem = source_path.stem
     dae_path = out_dir / f"{stem}.dae"
+    require_skin = stem in SKINNED_ASSETS
 
     reset_scene()
     import_asset(source_path, scene_was_empty=True)
     imported_summary = scene_animation_summary(f"{stem}:gltf")
-    assert_animation_summary(imported_summary)
+    assert_animation_summary(imported_summary, require_skin=require_skin)
     offset_linked_action_keyframes(120.0)
     export_dae(dae_path)
 
     reset_scene()
     import_asset(dae_path, scene_was_empty=True)
     reimported_summary = scene_animation_summary(f"{stem}:dae")
-    assert_animation_summary(reimported_summary)
+    assert_animation_summary(reimported_summary, require_skin=require_skin)
     assert_export_normalized_clip_start(reimported_summary, 120.0)
 
     return {
@@ -368,8 +399,8 @@ def main(argv: list[str]) -> int:
         type=Path,
         default=DEFAULT_SAMPLE_ROOT,
         help=(
-            "glTF-Sample-Assets root. Uses BoxAnimated/CesiumMan .gltf files "
-            "when present; falls back to cached GLB files otherwise."
+            "glTF-Sample-Assets root. Uses BoxAnimated/CesiumMan/BrainStem "
+            ".gltf files when present; falls back to cached files otherwise."
         ),
     )
     parser.add_argument(
