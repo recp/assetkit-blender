@@ -459,7 +459,7 @@ def _material_tuple(
 
     return (
         material.name,
-        color.tobytes(),
+        color,
         metallic,
         roughness,
         alpha_mode,
@@ -477,7 +477,7 @@ def _material_tuple(
         occlusion_texture,
         int(occlusion_slot),
         float(occlusion_strength),
-        emissive.tobytes(),
+        emissive,
         emissive_texture,
         int(emissive_slot),
         float(emissive_strength),
@@ -1020,7 +1020,7 @@ def _texture_transform_channel(
     interpolation: int,
 ) -> tuple:
     target = _ANIM_TEXTURE_TRANSFORM_BASE + role_index * _ANIM_TEXTURE_TRANSFORM_STRIDE + prop
-    return int(target), times.tobytes(), values.tobytes(), len(times), int(interpolation)
+    return int(target), times, values, len(times), int(interpolation)
 
 
 def _iter_action_fcurves(action: bpy.types.Action, slot=None):
@@ -1649,8 +1649,7 @@ def _material_feature_tuples(
         (0.0, 0.0, 0.0, 1.0),
     )
     volume_scatter_anisotropy = _prop_float(material, "assetkit_volume_scatter_anisotropy", 0.0)
-    volume_scatter_values = array("f")
-    volume_scatter_values.frombytes(volume_scatter_color)
+    volume_scatter_values = _float_payload_view(volume_scatter_color)
     custom_scatter_used = (
         volume_scatter_anisotropy != 0.0
         or any(abs(float(value)) > 1.0e-6 for value in volume_scatter_values[:3])
@@ -1660,7 +1659,7 @@ def _material_feature_tuples(
             _FEATURE_SUBSURFACE,
             0.0,
             volume_scatter_color,
-            array("f", [0.0, 0.0, 0.0, 1.0]).tobytes(),
+            array("f", (0.0, 0.0, 0.0, 1.0)),
             float(volume_scatter_anisotropy),
         ))
     elif (volume_scatter := _volume_scatter_node(material)) is not None:
@@ -1668,15 +1667,14 @@ def _material_feature_tuples(
             volume_scatter.inputs.get("Color"),
             (0.0, 0.0, 0.0, 1.0),
         )
-        scatter_values = array("f")
-        scatter_values.frombytes(scatter_color)
+        scatter_values = _float_payload_view(scatter_color)
         scatter_anisotropy = _socket_float(volume_scatter, "Anisotropy", 0.0)
         if scatter_anisotropy != 0.0 or any(abs(float(value)) > 1.0e-6 for value in scatter_values[:3]):
             features.append((
                 _FEATURE_SUBSURFACE,
                 0.0,
                 scatter_color,
-                array("f", [0.0, 0.0, 0.0, 1.0]).tobytes(),
+                array("f", (0.0, 0.0, 0.0, 1.0)),
                 float(scatter_anisotropy),
             ))
             custom_scatter_used = True
@@ -1684,17 +1682,17 @@ def _material_feature_tuples(
     subsurface_weight = _socket_float(bsdf, "Subsurface Weight", 0.0)
     if subsurface_weight > 0.0 and not custom_scatter_used:
         radius = _socket_default(bsdf, "Subsurface Radius")
-        radius_bytes = array("f", [
+        radius_values = array("f", (
             float(radius[0]) if radius is not None and len(radius) > 0 else 1.0,
             float(radius[1]) if radius is not None and len(radius) > 1 else 0.2,
             float(radius[2]) if radius is not None and len(radius) > 2 else 0.1,
             1.0,
-        ]).tobytes()
+        ))
         features.append((
             _FEATURE_SUBSURFACE,
             float(subsurface_weight),
             _color_socket_bytes(bsdf.inputs.get("Base Color"), (1.0, 1.0, 1.0, 1.0)),
-            radius_bytes,
+            radius_values,
             float(_socket_float(bsdf, "Subsurface Anisotropy", 0.0)),
         ))
 
@@ -1999,6 +1997,21 @@ def _color_socket_bytes(socket, default: tuple[float, float, float, float]) -> b
     return array("f", [_clamp01(v) for v in color[:4]]).tobytes()
 
 
+def _float_payload_view(payload: object):
+    try:
+        view = memoryview(payload)
+    except TypeError:
+        return ()
+    if view.nbytes < 4:
+        return ()
+    if view.format == "f" and view.itemsize == 4:
+        return view
+    try:
+        return view.cast("f")
+    except TypeError:
+        return ()
+
+
 def _scalar_texture_used(payload: tuple[float, str | None, int, tuple | None], default: float) -> bool:
     return abs(float(payload[0]) - float(default)) > 1.0e-6 or payload[1] is not None
 
@@ -2006,8 +2019,7 @@ def _scalar_texture_used(payload: tuple[float, str | None, int, tuple | None], d
 def _color_texture_used(payload: tuple[bytes, str | None, int, tuple | None], default: float) -> bool:
     if payload[1] is not None:
         return True
-    vals = array("f")
-    vals.frombytes(payload[0])
+    vals = _float_payload_view(payload[0])
     return any(abs(float(vals[i]) - float(default)) > 1.0e-6 for i in range(min(3, len(vals))))
 
 

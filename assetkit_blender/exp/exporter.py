@@ -93,6 +93,8 @@ _STATIC_SCALE_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_T
 _RAW_Z_UP_FORMATS = frozenset(
     (AK_FILE_TYPE_3MF, AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT)
 )
+_ANIMATION_TIMING_SCENE = "SCENE"
+_ANIMATION_TIMING_CLIP = "CLIP"
 
 _TRANSFORM_ANIMATION_PATHS = {
     "location",
@@ -198,6 +200,7 @@ def export_scene(
     export_shape_key_tangents: bool = True,
     export_shape_key_animations: bool = True,
     animation_bake_mode: str = "OFF",
+    animation_timing: str = _ANIMATION_TIMING_CLIP,
     apply_modifiers: bool | None = None,
     global_scale: float | None = None,
     use_scene_unit: bool | None = None,
@@ -232,6 +235,7 @@ def export_scene(
     material_export_mode = _material_export_mode_id(material_export_mode)
     lighting_bake_mode = _lighting_bake_mode_id(lighting_bake_mode)
     animation_bake_mode = _animation_bake_mode_id(animation_bake_mode)
+    animation_timing = _animation_timing_id(animation_timing)
     if file_type in _NO_MATERIAL_FORMATS or not export_materials:
         material_export_mode = "NONE"
         lighting_bake_mode = "OFF"
@@ -310,6 +314,7 @@ def export_scene(
             export_shape_key_normals=bool(export_shape_key_normals),
             export_shape_key_tangents=bool(export_shape_key_tangents),
             export_shape_key_animations=bool(export_shape_key_animations),
+            animation_timing=animation_timing,
             stl_export_format=stl_export_format,
             stl_scale=stl_scale,
             stl_forward_axis=stl_forward,
@@ -360,6 +365,7 @@ def export_scene(
         export_shape_key_tangents=bool(export_shape_key_tangents),
         export_shape_key_animations=bool(export_shape_key_animations),
         animation_bake_mode=animation_bake_mode,
+        animation_timing=animation_timing,
         stl_export_format=stl_export_format,
         stl_scale=static_scale,
         stl_forward_axis=static_forward_axis,
@@ -408,6 +414,7 @@ def _export_scene_once(
     export_shape_key_tangents: bool,
     export_shape_key_animations: bool,
     animation_bake_mode: str,
+    animation_timing: str,
     stl_export_format: int,
     stl_scale: float,
     stl_forward_axis: str,
@@ -459,6 +466,7 @@ def _export_scene_once(
             export_shape_key_tangents=export_shape_key_tangents,
             export_shape_key_animations=export_shape_key_animations,
             animation_bake_mode=animation_bake_mode,
+            animation_timing=animation_timing,
             apply_modifiers=apply_modifiers,
             ply_export_normals=bool(ply_export_normals),
             ply_export_uv=bool(ply_export_uv),
@@ -569,6 +577,7 @@ def _export_stl_batch_scene(
     export_shape_key_normals: bool,
     export_shape_key_tangents: bool,
     export_shape_key_animations: bool,
+    animation_timing: str,
     stl_export_format: int,
     stl_scale: float,
     stl_forward_axis: str,
@@ -621,6 +630,7 @@ def _export_stl_batch_scene(
             export_shape_key_tangents=export_shape_key_tangents,
             export_shape_key_animations=export_shape_key_animations,
             animation_bake_mode="OFF",
+            animation_timing=animation_timing,
             stl_export_format=stl_export_format,
             stl_scale=stl_scale,
             stl_forward_axis=stl_forward_axis,
@@ -667,6 +677,13 @@ def _animation_bake_mode_id(value: str | None) -> str:
     if mode in {"EVALUATED_MESH", "MESH", "GEOMETRY_NODES", "GN"}:
         return "EVALUATED_MESH"
     return "OFF"
+
+
+def _animation_timing_id(value: str | None) -> str:
+    mode = (value or _ANIMATION_TIMING_CLIP).upper()
+    if mode in {"SCENE", "TIMELINE", "GLOBAL"}:
+        return _ANIMATION_TIMING_SCENE
+    return _ANIMATION_TIMING_CLIP
 
 
 def _stl_export_format_id(value: str | None) -> int:
@@ -846,6 +863,7 @@ def _collect_scene_items(
     export_shape_key_tangents: bool,
     export_shape_key_animations: bool,
     animation_bake_mode: str,
+    animation_timing: str,
     apply_modifiers: bool,
     ply_export_normals: bool,
     ply_export_uv: bool,
@@ -1027,6 +1045,12 @@ def _collect_scene_items(
             f"collect_bone_anims count={len(bone_animation_payloads)} elapsed={(time.perf_counter() - phase_started_at) * 1000.0:.3f}ms"
         )
         phase_started_at = time.perf_counter()
+
+    if animation_timing == _ANIMATION_TIMING_CLIP:
+        animation_payloads, bone_animation_payloads = _normalize_scene_animation_payload_times(
+            animation_payloads,
+            bone_animation_payloads,
+        )
 
     def append_bone_nodes(armature_obj: bpy.types.Object, parent_index: int) -> None:
         armature = armature_obj.data
@@ -1650,7 +1674,7 @@ def _assetkit_instancing_payload(
     parent: bpy.types.Object | None,
     world_matrices: dict[bpy.types.Object, object],
     instancing_groups: dict[bpy.types.Object, tuple[bpy.types.Object, ...]],
-) -> tuple[bytes, int] | None:
+) -> tuple[array, int] | None:
     members = instancing_groups.get(obj)
     if not members or len(members) <= 1:
         return None
@@ -1661,7 +1685,7 @@ def _assetkit_instancing_payload(
     for member in members:
         matrix = _local_matrix_for_export(member, parent, world_matrices)
         _append_matrix_values(values, base_inv @ matrix)
-    return values.tobytes(), len(members)
+    return values, len(members)
 
 
 def _export_document_extra(context: bpy.types.Context) -> object | None:
@@ -1783,6 +1807,102 @@ def _collect_bone_animations(
             scene.frame_set(frame, subframe=subframe)
 
     return out
+
+
+def _normalize_scene_animation_payload_times(
+    object_payloads: dict[bpy.types.Object, tuple],
+    bone_payloads: dict[tuple[bpy.types.Object, str], tuple],
+) -> tuple[dict[bpy.types.Object, tuple], dict[tuple[bpy.types.Object, str], tuple]]:
+    min_by_clip: dict[tuple[str, object], float] = {}
+    maps = (object_payloads, bone_payloads)
+
+    for payload_map in maps:
+        for payload in payload_map.values():
+            for channel in payload or ():
+                key = _animation_channel_clip_key(channel, payload)
+                first = _animation_channel_first_time(channel)
+                if first is None:
+                    continue
+                current = min_by_clip.get(key)
+                if current is None or first < current:
+                    min_by_clip[key] = first
+
+    offsets = {
+        key: value
+        for key, value in min_by_clip.items()
+        if abs(value) > _ANIMATION_FRAME_EPSILON
+    }
+    if not offsets:
+        return object_payloads, bone_payloads
+
+    return (
+        {
+            key: _shift_animation_payload_times(payload, offsets)
+            for key, payload in object_payloads.items()
+        },
+        {
+            key: _shift_animation_payload_times(payload, offsets)
+            for key, payload in bone_payloads.items()
+        },
+    )
+
+
+def _animation_channel_clip_key(channel: tuple, payload: tuple) -> tuple[str, object]:
+    if len(channel) >= 7 and channel[6]:
+        return "clip", str(channel[6])
+    return "payload", id(payload)
+
+
+def _animation_channel_time_view(channel: tuple):
+    if len(channel) < 4:
+        return None
+    try:
+        count = int(channel[3])
+    except Exception:
+        return None
+    if count <= 0:
+        return None
+    try:
+        view = memoryview(channel[1])
+    except TypeError:
+        return None
+    if view.nbytes < count * 4:
+        return None
+    if view.format != "f" or view.itemsize != 4:
+        try:
+            view = view.cast("f")
+        except TypeError:
+            return None
+    if len(view) < count:
+        return None
+    return view, count
+
+
+def _animation_channel_first_time(channel: tuple) -> float | None:
+    parsed = _animation_channel_time_view(channel)
+    if parsed is None:
+        return None
+    view, _count = parsed
+    return float(view[0])
+
+
+def _shift_animation_payload_times(payload: tuple, offsets: dict[tuple[str, object], float]) -> tuple:
+    changed = False
+    shifted = []
+    for channel in payload or ():
+        offset = offsets.get(_animation_channel_clip_key(channel, payload), 0.0)
+        if abs(offset) <= _ANIMATION_FRAME_EPSILON:
+            shifted.append(channel)
+            continue
+        parsed = _animation_channel_time_view(channel)
+        if parsed is None:
+            shifted.append(channel)
+            continue
+        view, count = parsed
+        times = array("f", (float(view[index]) - offset for index in range(count)))
+        shifted.append((channel[0], times, *channel[2:]))
+        changed = True
+    return tuple(shifted) if changed else payload
 
 
 def _pose_bone_animation_plans(
@@ -2311,8 +2431,8 @@ def _object_visibility_animation_channel(
 
     return (
         AKB_ANIM_VISIBILITY,
-        times.tobytes(),
-        values.tobytes(),
+        times,
+        values,
         len(times),
         AK_INTERPOLATION_STEP,
     )
@@ -3171,7 +3291,7 @@ def _mesh_skin_setup(
     return (
         tuple(group_to_joint),
         joint_node_indices,
-        inverse_bind_matrices.tobytes(),
+        inverse_bind_matrices,
         armature_index,
     )
 
@@ -3577,7 +3697,7 @@ def _light_payload(obj: bpy.types.Object) -> tuple | None:
 
     payload = (
         light_type,
-        color.tobytes(),
+        color,
         intensity,
         light_range,
         inner,
@@ -3803,8 +3923,8 @@ def _evaluated_mesh_animation_bake(
             values.append(1.0 if target_index == active_target else 0.0)
 
     return morph_targets, (
-        times.tobytes(),
-        values.tobytes(),
+        times,
+        values,
         len(times),
         target_count,
         AK_INTERPOLATION_LINEAR,
@@ -3895,8 +4015,8 @@ def _shape_key_weight_animation(
 
     interpolation = _action_interpolation(action, set(path_to_index), fcurves)
     return (
-        times.tobytes(),
-        values.tobytes(),
+        times,
+        values,
         len(times),
         target_count,
         interpolation,
@@ -3907,12 +4027,6 @@ def _append_matrix_values(values: array, matrix) -> None:
     for col in range(4):
         for row in range(4):
             values.append(float(matrix[row][col]))
-
-
-def _matrix_bytes(matrix) -> bytes:
-    values = array("f")
-    _append_matrix_values(values, matrix)
-    return values.tobytes()
 
 
 def _matrix_values(matrix) -> array:

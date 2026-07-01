@@ -124,7 +124,7 @@ def import_asset(path: Path, *, scene_was_empty: bool) -> list[bpy.types.Object]
     )
 
 
-def export_dae(path: Path) -> None:
+def export_dae(path: Path, *, animation_timing: str = "CLIP") -> None:
     result = export_scene(
         bpy.context,
         path,
@@ -133,6 +133,7 @@ def export_dae(path: Path) -> None:
         export_skins=True,
         export_shape_keys=True,
         export_shape_key_animations=True,
+        animation_timing=animation_timing,
     )
     if result < 0 or not path.exists() or path.stat().st_size == 0:
         raise AssertionError(f"DAE export failed: {path}")
@@ -204,6 +205,31 @@ def action_summary(action: bpy.types.Action) -> dict:
     }
 
 
+def offset_linked_action_keyframes(frame_offset: float) -> None:
+    for action in linked_actions():
+        for fcurve in iter_action_fcurves(action):
+            for point in getattr(fcurve, "keyframe_points", []) or []:
+                point.co.x += frame_offset
+                point.handle_left.x += frame_offset
+                point.handle_right.x += frame_offset
+            fcurve.update()
+
+
+def assert_export_normalized_clip_start(summary: dict, source_offset: float) -> None:
+    starts = [
+        float(row["start"])
+        for row in summary["actions"]
+        if row["start"] is not None
+    ]
+    if not starts:
+        raise AssertionError(f"{summary['label']}: no action start frames found")
+    if min(starts) >= source_offset - 1.0:
+        raise AssertionError(
+            f"{summary['label']}: exported actions kept scene offset {source_offset}: "
+            f"starts={starts}"
+        )
+
+
 def scene_animation_summary(label: str) -> dict:
     actions = [action for action in bpy.data.actions if any(True for _ in iter_action_fcurves(action))]
     linked = linked_actions()
@@ -243,12 +269,14 @@ def roundtrip_asset(source_path: Path, out_dir: Path) -> dict:
     import_asset(source_path, scene_was_empty=True)
     imported_summary = scene_animation_summary(f"{stem}:gltf")
     assert_animation_summary(imported_summary)
+    offset_linked_action_keyframes(120.0)
     export_dae(dae_path)
 
     reset_scene()
     import_asset(dae_path, scene_was_empty=True)
     reimported_summary = scene_animation_summary(f"{stem}:dae")
     assert_animation_summary(reimported_summary)
+    assert_export_normalized_clip_start(reimported_summary, 120.0)
 
     return {
         "asset": stem,

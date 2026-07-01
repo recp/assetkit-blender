@@ -260,6 +260,15 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="OFF",
     )
+    animation_timing: bpy.props.EnumProperty(
+        name="Timing",
+        description="Choose whether exported clips keep Blender scene offsets or start independently at frame zero",
+        items=(
+            ("CLIP", "Independent Clips", "Start each exported animation clip at time zero"),
+            ("SCENE", "Scene Timeline", "Preserve Blender scene frame offsets"),
+        ),
+        default="CLIP",
+    )
     global_scale: bpy.props.FloatProperty(
         name="Scale",
         description="Scale factor for mesh export",
@@ -610,6 +619,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 default_closed=True,
             )
             if animation:
+                animation.prop(self, "animation_timing")
                 if self.export_shape_keys:
                     animation.prop(self, "export_shape_key_animations")
                 bake = animation.column()
@@ -709,6 +719,9 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                 ),
                 animation_bake_mode=(
                     self.animation_bake_mode if self.export_format in _ANIMATION_FORMATS else "OFF"
+                ),
+                animation_timing=(
+                    self.animation_timing if self.export_format in _ANIMATION_FORMATS else "CLIP"
                 ),
                 apply_modifiers=self.apply_modifiers if use_apply_modifiers else None,
                 global_scale=self.global_scale if use_mesh_transform else None,
