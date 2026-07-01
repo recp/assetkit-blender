@@ -124,6 +124,25 @@ _BONE_TRANSFORM_PROPERTIES = {
     "rotation_quaternion",
     "scale",
 }
+_POSE_PLAN_NAME = 0
+_POSE_PLAN_PATHS = 1
+_POSE_PLAN_FRAMES = 2
+_POSE_PLAN_LOC_CURVES = 3
+_POSE_PLAN_QUAT_CURVES = 4
+_POSE_PLAN_SCALE_CURVES = 5
+_POSE_PLAN_LOC_DEFAULTS = 6
+_POSE_PLAN_QUAT_DEFAULTS = 7
+_POSE_PLAN_SCALE_DEFAULTS = 8
+_POSE_PLAN_LOC_INTERP = 9
+_POSE_PLAN_ROT_INTERP = 10
+_POSE_PLAN_SCALE_INTERP = 11
+_POSE_PLAN_REST_MATRIX = 12
+_POSE_PLAN_TIMES = 13
+_POSE_PLAN_TRANSLATIONS = 14
+_POSE_PLAN_ROTATIONS = 15
+_POSE_PLAN_SCALES = 16
+_POSE_PLAN_PREVIOUS_QUAT = 17
+_POSE_PLAN_VALID = 18
 _PROFILE_ENABLED: bool | None = None
 
 
@@ -1031,7 +1050,7 @@ def _collect_scene_items(
             out.append([
                 AKB_EXPORT_ITEM_JOINT,
                 bone.name,
-                _matrix_bytes(matrix),
+                _matrix_values(matrix),
                 parent_item_index,
                 None,
                 bone_animation_payloads.get((armature_obj, bone.name)),
@@ -1052,7 +1071,7 @@ def _collect_scene_items(
         out.append([
             kind,
             obj.name,
-            _matrix_bytes(matrix),
+            _matrix_values(matrix),
             parent_index,
             None,
             animation_payloads.get(obj),
@@ -1394,7 +1413,7 @@ def _collect_static_mesh_scene_items(
         out.append((
             AKB_EXPORT_ITEM_MESH,
             obj.name,
-            _matrix_bytes(_object_world_matrix(obj, depsgraph)),
+            _matrix_values(_object_world_matrix(obj, depsgraph)),
             -1,
             payload,
             None,
@@ -1753,24 +1772,239 @@ def _collect_bone_animations(
             pose = getattr(armature, "pose", None)
             if pose is None:
                 continue
-            for pose_bone in getattr(pose, "bones", []) or []:
-                constraints = getattr(pose_bone, "constraints", None)
-                if not fcurves and (constraints is None or len(constraints) == 0):
-                    continue
-                payload, changed = _pose_bone_transform_animation(
-                    context,
-                    armature,
-                    pose_bone.name,
-                    action,
-                    fcurves,
-                )
-                changed_frame = changed_frame or changed
-                if payload:
-                    out[(armature, pose_bone.name)] = payload
+            plans = _pose_bone_animation_plans(armature, action, fcurves)
+            if not plans:
+                continue
+            payloads, changed = _sample_pose_bone_animation_plans(context, armature, action, fcurves, plans)
+            changed_frame = changed_frame or changed
+            out.update(payloads)
     finally:
         if changed_frame:
             scene.frame_set(frame, subframe=subframe)
 
+    return out
+
+
+def _pose_bone_animation_plans(
+    armature: bpy.types.Object,
+    action: bpy.types.Action | None,
+    fcurves: tuple,
+) -> list[list]:
+    pose = getattr(armature, "pose", None)
+    if pose is None:
+        return []
+
+    plans: list[list] = []
+    fcurves_by_path = _fcurves_by_data_path(fcurves)
+    curve_frame_cache: dict[int, tuple[float, ...]] = {}
+    expanded_frame_cache: dict[tuple[float, ...], tuple[float, ...]] = {}
+    for pose_bone in getattr(pose, "bones", []) or []:
+        paths = _pose_bone_paths(armature, pose_bone.name)
+        if not paths:
+            continue
+
+        constraints = getattr(pose_bone, "constraints", None)
+        relevant_paths = tuple(path for path in paths.values() if path)
+        rotation_paths = tuple(
+            paths[prop]
+            for prop in ("rotation_axis_angle", "rotation_euler", "rotation_quaternion")
+            if prop in paths and paths[prop]
+        )
+        relevant_curves = _fcurves_for_paths_index(fcurves_by_path, relevant_paths)
+        has_fcurves = bool(relevant_curves)
+        if not has_fcurves and (constraints is None or len(constraints) == 0):
+            continue
+
+        frames = (
+            _action_keyframes_for_curve_items(relevant_curves, curve_frame_cache)
+            if action is not None and has_fcurves
+            else ()
+        )
+        if action is not None and has_fcurves:
+            if _transform_curve_items_need_sampling(relevant_curves, rotation_paths):
+                expanded = expanded_frame_cache.get(frames)
+                if expanded is None:
+                    expanded = _expanded_integer_sample_frames(frames)
+                    expanded_frame_cache[frames] = expanded
+                frames = expanded
+        if len(frames) < 2:
+            frames = _pose_bone_constraint_keyframes(pose_bone)
+        if len(frames) < 2:
+            continue
+
+        loc_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths.get("location", ""), 3))
+        quat_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths.get("rotation_quaternion", ""), 4))
+        scale_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths.get("scale", ""), 3))
+        loc_defaults = (float(pose_bone.location.x), float(pose_bone.location.y), float(pose_bone.location.z))
+        quat_defaults = tuple(float(value) for value in pose_bone.rotation_quaternion)
+        scale_defaults = (float(pose_bone.scale.x), float(pose_bone.scale.y), float(pose_bone.scale.z))
+        loc_interp = _curves_interpolation(loc_curves)
+        rot_interp = _curves_interpolation(_fcurves_for_paths_index(fcurves_by_path, rotation_paths))
+        scale_interp = _curves_interpolation(scale_curves)
+        bone = pose_bone.bone
+        rest_matrix = bone.parent.matrix_local.inverted_safe() @ bone.matrix_local if bone.parent else bone.matrix_local
+
+        plans.append([
+            pose_bone.name,
+            paths,
+            tuple(frames),
+            loc_curves,
+            quat_curves,
+            scale_curves,
+            loc_defaults,
+            quat_defaults,
+            scale_defaults,
+            loc_interp,
+            rot_interp,
+            scale_interp,
+            _matrix_values(rest_matrix),
+            array("f"),
+            array("f"),
+            array("f"),
+            array("f"),
+            None,
+            True,
+        ])
+    return plans
+
+
+def _sample_pose_bone_animation_plans(
+    context: bpy.types.Context,
+    armature: bpy.types.Object,
+    action: bpy.types.Action | None,
+    fcurves: tuple,
+    plans: list[list],
+) -> tuple[dict[tuple[bpy.types.Object, str], tuple], bool]:
+    direct = _native_pose_bone_animation_payloads(armature, action, fcurves, plans)
+    if direct is not False:
+        return direct, False
+
+    scene = context.scene
+    fps = float(scene.render.fps) / float(scene.render.fps_base or 1.0)
+    if fps <= 0.0:
+        fps = 24.0
+
+    frame_plans: dict[float, list[list]] = {}
+    for plan in plans:
+        for frame in plan[_POSE_PLAN_FRAMES]:
+            frame_plans.setdefault(float(frame), []).append(plan)
+
+    changed_frame = False
+    for frame in sorted(frame_plans):
+        changed_frame = _set_scene_frame(scene, frame) or changed_frame
+        depsgraph = context.evaluated_depsgraph_get()
+        armature_eval = armature.evaluated_get(depsgraph)
+        pose = armature_eval.pose
+        if pose is None:
+            for plan in frame_plans[frame]:
+                plan[_POSE_PLAN_VALID] = False
+            continue
+
+        for plan in frame_plans[frame]:
+            pose_bone = pose.bones.get(plan[_POSE_PLAN_NAME])
+            if pose_bone is None:
+                plan[_POSE_PLAN_VALID] = False
+                continue
+
+            matrix = _pose_bone_local_matrix(pose_bone)
+            loc, rot, scale = matrix.decompose()
+            quat = (float(rot.x), float(rot.y), float(rot.z), float(rot.w))
+            previous_quat = plan[_POSE_PLAN_PREVIOUS_QUAT]
+            if previous_quat is not None and _quat_dot(previous_quat, quat) < 0.0:
+                quat = (-quat[0], -quat[1], -quat[2], -quat[3])
+            plan[_POSE_PLAN_PREVIOUS_QUAT] = quat
+
+            plan[_POSE_PLAN_TIMES].append(float(frame) / fps)
+            plan[_POSE_PLAN_TRANSLATIONS].extend((float(loc.x), float(loc.y), float(loc.z)))
+            plan[_POSE_PLAN_ROTATIONS].extend(quat)
+            plan[_POSE_PLAN_SCALES].extend((float(scale.x), float(scale.y), float(scale.z)))
+
+    out: dict[tuple[bpy.types.Object, str], tuple] = {}
+    for plan in plans:
+        if not plan[_POSE_PLAN_VALID]:
+            continue
+        times = plan[_POSE_PLAN_TIMES]
+        count = len(times)
+        if count < 2:
+            continue
+
+        channels = []
+        translations = plan[_POSE_PLAN_TRANSLATIONS]
+        rotations = plan[_POSE_PLAN_ROTATIONS]
+        scales = plan[_POSE_PLAN_SCALES]
+        if _float_samples_changed(translations, 3):
+            channels.append((AK_TARGET_POSITION, times, translations, count, plan[_POSE_PLAN_LOC_INTERP]))
+        if _float_samples_changed(rotations, 4):
+            channels.append((AK_TARGET_QUAT, times, rotations, count, plan[_POSE_PLAN_ROT_INTERP]))
+        if _float_samples_changed(scales, 3):
+            channels.append((AK_TARGET_SCALE, times, scales, count, plan[_POSE_PLAN_SCALE_INTERP]))
+        if channels:
+            out[(armature, plan[_POSE_PLAN_NAME])] = animation_channels_with_clip(channels, action)
+
+    return out, changed_frame
+
+
+def _native_pose_bone_animation_payloads(
+    armature: bpy.types.Object,
+    action: bpy.types.Action | None,
+    fcurves: tuple,
+    plans: list[list],
+):
+    module = _native_module()
+    if module is None:
+        return False
+    helper = getattr(module, "export_pose_bone_anim_channels", None)
+    if helper is None:
+        return False
+
+    out: dict[tuple[bpy.types.Object, str], tuple] = {}
+    frame_values_cache: dict[tuple[float, ...], array] = {}
+    fps = float(bpy.context.scene.render.fps) / float(bpy.context.scene.render.fps_base or 1.0)
+    if fps <= 0.0:
+        fps = 24.0
+
+    for plan in plans:
+        paths = plan[_POSE_PLAN_PATHS]
+        if not any(curve is not None for curve in plan[_POSE_PLAN_QUAT_CURVES]):
+            return False
+        euler_path = paths.get("rotation_euler")
+        axis_path = paths.get("rotation_axis_angle")
+        if any(
+            fcurve.data_path == euler_path or fcurve.data_path == axis_path
+            for fcurve in fcurves
+        ):
+            return False
+        if any(
+            curve is not None and getattr(curve, "keyframe_points", None) is None
+            for curve in plan[_POSE_PLAN_LOC_CURVES] + plan[_POSE_PLAN_QUAT_CURVES] + plan[_POSE_PLAN_SCALE_CURVES]
+        ):
+            return False
+        frames = plan[_POSE_PLAN_FRAMES]
+        frame_values = frame_values_cache.get(frames)
+        if frame_values is None:
+            frame_values = array("f", frames)
+            frame_values_cache[frames] = frame_values
+        try:
+            channels = helper(
+                plan[_POSE_PLAN_REST_MATRIX],
+                frame_values,
+                plan[_POSE_PLAN_LOC_CURVES],
+                plan[_POSE_PLAN_QUAT_CURVES],
+                plan[_POSE_PLAN_SCALE_CURVES],
+                plan[_POSE_PLAN_LOC_DEFAULTS],
+                plan[_POSE_PLAN_QUAT_DEFAULTS],
+                plan[_POSE_PLAN_SCALE_DEFAULTS],
+                fps,
+                int(plan[_POSE_PLAN_LOC_INTERP]),
+                int(plan[_POSE_PLAN_ROT_INTERP]),
+                int(plan[_POSE_PLAN_SCALE_INTERP]),
+            )
+        except Exception:
+            return False
+        if channels is False:
+            return False
+        if channels:
+            out[(armature, plan[_POSE_PLAN_NAME])] = animation_channels_with_clip(tuple(channels), action)
     return out
 
 
@@ -1797,9 +2031,18 @@ def _object_transform_animation(
         "scale": "scale",
     })
     visibility_channel = _object_visibility_animation_channel(context.scene, obj, fcurves)
+    direct = None
+    direct_allowed = parent is obj.parent and len(getattr(obj, "constraints", []) or ()) == 0
+    if direct_allowed:
+        direct = _object_transform_animation_direct(context, obj, action, fcurves)
+        if direct == ():
+            return (
+                (animation_channel_with_clip(visibility_channel, action),)
+                if visibility_channel else None
+            ), False
     direct = (
-        _object_transform_animation_direct(context, obj, action, fcurves)
-        if parent is obj.parent and not sample_transform
+        direct
+        if direct_allowed and not sample_transform
         else None
     )
     if direct is not None:
@@ -1852,24 +2095,24 @@ def _object_transform_animation(
     if _float_samples_changed(translations, 3):
         channels.append((
             AK_TARGET_POSITION,
-            times.tobytes(),
-            translations.tobytes(),
+            times,
+            translations,
             count,
             _action_interpolation(action, _LOCATION_ANIMATION_PATHS, fcurves),
         ))
     if _float_samples_changed(rotations, 4):
         channels.append((
             AK_TARGET_QUAT,
-            times.tobytes(),
-            rotations.tobytes(),
+            times,
+            rotations,
             count,
             _action_interpolation(action, _ROTATION_ANIMATION_PATHS, fcurves),
         ))
     if _float_samples_changed(scales, 3):
         channels.append((
             AK_TARGET_SCALE,
-            times.tobytes(),
-            scales.tobytes(),
+            times,
+            scales,
             count,
             _action_interpolation(action, _SCALE_ANIMATION_PATHS, fcurves),
         ))
@@ -1971,24 +2214,24 @@ def _pose_bone_transform_animation(
     if _float_samples_changed(translations, 3):
         channels.append((
             AK_TARGET_POSITION,
-            times.tobytes(),
-            translations.tobytes(),
+            times,
+            translations,
             count,
             loc_interp,
         ))
     if _float_samples_changed(rotations, 4):
         channels.append((
             AK_TARGET_QUAT,
-            times.tobytes(),
-            rotations.tobytes(),
+            times,
+            rotations,
             count,
             rot_interp,
         ))
     if _float_samples_changed(scales, 3):
         channels.append((
             AK_TARGET_SCALE,
-            times.tobytes(),
-            scales.tobytes(),
+            times,
+            scales,
             count,
             scale_interp,
         ))
@@ -2175,8 +2418,8 @@ def _direct_vec_channel(
         times = array("f", (float(frame) / fps for frame in frames))
         return (
             target,
-            times.tobytes(),
-            values.tobytes(),
+            times,
+            values,
             len(times),
             _curves_interpolation(curves),
         )
@@ -2198,8 +2441,8 @@ def _direct_vec_channel(
 
     return (
         target,
-        times.tobytes(),
-        values.tobytes(),
+        times,
+        values,
         len(times),
         _curves_interpolation(curves),
     )
@@ -2280,7 +2523,7 @@ def _direct_quat_channel(
             values.extend(quat)
         if not _float_samples_changed(values, 4):
             return None
-        return (AK_TARGET_QUAT, times.tobytes(), values.tobytes(), len(times), _curves_interpolation(curves))
+        return (AK_TARGET_QUAT, times, values, len(times), _curves_interpolation(curves))
 
     frames = _fcurve_keyframes(curves)
     if len(frames) < 2:
@@ -2303,7 +2546,7 @@ def _direct_quat_channel(
 
     if not _float_samples_changed(values, 4):
         return None
-    return (AK_TARGET_QUAT, times.tobytes(), values.tobytes(), len(times), _curves_interpolation(curves))
+    return (AK_TARGET_QUAT, times, values, len(times), _curves_interpolation(curves))
 
 
 def _direct_euler_channel(
@@ -2340,7 +2583,7 @@ def _direct_euler_channel(
             values.extend(quat)
         if not _float_samples_changed(values, 4):
             return None
-        return (AK_TARGET_QUAT, times.tobytes(), values.tobytes(), len(times), _curves_interpolation(curves))
+        return (AK_TARGET_QUAT, times, values, len(times), _curves_interpolation(curves))
 
     frames = _fcurve_keyframes(curves)
     if len(frames) < 2:
@@ -2366,7 +2609,7 @@ def _direct_euler_channel(
 
     if not _float_samples_changed(values, 4):
         return None
-    return (AK_TARGET_QUAT, times.tobytes(), values.tobytes(), len(times), _curves_interpolation(curves))
+    return (AK_TARGET_QUAT, times, values, len(times), _curves_interpolation(curves))
 
 
 def _direct_axis_angle_channel(
@@ -2404,7 +2647,7 @@ def _direct_axis_angle_channel(
             values.extend(quat)
         if not _float_samples_changed(values, 4):
             return None
-        return (AK_TARGET_QUAT, times.tobytes(), values.tobytes(), len(times), _curves_interpolation(curves))
+        return (AK_TARGET_QUAT, times, values, len(times), _curves_interpolation(curves))
 
     frames = _fcurve_keyframes(curves)
     if len(frames) < 2:
@@ -2432,7 +2675,7 @@ def _direct_axis_angle_channel(
 
     if not _float_samples_changed(values, 4):
         return None
-    return (AK_TARGET_QUAT, times.tobytes(), values.tobytes(), len(times), _curves_interpolation(curves))
+    return (AK_TARGET_QUAT, times, values, len(times), _curves_interpolation(curves))
 
 
 def _fcurves_for_path(fcurves: tuple, path: str, width: int) -> list:
@@ -2441,6 +2684,33 @@ def _fcurves_for_path(fcurves: tuple, path: str, width: int) -> list:
         if curve.data_path == path and 0 <= curve.array_index < width:
             out[curve.array_index] = curve
     return out
+
+
+def _fcurves_by_data_path(fcurves: tuple) -> dict[str, tuple]:
+    by_path: dict[str, list] = {}
+    for curve in fcurves:
+        by_path.setdefault(curve.data_path, []).append(curve)
+    return {path: tuple(curves) for path, curves in by_path.items()}
+
+
+def _fcurves_for_path_index(fcurves_by_path: dict[str, tuple], path: str, width: int) -> list:
+    out = [None] * width
+    if not path:
+        return out
+    for curve in fcurves_by_path.get(path, ()):
+        index = curve.array_index
+        if 0 <= index < width:
+            out[index] = curve
+    return out
+
+
+def _fcurves_for_paths_index(fcurves_by_path: dict[str, tuple], paths: tuple[str, ...]) -> tuple:
+    if not paths:
+        return ()
+    curves = []
+    for path in paths:
+        curves.extend(fcurves_by_path.get(path, ()))
+    return tuple(curves)
 
 
 def _scalar_fcurve_for_path(fcurves: tuple, path: str):
@@ -2521,6 +2791,46 @@ def _fcurve_keyframes(curves: list) -> tuple[float, ...]:
             continue
         for key in curve.keyframe_points:
             frames.add(float(key.co.x))
+    return tuple(sorted(frames))
+
+
+def _fcurve_frame_values(curve, cache: dict[int, tuple[float, ...]]) -> tuple[float, ...]:
+    key = int(curve.as_pointer()) if hasattr(curve, "as_pointer") else id(curve)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    points = curve.keyframe_points
+    count = len(points)
+    if count <= 0:
+        frames = ()
+    else:
+        values = array("f", [0.0]) * (count * 2)
+        try:
+            points.foreach_get("co", values)
+            frames = tuple(float(values[index * 2]) for index in range(count))
+        except Exception:
+            frames = tuple(float(keyframe.co.x) for keyframe in points)
+    cache[key] = frames
+    return frames
+
+
+def _action_keyframes_for_curve_items(
+    curves: tuple,
+    frame_cache: dict[int, tuple[float, ...]] | None = None,
+) -> tuple[float, ...]:
+    if not curves:
+        return ()
+    if frame_cache is None:
+        frame_cache = {}
+
+    first = _fcurve_frame_values(curves[0], frame_cache)
+    if all(_fcurve_frame_values(curve, frame_cache) == first for curve in curves[1:]):
+        return first
+
+    frames: set[float] = set()
+    for curve in curves:
+        frames.update(_fcurve_frame_values(curve, frame_cache))
     return tuple(sorted(frames))
 
 
@@ -2632,6 +2942,27 @@ def _transform_fcurves_need_sampling(fcurves: tuple, paths: dict[str, str]) -> b
             if interpolation not in {"CONSTANT", "LINEAR"}:
                 return True
             if is_rotation and interpolation != "CONSTANT":
+                return True
+    return False
+
+
+def _transform_curve_items_need_sampling(curves: tuple, rotation_paths: tuple[str, ...]) -> bool:
+    rotation_path_set = set(rotation_paths)
+    for curve in curves:
+        if curve.data_path not in rotation_path_set:
+            continue
+        for key in curve.keyframe_points:
+            interpolation = key.interpolation
+            if interpolation not in {"CONSTANT", "LINEAR"}:
+                return True
+            if interpolation != "CONSTANT":
+                return True
+    for curve in curves:
+        if curve.data_path in rotation_path_set:
+            continue
+        for key in curve.keyframe_points:
+            interpolation = key.interpolation
+            if interpolation not in {"CONSTANT", "LINEAR"}:
                 return True
     return False
 
@@ -3582,6 +3913,12 @@ def _matrix_bytes(matrix) -> bytes:
     values = array("f")
     _append_matrix_values(values, matrix)
     return values.tobytes()
+
+
+def _matrix_values(matrix) -> array:
+    values = array("f")
+    _append_matrix_values(values, matrix)
+    return values
 
 
 def _object_visible_for_export(obj: bpy.types.Object) -> bool:

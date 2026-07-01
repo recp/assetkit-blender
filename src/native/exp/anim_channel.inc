@@ -399,3 +399,539 @@ error:
   return NULL;
 }
 
+typedef struct AkbAnimCurveView {
+  PyObject   *points;
+  PyObject   *co_obj;
+  Py_buffer   co_view;
+  const float *co;
+  Py_ssize_t  count;
+  Py_ssize_t  cursor;
+} AkbAnimCurveView;
+
+static void
+akb_anim_curve_view_init(AkbAnimCurveView *view) {
+  memset(view, 0, sizeof(*view));
+}
+
+static void
+akb_anim_curve_view_release(AkbAnimCurveView *view) {
+  if (view->co_view.buf)
+    PyBuffer_Release(&view->co_view);
+  Py_XDECREF(view->co_obj);
+  Py_XDECREF(view->points);
+  akb_anim_curve_view_init(view);
+}
+
+static int
+akb_anim_curve_view_load(PyObject *curve, AkbAnimCurveView *view) {
+  int rc;
+
+  akb_anim_curve_view_init(view);
+  if (!curve || curve == Py_None)
+    return 1;
+
+  rc = akb_export_anim_curve_co(curve, &view->points, &view->co_obj, &view->co_view, &view->count);
+  if (rc < 0)
+    return -1;
+  if (rc == 0)
+    return 0;
+  if (view->count < 2)
+    return 0;
+  if ((size_t)view->co_view.len < (size_t)view->count * 2u * sizeof(float))
+    return 0;
+
+  view->co = (const float *)view->co_view.buf;
+  return view->co != NULL;
+}
+
+static float
+akb_anim_curve_eval(AkbAnimCurveView *view,
+                    float             frame,
+                    float             fallback,
+                    int               interpolation) {
+  const float eps = 1.0e-6f;
+  Py_ssize_t  cursor;
+  float       f0;
+  float       f1;
+  float       v0;
+  float       v1;
+  float       t;
+
+  if (!view || !view->co || view->count <= 0)
+    return fallback;
+
+  if (frame <= view->co[0] + eps)
+    return view->co[1];
+
+  cursor = view->cursor;
+  if (cursor < 0)
+    cursor = 0;
+  while (cursor + 1 < view->count
+         && view->co[((size_t)cursor + 1u) * 2u] <= frame + eps)
+    cursor++;
+  view->cursor = cursor;
+
+  if (cursor + 1 >= view->count)
+    return view->co[(size_t)cursor * 2u + 1u];
+
+  f0 = view->co[(size_t)cursor * 2u];
+  v0 = view->co[(size_t)cursor * 2u + 1u];
+  if (interpolation == AK_INTERPOLATION_STEP)
+    return v0;
+
+  f1 = view->co[((size_t)cursor + 1u) * 2u];
+  v1 = view->co[((size_t)cursor + 1u) * 2u + 1u];
+  if (fabsf(f1 - f0) <= eps)
+    return v0;
+
+  t = (frame - f0) / (f1 - f0);
+  if (t <= 0.0f)
+    return v0;
+  if (t >= 1.0f)
+    return v1;
+  return v0 + (v1 - v0) * t;
+}
+
+static int
+akb_anim_parse_defaults(PyObject *obj, float *dst, int width) {
+  PyObject *seq;
+
+  seq = PySequence_Fast(obj, "animation defaults must be a sequence");
+  if (!seq)
+    return 0;
+  if (PySequence_Fast_GET_SIZE(seq) < width) {
+    Py_DECREF(seq);
+    return 0;
+  }
+
+  for (int i = 0; i < width; i++) {
+    double value = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, i));
+    if (PyErr_Occurred()) {
+      Py_DECREF(seq);
+      return 0;
+    }
+    dst[i] = (float)value;
+  }
+
+  Py_DECREF(seq);
+  return 1;
+}
+
+static int
+akb_anim_load_curve_set(PyObject          *curves_obj,
+                        AkbAnimCurveView *curves,
+                        int               width) {
+  PyObject   *seq;
+  Py_ssize_t  count;
+
+  seq = PySequence_Fast(curves_obj, "animation curves must be a sequence");
+  if (!seq)
+    return -1;
+
+  count = PySequence_Fast_GET_SIZE(seq);
+  if (count < width) {
+    Py_DECREF(seq);
+    return 0;
+  }
+
+  for (int i = 0; i < width; i++) {
+    int rc = akb_anim_curve_view_load(PySequence_Fast_GET_ITEM(seq, i), &curves[i]);
+    if (rc <= 0) {
+      Py_DECREF(seq);
+      return rc;
+    }
+  }
+
+  Py_DECREF(seq);
+  return 1;
+}
+
+static void
+akb_pose_basis_matrix(const float loc[3],
+                      versor      rotation,
+                      const float scale[3],
+                      mat4        out) {
+  glm_quat_mat4(rotation, out);
+  for (int col = 0; col < 3; col++) {
+    out[col][0] *= scale[col];
+    out[col][1] *= scale[col];
+    out[col][2] *= scale[col];
+  }
+  out[3][0] = loc[0];
+  out[3][1] = loc[1];
+  out[3][2] = loc[2];
+  out[3][3] = 1.0f;
+}
+
+static PyObject *
+akb_pose_channel_tuple(int          target,
+                       const float *times,
+                       const float *values,
+                       Py_ssize_t   count,
+                       int          width,
+                       int          interpolation) {
+  PyObject *target_obj;
+  PyObject *times_obj;
+  PyObject *values_obj;
+  PyObject *count_obj;
+  PyObject *interp_obj;
+  PyObject *out;
+
+  target_obj = PyLong_FromLong(target);
+  times_obj = PyBytes_FromStringAndSize((const char *)times, count * (Py_ssize_t)sizeof(float));
+  values_obj = PyBytes_FromStringAndSize((const char *)values,
+                                         count * (Py_ssize_t)width * (Py_ssize_t)sizeof(float));
+  count_obj = PyLong_FromSsize_t(count);
+  interp_obj = PyLong_FromLong(interpolation);
+  out = PyTuple_New(5);
+  if (!target_obj || !times_obj || !values_obj || !count_obj || !interp_obj || !out) {
+    Py_XDECREF(out);
+    Py_XDECREF(interp_obj);
+    Py_XDECREF(count_obj);
+    Py_XDECREF(values_obj);
+    Py_XDECREF(times_obj);
+    Py_XDECREF(target_obj);
+    return NULL;
+  }
+
+  PyTuple_SET_ITEM(out, 0, target_obj);
+  PyTuple_SET_ITEM(out, 1, times_obj);
+  PyTuple_SET_ITEM(out, 2, values_obj);
+  PyTuple_SET_ITEM(out, 3, count_obj);
+  PyTuple_SET_ITEM(out, 4, interp_obj);
+  return out;
+}
+
+static PyObject *
+akb_export_pose_bone_anim_channels(PyObject *self, PyObject *args) {
+  PyObject          *rest_obj;
+  PyObject          *frames_obj;
+  PyObject          *loc_curves_obj;
+  PyObject          *quat_curves_obj;
+  PyObject          *scale_curves_obj;
+  PyObject          *loc_defaults_obj;
+  PyObject          *quat_defaults_obj;
+  PyObject          *scale_defaults_obj;
+  Py_buffer          rest_view;
+  Py_buffer          frames_view;
+  AkbAnimCurveView   loc_curves[3];
+  AkbAnimCurveView   quat_curves[4];
+  AkbAnimCurveView   scale_curves[3];
+  const float       *rest;
+  const float       *frames;
+  float             *times;
+  float             *translations;
+  float             *rotations;
+  float             *scales;
+  float              loc_defaults[3];
+  float              quat_defaults[4];
+  float              scale_defaults[3];
+  double             fps;
+  Py_ssize_t         sample_count;
+  int                loc_interp;
+  int                rot_interp;
+  int                scale_interp;
+  int                rc;
+  int                loc_changed;
+  int                rot_changed;
+  int                scale_changed;
+  PyObject          *out;
+  Py_ssize_t         out_index;
+
+  (void)self;
+
+  memset(&rest_view, 0, sizeof(rest_view));
+  memset(&frames_view, 0, sizeof(frames_view));
+  for (int i = 0; i < 3; i++) {
+    akb_anim_curve_view_init(&loc_curves[i]);
+    akb_anim_curve_view_init(&scale_curves[i]);
+  }
+  for (int i = 0; i < 4; i++)
+    akb_anim_curve_view_init(&quat_curves[i]);
+
+  times = NULL;
+  translations = NULL;
+  rotations = NULL;
+  scales = NULL;
+  out = NULL;
+
+  if (!PyArg_ParseTuple(args,
+                        "OOOOOOOOdiii",
+                        &rest_obj,
+                        &frames_obj,
+                        &loc_curves_obj,
+                        &quat_curves_obj,
+                        &scale_curves_obj,
+                        &loc_defaults_obj,
+                        &quat_defaults_obj,
+                        &scale_defaults_obj,
+                        &fps,
+                        &loc_interp,
+                        &rot_interp,
+                        &scale_interp))
+    return NULL;
+
+  if (fps <= 0.0)
+    fps = 24.0;
+
+  if (!akb_anim_parse_defaults(loc_defaults_obj, loc_defaults, 3)
+      || !akb_anim_parse_defaults(quat_defaults_obj, quat_defaults, 4)
+      || !akb_anim_parse_defaults(scale_defaults_obj, scale_defaults, 3))
+    goto unsupported;
+
+  if (PyObject_GetBuffer(rest_obj, &rest_view, PyBUF_SIMPLE) < 0)
+    goto error;
+  if ((size_t)rest_view.len < 16u * sizeof(float))
+    goto unsupported;
+  rest = (const float *)rest_view.buf;
+
+  if (PyObject_GetBuffer(frames_obj, &frames_view, PyBUF_SIMPLE) < 0)
+    goto error;
+  if (frames_view.len <= 0 || frames_view.len % (Py_ssize_t)sizeof(float) != 0)
+    goto unsupported;
+  sample_count = frames_view.len / (Py_ssize_t)sizeof(float);
+  if (sample_count < 2)
+    goto no_channel;
+  frames = (const float *)frames_view.buf;
+
+  rc = akb_anim_load_curve_set(loc_curves_obj, loc_curves, 3);
+  if (rc < 0)
+    goto error;
+  if (rc == 0)
+    goto unsupported;
+  rc = akb_anim_load_curve_set(quat_curves_obj, quat_curves, 4);
+  if (rc < 0)
+    goto error;
+  if (rc == 0)
+    goto unsupported;
+  rc = akb_anim_load_curve_set(scale_curves_obj, scale_curves, 3);
+  if (rc < 0)
+    goto error;
+  if (rc == 0)
+    goto unsupported;
+
+  if (sample_count > PY_SSIZE_T_MAX / (Py_ssize_t)(4 * (int)sizeof(float))) {
+    PyErr_SetString(PyExc_OverflowError, "pose bone animation is too large");
+    goto error;
+  }
+
+  times = (float *)PyMem_Malloc(sample_count * (Py_ssize_t)sizeof(float));
+  translations = (float *)PyMem_Malloc(sample_count * 3u * sizeof(float));
+  rotations = (float *)PyMem_Malloc(sample_count * 4u * sizeof(float));
+  scales = (float *)PyMem_Malloc(sample_count * 3u * sizeof(float));
+  if (!times || !translations || !rotations || !scales) {
+    PyErr_NoMemory();
+    goto error;
+  }
+
+  loc_changed = 0;
+  rot_changed = 0;
+  scale_changed = 0;
+
+  for (Py_ssize_t i = 0; i < sample_count; i++) {
+    float frame;
+    float basis_loc[3];
+    float basis_scale[3];
+    float raw_quat[4];
+    versor basis_rot;
+    mat4 basis;
+    mat4 local;
+    float translation[3];
+    float scale[3];
+    versor rotation;
+    float *out_loc;
+    float *out_rot;
+    float *out_scale;
+
+    frame = frames[i];
+    times[i] = frame / (float)fps;
+
+    for (int component = 0; component < 3; component++) {
+      basis_loc[component] = akb_anim_curve_eval(&loc_curves[component],
+                                                 frame,
+                                                 loc_defaults[component],
+                                                 loc_interp);
+      basis_scale[component] = akb_anim_curve_eval(&scale_curves[component],
+                                                   frame,
+                                                   scale_defaults[component],
+                                                   scale_interp);
+    }
+    for (int component = 0; component < 4; component++) {
+      raw_quat[component] = akb_anim_curve_eval(&quat_curves[component],
+                                                frame,
+                                                quat_defaults[component],
+                                                rot_interp);
+    }
+
+    basis_rot[0] = raw_quat[1];
+    basis_rot[1] = raw_quat[2];
+    basis_rot[2] = raw_quat[3];
+    basis_rot[3] = raw_quat[0];
+    glm_quat_normalize(basis_rot);
+    akb_pose_basis_matrix(basis_loc, basis_rot, basis_scale, basis);
+    glm_mat4_mul(AKB_MAT4(rest), basis, local);
+
+    akb_mat4_to_trs((const float *)local, translation, rotation, scale);
+    glm_quat_normalize(rotation);
+
+    out_loc = translations + (size_t)i * 3u;
+    out_rot = rotations + (size_t)i * 4u;
+    out_scale = scales + (size_t)i * 3u;
+
+    out_loc[0] = translation[0];
+    out_loc[1] = translation[1];
+    out_loc[2] = translation[2];
+
+    out_rot[0] = rotation[0];
+    out_rot[1] = rotation[1];
+    out_rot[2] = rotation[2];
+    out_rot[3] = rotation[3];
+    if (i > 0) {
+      float *prev = rotations + ((size_t)i - 1u) * 4u;
+      float dot = prev[0] * out_rot[0]
+                + prev[1] * out_rot[1]
+                + prev[2] * out_rot[2]
+                + prev[3] * out_rot[3];
+      if (dot < 0.0f) {
+        out_rot[0] = -out_rot[0];
+        out_rot[1] = -out_rot[1];
+        out_rot[2] = -out_rot[2];
+        out_rot[3] = -out_rot[3];
+      }
+    }
+
+    out_scale[0] = scale[0];
+    out_scale[1] = scale[1];
+    out_scale[2] = scale[2];
+
+    if (i > 0) {
+      float *first_loc = translations;
+      float *first_rot = rotations;
+      float *first_scale = scales;
+      for (int component = 0; component < 3; component++) {
+        if (fabsf(out_loc[component] - first_loc[component]) > 1.0e-6f)
+          loc_changed = 1;
+        if (fabsf(out_scale[component] - first_scale[component]) > 1.0e-6f)
+          scale_changed = 1;
+      }
+      for (int component = 0; component < 4; component++) {
+        if (fabsf(out_rot[component] - first_rot[component]) > 1.0e-6f)
+          rot_changed = 1;
+      }
+    }
+  }
+
+  out = PyTuple_New((loc_changed ? 1 : 0) + (rot_changed ? 1 : 0) + (scale_changed ? 1 : 0));
+  if (!out)
+    goto error;
+
+  out_index = 0;
+  if (loc_changed) {
+    PyObject *channel = akb_pose_channel_tuple(AK_TARGET_POSITION,
+                                               times,
+                                               translations,
+                                               sample_count,
+                                               3,
+                                               loc_interp);
+    if (!channel) {
+      Py_DECREF(out);
+      goto error;
+    }
+    PyTuple_SET_ITEM(out, out_index++, channel);
+  }
+  if (rot_changed) {
+    PyObject *channel = akb_pose_channel_tuple(AK_TARGET_QUAT,
+                                               times,
+                                               rotations,
+                                               sample_count,
+                                               4,
+                                               rot_interp);
+    if (!channel) {
+      Py_DECREF(out);
+      goto error;
+    }
+    PyTuple_SET_ITEM(out, out_index++, channel);
+  }
+  if (scale_changed) {
+    PyObject *channel = akb_pose_channel_tuple(AK_TARGET_SCALE,
+                                               times,
+                                               scales,
+                                               sample_count,
+                                               3,
+                                               scale_interp);
+    if (!channel) {
+      Py_DECREF(out);
+      goto error;
+    }
+    PyTuple_SET_ITEM(out, out_index++, channel);
+  }
+
+  PyMem_Free(scales);
+  PyMem_Free(rotations);
+  PyMem_Free(translations);
+  PyMem_Free(times);
+  PyBuffer_Release(&frames_view);
+  PyBuffer_Release(&rest_view);
+  for (int i = 0; i < 3; i++) {
+    akb_anim_curve_view_release(&loc_curves[i]);
+    akb_anim_curve_view_release(&scale_curves[i]);
+  }
+  for (int i = 0; i < 4; i++)
+    akb_anim_curve_view_release(&quat_curves[i]);
+  return out;
+
+no_channel:
+  Py_XDECREF(out);
+  PyMem_Free(scales);
+  PyMem_Free(rotations);
+  PyMem_Free(translations);
+  PyMem_Free(times);
+  if (frames_view.buf)
+    PyBuffer_Release(&frames_view);
+  if (rest_view.buf)
+    PyBuffer_Release(&rest_view);
+  for (int i = 0; i < 3; i++) {
+    akb_anim_curve_view_release(&loc_curves[i]);
+    akb_anim_curve_view_release(&scale_curves[i]);
+  }
+  for (int i = 0; i < 4; i++)
+    akb_anim_curve_view_release(&quat_curves[i]);
+  Py_RETURN_NONE;
+
+unsupported:
+  PyErr_Clear();
+  Py_XDECREF(out);
+  PyMem_Free(scales);
+  PyMem_Free(rotations);
+  PyMem_Free(translations);
+  PyMem_Free(times);
+  if (frames_view.buf)
+    PyBuffer_Release(&frames_view);
+  if (rest_view.buf)
+    PyBuffer_Release(&rest_view);
+  for (int i = 0; i < 3; i++) {
+    akb_anim_curve_view_release(&loc_curves[i]);
+    akb_anim_curve_view_release(&scale_curves[i]);
+  }
+  for (int i = 0; i < 4; i++)
+    akb_anim_curve_view_release(&quat_curves[i]);
+  Py_RETURN_FALSE;
+
+error:
+  Py_XDECREF(out);
+  PyMem_Free(scales);
+  PyMem_Free(rotations);
+  PyMem_Free(translations);
+  PyMem_Free(times);
+  if (frames_view.buf)
+    PyBuffer_Release(&frames_view);
+  if (rest_view.buf)
+    PyBuffer_Release(&rest_view);
+  for (int i = 0; i < 3; i++) {
+    akb_anim_curve_view_release(&loc_curves[i]);
+    akb_anim_curve_view_release(&scale_curves[i]);
+  }
+  for (int i = 0; i < 4; i++)
+    akb_anim_curve_view_release(&quat_curves[i]);
+  return NULL;
+}

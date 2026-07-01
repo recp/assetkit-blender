@@ -56,6 +56,7 @@ static PyMethodDef akb_methods[] = {
   {"read_mesh_batch", akb_read_mesh_batch, METH_VARARGS, "Read a batch of mesh buffers from an open AssetKit scene."},
   {"export_scene", akb_export_scene, METH_VARARGS, "Export Blender scene objects through AssetKit."},
   {"export_aligned_anim_channel", akb_export_aligned_anim_channel, METH_VARARGS, "Build an aligned Blender FCurve animation channel for export."},
+  {"export_pose_bone_anim_channels", akb_export_pose_bone_anim_channels, METH_VARARGS, "Build rest-pose-correct bone animation channels for export."},
   {"export_pack_metallic_roughness", akb_export_pack_metallic_roughness, METH_VARARGS, "Pack glTF metallic-roughness pixels for export."},
   {"export_pack_base_color_alpha", akb_export_pack_base_color_alpha, METH_VARARGS, "Pack base-color RGB and alpha pixels for export."},
   {"export_pack_channel", akb_export_pack_channel, METH_VARARGS, "Pack one image channel into a glTF target channel for export."},
