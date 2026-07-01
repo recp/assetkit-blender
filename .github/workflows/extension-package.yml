@@ -143,6 +143,14 @@ jobs:
             --asset-cache "$RUNNER_TEMP/assetkit-import-suite" \
             --out "$RUNNER_TEMP/assetkit-animation-roundtrip"
 
+      - name: Check mesh data reuse
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: |
+          "$BLENDER_BIN" --background --factory-startup \
+            --python tools/blender_mesh_reuse_check.py -- \
+            --out "$RUNNER_TEMP/assetkit-mesh-reuse"
+
       - uses: actions/upload-artifact@v7
         with:
           name: assetkit-blender-${{ matrix.platform }}
