@@ -2609,14 +2609,11 @@ def _create_mesh_object_bulk(
 
     mesh.vertices.add(data.vertex_count)
     mesh.loops.add(data.loop_count)
-    if data.edge_count and data.edges_u32:
-        mesh.edges.add(data.edge_count)
     mesh.polygons.add(data.face_count)
     lap_detail("alloc")
 
     vertices = _buffer_view(data.vertices_f32, "f")
     indices = _buffer_view(data.indices_u32, "i")
-    edges = _buffer_view(data.edges_u32, "i") if data.edge_count and data.edges_u32 else None
     loop_starts = _buffer_view(data.loop_starts_i32, "i")
     loop_totals = _buffer_view(data.loop_totals_i32, "i")
     lap_detail("views")
@@ -2628,8 +2625,6 @@ def _create_mesh_object_bulk(
 
     _set_mesh_positions(mesh, vertices)
     _set_mesh_loop_vertex_indices(mesh, indices)
-    if edges is not None:
-        _set_mesh_edges(mesh, edges)
     _set_mesh_loop_starts(mesh, loop_starts, int(data.loop_count), int(data.face_count))
     if loop_totals is not None and int(data.loop_count) != int(data.face_count) * 3:
         mesh.polygons.foreach_set("loop_total", _rna_i32_values(loop_totals))
@@ -2685,7 +2680,9 @@ def _create_mesh_object_bulk(
         shading_done = True
     else:
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
-    mesh.update(calc_edges=False)
+    # Blender derives polygon edges faster than feeding large edge buffers here;
+    # line primitives still use their dedicated edge path.
+    mesh.update(calc_edges=True)
     lap_detail("update")
     if not shading_done and defer_custom_normals:
         shading_done = _queue_deferred_custom_normals(mesh, normals, vertex_normals, data)
