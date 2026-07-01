@@ -1530,7 +1530,7 @@ def _material_feature_tuples(
             target_channel=1,
             name=f"{material.name}_volumeThickness",
         )
-        attenuation_color = _color_socket_bytes(_material_input_socket(material, "Color"), (1.0, 1.0, 1.0, 1.0))
+        attenuation_color = _color_socket_values(_material_input_socket(material, "Color"), (1.0, 1.0, 1.0, 1.0))
         density = _socket_float_from_socket(_material_input_socket(material, "Density"), 0.0)
         attenuation_distance = (1.0 / density) if density > 0.0 else float("inf")
         if _scalar_texture_used(thickness, 0.0):
@@ -1551,14 +1551,14 @@ def _material_feature_tuples(
             custom_volume_texture,
             _prop_texture_slot(material, "volume_thickness"),
             _prop_texture_info_tuple(material, "volume_thickness"),
-            _prop_color_bytes(material, "assetkit_volume_attenuation_color", (1.0, 1.0, 1.0, 1.0)),
+            _prop_color_values(material, "assetkit_volume_attenuation_color", (1.0, 1.0, 1.0, 1.0)),
             float(_prop_float(material, "assetkit_volume_attenuation_distance", float("inf"))),
         ))
         volume_used = True
 
     volume_absorption = _volume_absorption_node(material)
     if transmission_used and not volume_used and volume_absorption is not None:
-        attenuation_color = _color_socket_bytes(
+        attenuation_color = _color_socket_values(
             volume_absorption.inputs.get("Color"),
             (1.0, 1.0, 1.0, 1.0),
         )
@@ -1621,7 +1621,7 @@ def _material_feature_tuples(
     diffuse_transmission = _prop_float(material, "assetkit_diffuse_transmission", 0.0)
     diffuse_transmission_texture = _prop_str(material, "assetkit_diffuse_transmission_texture")
     diffuse_transmission_color_texture = _prop_str(material, "assetkit_diffuse_transmission_color_texture")
-    diffuse_transmission_color = _prop_color_bytes(
+    diffuse_transmission_color = _prop_color_values(
         material,
         "assetkit_diffuse_transmission_color",
         (1.0, 1.0, 1.0, 1.0),
@@ -1643,7 +1643,7 @@ def _material_feature_tuples(
             _prop_texture_info_tuple(material, "diffuse_transmission_color"),
         ))
 
-    volume_scatter_color = _prop_color_bytes(
+    volume_scatter_color = _prop_color_values(
         material,
         "assetkit_volume_scatter_multiscatter_color",
         (0.0, 0.0, 0.0, 1.0),
@@ -1663,7 +1663,7 @@ def _material_feature_tuples(
             float(volume_scatter_anisotropy),
         ))
     elif (volume_scatter := _volume_scatter_node(material)) is not None:
-        scatter_color = _color_socket_bytes(
+        scatter_color = _color_socket_values(
             volume_scatter.inputs.get("Color"),
             (0.0, 0.0, 0.0, 1.0),
         )
@@ -1691,7 +1691,7 @@ def _material_feature_tuples(
         features.append((
             _FEATURE_SUBSURFACE,
             float(subsurface_weight),
-            _color_socket_bytes(bsdf.inputs.get("Base Color"), (1.0, 1.0, 1.0, 1.0)),
+            _color_socket_values(bsdf.inputs.get("Base Color"), (1.0, 1.0, 1.0, 1.0)),
             radius_values,
             float(_socket_float(bsdf, "Subsurface Anisotropy", 0.0)),
         ))
@@ -1714,11 +1714,11 @@ def _prop_float(material: bpy.types.Material, key: str, default: float) -> float
         return float(default)
 
 
-def _prop_color_bytes(
+def _prop_color_values(
     material: bpy.types.Material,
     key: str,
     default: tuple[float, float, float, float],
-) -> bytes:
+) -> array:
     value = material.get(key, None)
     if value is None:
         color = default
@@ -1729,7 +1729,7 @@ def _prop_color_bytes(
             color = default
     if len(color) < 4:
         color = (*color[:3], default[3])
-    return array("f", [float(c) for c in color[:4]]).tobytes()
+    return array("f", (float(c) for c in color[:4]))
 
 
 def _prop_texture_slot(material: bpy.types.Material, role: str) -> int:
@@ -1920,7 +1920,7 @@ def _color_texture_payload(
     *,
     default: tuple[float, float, float, float],
     name: str | None = None,
-) -> tuple[bytes, str | None, int, tuple | None]:
+) -> tuple[object, str | None, int, tuple | None]:
     image, channel, slot, info = _linked_texture_info(socket, uv_slot_by_name)
     if image is None:
         uri = None
@@ -1928,7 +1928,7 @@ def _color_texture_payload(
         uri = image_store.rgb_channel_path(image, channel, name or image.name)
     else:
         uri = image_store.path_for(image)
-    return _color_socket_bytes(socket, default), uri, int(slot), info
+    return _color_socket_values(socket, default), uri, int(slot), info
 
 
 def _specular_glossiness_payload(
@@ -1939,10 +1939,10 @@ def _specular_glossiness_payload(
     *,
     name: str,
 ) -> tuple[
-    tuple[bytes, str | None, int, tuple | None],
+    tuple[object, str | None, int, tuple | None],
     tuple[float, str | None, int, tuple | None],
 ]:
-    specular_color = _color_socket_bytes(specular_socket, (1.0, 1.0, 1.0, 1.0))
+    specular_color = _color_socket_values(specular_socket, (1.0, 1.0, 1.0, 1.0))
     spec_image, spec_channel, spec_slot, spec_info = _linked_texture_info(specular_socket, uv_slot_by_name)
     gloss_image, gloss_channel, gloss_slot, gloss_info = _linked_texture_info(roughness_socket, uv_slot_by_name)
 
@@ -1986,7 +1986,7 @@ def _specular_glossiness_payload(
     )
 
 
-def _color_socket_bytes(socket, default: tuple[float, float, float, float]) -> bytes:
+def _color_socket_values(socket, default: tuple[float, float, float, float]) -> array:
     if socket is not None and not socket.is_linked:
         value = getattr(socket, "default_value", default)
         color = [float(v) for v in value[:4]]
@@ -1994,7 +1994,7 @@ def _color_socket_bytes(socket, default: tuple[float, float, float, float]) -> b
         color = [float(v) for v in default[:4]]
     while len(color) < 4:
         color.append(1.0)
-    return array("f", [_clamp01(v) for v in color[:4]]).tobytes()
+    return array("f", (_clamp01(v) for v in color[:4]))
 
 
 def _float_payload_view(payload: object):
@@ -2016,7 +2016,7 @@ def _scalar_texture_used(payload: tuple[float, str | None, int, tuple | None], d
     return abs(float(payload[0]) - float(default)) > 1.0e-6 or payload[1] is not None
 
 
-def _color_texture_used(payload: tuple[bytes, str | None, int, tuple | None], default: float) -> bool:
+def _color_texture_used(payload: tuple[object, str | None, int, tuple | None], default: float) -> bool:
     if payload[1] is not None:
         return True
     vals = _float_payload_view(payload[0])

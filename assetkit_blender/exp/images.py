@@ -158,7 +158,7 @@ class _ExportImageStore:
         specular_channel: int,
         glossiness_image: bpy.types.Image | None,
         glossiness_channel: int,
-        specular_color: bytes,
+        specular_color: object,
         glossiness_factor: float,
         name: str,
     ) -> str | None:
@@ -555,7 +555,7 @@ class _ExportImageStore:
         specular_channel: int,
         glossiness_image: bpy.types.Image | None,
         glossiness_channel: int,
-        specular_color: bytes,
+        specular_color: object,
         glossiness_factor: float,
         name: str,
     ) -> str | None:
@@ -581,10 +581,7 @@ class _ExportImageStore:
         if pixels is not None:
             return self._write_rgba_pixels(f"{name}_specularGlossiness", width, height, pixels)
 
-        spec = array("f")
-        spec.frombytes(specular_color)
-        while len(spec) < 4:
-            spec.append(1.0)
+        spec = _float4_payload(specular_color, (1.0, 1.0, 1.0, 1.0))
 
         pixels = array("f", [1.0]) * (width * height * 4)
         for y in range(height):
@@ -1052,7 +1049,7 @@ def _native_pack_specular_glossiness(
     specular_channel: int,
     gloss_pixels: tuple[int, int, array] | None,
     glossiness_channel: int,
-    specular_color: bytes,
+    specular_color: object,
     glossiness_factor: float,
 ) -> array | None:
     module = _native_module()
@@ -1070,4 +1067,26 @@ def _native_pack_specular_glossiness(
         int(glossiness_channel),
         specular_color,
         float(glossiness_factor),
+    )
+
+
+def _float4_payload(payload: object, default: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    try:
+        view = memoryview(payload)
+    except TypeError:
+        return default
+    if view.nbytes < 4 * 4:
+        return default
+    if view.format != "f" or view.itemsize != 4:
+        try:
+            view = view.cast("f")
+        except TypeError:
+            return default
+    if len(view) < 4:
+        return default
+    return (
+        float(view[0]),
+        float(view[1]),
+        float(view[2]),
+        float(view[3]),
     )
