@@ -1726,14 +1726,17 @@ def _mesh_data_reuse_key(
     if primitive.point_attr_count:
         return None
 
-    geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
     mesh_key = int(primitive.mesh_key or 0)
-    if geometry_key:
-        source_key = (1, geometry_key)
-    elif mesh_key:
+    if mesh_key:
+        # Prefer the authored source mesh identity for Blender mesh-data reuse.
+        # Large native geometry keys may fall back to buffer addresses, which
+        # makes identical source mesh instances look unique.
         source_key = (0, mesh_key, int(primitive.primitive_index))
     else:
-        return None
+        geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
+        if not geometry_key:
+            return None
+        source_key = (1, geometry_key)
 
     return (
         source_key,
