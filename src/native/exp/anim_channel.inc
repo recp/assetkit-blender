@@ -565,22 +565,16 @@ akb_pose_basis_matrix(const float loc[3],
 
 static PyObject *
 akb_pose_channel_tuple(int          target,
-                       const float *times,
-                       const float *values,
+                       PyObject    *times_obj,
+                       PyObject    *values_obj,
                        Py_ssize_t   count,
-                       int          width,
                        int          interpolation) {
   PyObject *target_obj;
-  PyObject *times_obj;
-  PyObject *values_obj;
   PyObject *count_obj;
   PyObject *interp_obj;
   PyObject *out;
 
   target_obj = PyLong_FromLong(target);
-  times_obj = PyBytes_FromStringAndSize((const char *)times, count * (Py_ssize_t)sizeof(float));
-  values_obj = PyBytes_FromStringAndSize((const char *)values,
-                                         count * (Py_ssize_t)width * (Py_ssize_t)sizeof(float));
   count_obj = PyLong_FromSsize_t(count);
   interp_obj = PyLong_FromLong(interpolation);
   out = PyTuple_New(5);
@@ -588,12 +582,12 @@ akb_pose_channel_tuple(int          target,
     Py_XDECREF(out);
     Py_XDECREF(interp_obj);
     Py_XDECREF(count_obj);
-    Py_XDECREF(values_obj);
-    Py_XDECREF(times_obj);
     Py_XDECREF(target_obj);
     return NULL;
   }
 
+  Py_INCREF(times_obj);
+  Py_INCREF(values_obj);
   PyTuple_SET_ITEM(out, 0, target_obj);
   PyTuple_SET_ITEM(out, 1, times_obj);
   PyTuple_SET_ITEM(out, 2, values_obj);
@@ -619,6 +613,10 @@ akb_export_pose_bone_anim_channels(PyObject *self, PyObject *args) {
   AkbAnimCurveView   scale_curves[3];
   const float       *rest;
   const float       *frames;
+  PyObject          *times_obj;
+  PyObject          *translations_obj;
+  PyObject          *rotations_obj;
+  PyObject          *scales_obj;
   float             *times;
   float             *translations;
   float             *rotations;
@@ -649,6 +647,10 @@ akb_export_pose_bone_anim_channels(PyObject *self, PyObject *args) {
   for (int i = 0; i < 4; i++)
     akb_anim_curve_view_init(&quat_curves[i]);
 
+  times_obj = NULL;
+  translations_obj = NULL;
+  rotations_obj = NULL;
+  scales_obj = NULL;
   times = NULL;
   translations = NULL;
   rotations = NULL;
@@ -715,14 +717,20 @@ akb_export_pose_bone_anim_channels(PyObject *self, PyObject *args) {
     goto error;
   }
 
-  times = (float *)PyMem_Malloc(sample_count * (Py_ssize_t)sizeof(float));
-  translations = (float *)PyMem_Malloc(sample_count * 3u * sizeof(float));
-  rotations = (float *)PyMem_Malloc(sample_count * 4u * sizeof(float));
-  scales = (float *)PyMem_Malloc(sample_count * 3u * sizeof(float));
-  if (!times || !translations || !rotations || !scales) {
-    PyErr_NoMemory();
+  times_obj = PyBytes_FromStringAndSize(NULL, sample_count * (Py_ssize_t)sizeof(float));
+  translations_obj = PyBytes_FromStringAndSize(NULL,
+                                               sample_count * 3u * (Py_ssize_t)sizeof(float));
+  rotations_obj = PyBytes_FromStringAndSize(NULL,
+                                            sample_count * 4u * (Py_ssize_t)sizeof(float));
+  scales_obj = PyBytes_FromStringAndSize(NULL,
+                                         sample_count * 3u * (Py_ssize_t)sizeof(float));
+  if (!times_obj || !translations_obj || !rotations_obj || !scales_obj)
     goto error;
-  }
+
+  times = (float *)PyBytes_AS_STRING(times_obj);
+  translations = (float *)PyBytes_AS_STRING(translations_obj);
+  rotations = (float *)PyBytes_AS_STRING(rotations_obj);
+  scales = (float *)PyBytes_AS_STRING(scales_obj);
 
   loc_changed = 0;
   rot_changed = 0;
@@ -828,48 +836,39 @@ akb_export_pose_bone_anim_channels(PyObject *self, PyObject *args) {
   out_index = 0;
   if (loc_changed) {
     PyObject *channel = akb_pose_channel_tuple(AK_TARGET_POSITION,
-                                               times,
-                                               translations,
+                                               times_obj,
+                                               translations_obj,
                                                sample_count,
-                                               3,
                                                loc_interp);
-    if (!channel) {
-      Py_DECREF(out);
+    if (!channel)
       goto error;
-    }
     PyTuple_SET_ITEM(out, out_index++, channel);
   }
   if (rot_changed) {
     PyObject *channel = akb_pose_channel_tuple(AK_TARGET_QUAT,
-                                               times,
-                                               rotations,
+                                               times_obj,
+                                               rotations_obj,
                                                sample_count,
-                                               4,
                                                rot_interp);
-    if (!channel) {
-      Py_DECREF(out);
+    if (!channel)
       goto error;
-    }
     PyTuple_SET_ITEM(out, out_index++, channel);
   }
   if (scale_changed) {
     PyObject *channel = akb_pose_channel_tuple(AK_TARGET_SCALE,
-                                               times,
-                                               scales,
+                                               times_obj,
+                                               scales_obj,
                                                sample_count,
-                                               3,
                                                scale_interp);
-    if (!channel) {
-      Py_DECREF(out);
+    if (!channel)
       goto error;
-    }
     PyTuple_SET_ITEM(out, out_index++, channel);
   }
 
-  PyMem_Free(scales);
-  PyMem_Free(rotations);
-  PyMem_Free(translations);
-  PyMem_Free(times);
+  Py_DECREF(scales_obj);
+  Py_DECREF(rotations_obj);
+  Py_DECREF(translations_obj);
+  Py_DECREF(times_obj);
   PyBuffer_Release(&frames_view);
   PyBuffer_Release(&rest_view);
   for (int i = 0; i < 3; i++) {
@@ -882,10 +881,10 @@ akb_export_pose_bone_anim_channels(PyObject *self, PyObject *args) {
 
 no_channel:
   Py_XDECREF(out);
-  PyMem_Free(scales);
-  PyMem_Free(rotations);
-  PyMem_Free(translations);
-  PyMem_Free(times);
+  Py_XDECREF(scales_obj);
+  Py_XDECREF(rotations_obj);
+  Py_XDECREF(translations_obj);
+  Py_XDECREF(times_obj);
   if (frames_view.buf)
     PyBuffer_Release(&frames_view);
   if (rest_view.buf)
@@ -901,10 +900,10 @@ no_channel:
 unsupported:
   PyErr_Clear();
   Py_XDECREF(out);
-  PyMem_Free(scales);
-  PyMem_Free(rotations);
-  PyMem_Free(translations);
-  PyMem_Free(times);
+  Py_XDECREF(scales_obj);
+  Py_XDECREF(rotations_obj);
+  Py_XDECREF(translations_obj);
+  Py_XDECREF(times_obj);
   if (frames_view.buf)
     PyBuffer_Release(&frames_view);
   if (rest_view.buf)
@@ -919,10 +918,10 @@ unsupported:
 
 error:
   Py_XDECREF(out);
-  PyMem_Free(scales);
-  PyMem_Free(rotations);
-  PyMem_Free(translations);
-  PyMem_Free(times);
+  Py_XDECREF(scales_obj);
+  Py_XDECREF(rotations_obj);
+  Py_XDECREF(translations_obj);
+  Py_XDECREF(times_obj);
   if (frames_view.buf)
     PyBuffer_Release(&frames_view);
   if (rest_view.buf)
