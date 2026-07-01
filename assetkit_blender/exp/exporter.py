@@ -119,13 +119,23 @@ _ROTATION_ANIMATION_PATHS = {
 _SCALE_ANIMATION_PATHS = {"scale", "delta_scale"}
 _VISIBILITY_ANIMATION_PATHS = {"hide_viewport", "hide_render"}
 _ANIMATION_FRAME_EPSILON = 1.0e-4
-_BONE_TRANSFORM_PROPERTIES = {
+_BONE_PROP_LOCATION = 0
+_BONE_PROP_ROTATION_AXIS_ANGLE = 1
+_BONE_PROP_ROTATION_EULER = 2
+_BONE_PROP_ROTATION_QUATERNION = 3
+_BONE_PROP_SCALE = 4
+_BONE_ROTATION_PATH_INDICES = (
+    _BONE_PROP_ROTATION_AXIS_ANGLE,
+    _BONE_PROP_ROTATION_EULER,
+    _BONE_PROP_ROTATION_QUATERNION,
+)
+_BONE_TRANSFORM_PROPERTIES = (
     "location",
     "rotation_axis_angle",
     "rotation_euler",
     "rotation_quaternion",
     "scale",
-}
+)
 _POSE_PLAN_NAME = 0
 _POSE_PLAN_PATHS = 1
 _POSE_PLAN_FRAMES = 2
@@ -1924,11 +1934,11 @@ def _pose_bone_animation_plans(
             continue
 
         constraints = getattr(pose_bone, "constraints", None)
-        relevant_paths = tuple(path for path in paths.values() if path)
+        relevant_paths = tuple(path for path in paths if path)
         rotation_paths = tuple(
-            paths[prop]
-            for prop in ("rotation_axis_angle", "rotation_euler", "rotation_quaternion")
-            if prop in paths and paths[prop]
+            paths[index]
+            for index in _BONE_ROTATION_PATH_INDICES
+            if paths[index]
         )
         relevant_curves = _fcurves_for_paths_index(fcurves_by_path, relevant_paths)
         has_fcurves = bool(relevant_curves)
@@ -1952,9 +1962,11 @@ def _pose_bone_animation_plans(
         if len(frames) < 2:
             continue
 
-        loc_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths.get("location", ""), 3))
-        quat_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths.get("rotation_quaternion", ""), 4))
-        scale_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths.get("scale", ""), 3))
+        loc_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths[_BONE_PROP_LOCATION], 3))
+        quat_curves = tuple(
+            _fcurves_for_path_index(fcurves_by_path, paths[_BONE_PROP_ROTATION_QUATERNION], 4)
+        )
+        scale_curves = tuple(_fcurves_for_path_index(fcurves_by_path, paths[_BONE_PROP_SCALE], 3))
         loc_defaults = (float(pose_bone.location.x), float(pose_bone.location.y), float(pose_bone.location.z))
         quat_defaults = tuple(float(value) for value in pose_bone.rotation_quaternion)
         scale_defaults = (float(pose_bone.scale.x), float(pose_bone.scale.y), float(pose_bone.scale.z))
@@ -2087,8 +2099,8 @@ def _native_pose_bone_animation_payloads(
         paths = plan[_POSE_PLAN_PATHS]
         if not any(curve is not None for curve in plan[_POSE_PLAN_QUAT_CURVES]):
             return False
-        euler_path = paths.get("rotation_euler")
-        axis_path = paths.get("rotation_axis_angle")
+        euler_path = paths[_BONE_PROP_ROTATION_EULER]
+        axis_path = paths[_BONE_PROP_ROTATION_AXIS_ANGLE]
         if any(
             fcurve.data_path == euler_path or fcurve.data_path == axis_path
             for fcurve in fcurves
@@ -2143,13 +2155,7 @@ def _object_transform_animation(
         return None, False
 
     parent = obj.parent if obj.parent in included else None
-    sample_transform = _transform_fcurves_need_sampling(fcurves, {
-        "location": "location",
-        "rotation_axis_angle": "rotation_axis_angle",
-        "rotation_euler": "rotation_euler",
-        "rotation_quaternion": "rotation_quaternion",
-        "scale": "scale",
-    })
+    sample_transform = _transform_fcurves_need_sampling(fcurves, _BONE_TRANSFORM_PROPERTIES)
     visibility_channel = _object_visibility_animation_channel(context.scene, obj, fcurves)
     direct = None
     direct_allowed = parent is obj.parent and len(getattr(obj, "constraints", []) or ()) == 0
@@ -2268,7 +2274,7 @@ def _pose_bone_transform_animation(
         return (direct if direct else None), False
 
     frames = (
-        _action_keyframes_for_paths(action, set(paths.values()), fcurves)
+        _action_keyframes_for_paths(action, tuple(path for path in paths if path), fcurves)
         if action is not None and fcurves
         else ()
     )
@@ -2316,19 +2322,19 @@ def _pose_bone_transform_animation(
         return None
 
     channels = []
+    loc_paths = (paths[_BONE_PROP_LOCATION],) if paths[_BONE_PROP_LOCATION] else ()
+    rot_paths = tuple(paths[index] for index in _BONE_ROTATION_PATH_INDICES if paths[index])
+    scale_paths = (paths[_BONE_PROP_SCALE],) if paths[_BONE_PROP_SCALE] else ()
     loc_interp = (
-        _action_interpolation(action, set(paths[prop] for prop in ("location",) if prop in paths), fcurves)
+        _action_interpolation(action, loc_paths, fcurves)
         if action is not None and fcurves else AK_INTERPOLATION_LINEAR
     )
     rot_interp = (
-        _action_interpolation(action, {
-            paths[prop] for prop in ("rotation_axis_angle", "rotation_euler", "rotation_quaternion")
-            if prop in paths
-        }, fcurves)
+        _action_interpolation(action, rot_paths, fcurves)
         if action is not None and fcurves else AK_INTERPOLATION_LINEAR
     )
     scale_interp = (
-        _action_interpolation(action, set(paths[prop] for prop in ("scale",) if prop in paths), fcurves)
+        _action_interpolation(action, scale_paths, fcurves)
         if action is not None and fcurves else AK_INTERPOLATION_LINEAR
     )
     if _float_samples_changed(translations, 3):
@@ -2375,15 +2381,15 @@ def _object_transform_animation_direct(
            for fcurve in fcurves):
         return None
 
-    paths = {
-        "location": "location",
-        "rotation_axis_angle": "rotation_axis_angle",
-        "rotation_euler": "rotation_euler",
-        "rotation_quaternion": "rotation_quaternion",
-        "scale": "scale",
-    }
     defaults = _object_transform_defaults(obj)
-    return _transform_animation_direct(context.scene, action, fcurves, paths, defaults, getattr(obj, "rotation_mode", "XYZ"))
+    return _transform_animation_direct(
+        context.scene,
+        action,
+        fcurves,
+        _BONE_TRANSFORM_PROPERTIES,
+        defaults,
+        getattr(obj, "rotation_mode", "XYZ"),
+    )
 
 
 def _object_visibility_animation_channel(
@@ -2442,7 +2448,7 @@ def _pose_bone_transform_animation_direct(
     context: bpy.types.Context,
     pose_bone,
     action: bpy.types.Action,
-    paths: dict[str, str],
+    paths: tuple[str, ...],
     fcurves: tuple | None = None,
 ) -> tuple | None:
     if pose_bone is None:
@@ -2461,11 +2467,11 @@ def _transform_animation_direct(
     scene: bpy.types.Scene,
     action: bpy.types.Action,
     fcurves: tuple,
-    paths: dict[str, str],
-    defaults: dict[str, tuple[float, ...]],
+    paths: tuple[str, ...],
+    defaults: tuple[tuple[float, ...], ...],
     rotation_mode: str,
 ) -> tuple | None:
-    relevant_paths = {path for path in paths.values() if path}
+    relevant_paths = tuple(path for path in paths if path)
     if not any(fcurve.data_path in relevant_paths for fcurve in fcurves):
         return None
 
@@ -2474,13 +2480,13 @@ def _transform_animation_direct(
         fps = 24.0
 
     channels = []
-    location_path = paths.get("location")
+    location_path = paths[_BONE_PROP_LOCATION]
     if location_path:
         channel = _direct_vec_channel(
             action,
             fcurves,
             location_path,
-            defaults.get("location", (0.0, 0.0, 0.0)),
+            defaults[_BONE_PROP_LOCATION],
             3,
             fps,
             AK_TARGET_POSITION,
@@ -2499,13 +2505,13 @@ def _transform_animation_direct(
     if rotation_channel:
         channels.append(rotation_channel)
 
-    scale_path = paths.get("scale")
+    scale_path = paths[_BONE_PROP_SCALE]
     if scale_path:
         channel = _direct_vec_channel(
             action,
             fcurves,
             scale_path,
-            defaults.get("scale", (1.0, 1.0, 1.0)),
+            defaults[_BONE_PROP_SCALE],
             3,
             fps,
             AK_TARGET_SCALE,
@@ -2571,21 +2577,21 @@ def _direct_vec_channel(
 def _direct_rotation_channel(
     action: bpy.types.Action,
     fcurves: tuple,
-    paths: dict[str, str],
-    defaults: dict[str, tuple[float, ...]],
+    paths: tuple[str, ...],
+    defaults: tuple[tuple[float, ...], ...],
     rotation_mode: str,
     fps: float,
 ) -> tuple | None:
-    quat_path = paths.get("rotation_quaternion")
-    euler_path = paths.get("rotation_euler")
-    axis_path = paths.get("rotation_axis_angle")
+    quat_path = paths[_BONE_PROP_ROTATION_QUATERNION]
+    euler_path = paths[_BONE_PROP_ROTATION_EULER]
+    axis_path = paths[_BONE_PROP_ROTATION_AXIS_ANGLE]
 
     if quat_path and any(curve.data_path == quat_path for curve in fcurves):
         return _direct_quat_channel(
             action,
             fcurves,
             quat_path,
-            defaults.get("rotation_quaternion", (1.0, 0.0, 0.0, 0.0)),
+            defaults[_BONE_PROP_ROTATION_QUATERNION],
             fps,
         )
     if euler_path and any(curve.data_path == euler_path for curve in fcurves):
@@ -2593,7 +2599,7 @@ def _direct_rotation_channel(
             action,
             fcurves,
             euler_path,
-            defaults.get("rotation_euler", (0.0, 0.0, 0.0)),
+            defaults[_BONE_PROP_ROTATION_EULER],
             rotation_mode,
             fps,
         )
@@ -2602,7 +2608,7 @@ def _direct_rotation_channel(
             action,
             fcurves,
             axis_path,
-            defaults.get("rotation_axis_angle", (0.0, 0.0, 1.0, 0.0)),
+            defaults[_BONE_PROP_ROTATION_AXIS_ANGLE],
             fps,
         )
     return None
@@ -2966,24 +2972,24 @@ def _curves_interpolation(curves: list) -> int:
     return AK_INTERPOLATION_STEP if found else AK_INTERPOLATION_LINEAR
 
 
-def _object_transform_defaults(obj: bpy.types.Object) -> dict[str, tuple[float, ...]]:
-    return {
-        "location": (float(obj.location.x), float(obj.location.y), float(obj.location.z)),
-        "rotation_axis_angle": tuple(float(value) for value in obj.rotation_axis_angle),
-        "rotation_euler": (float(obj.rotation_euler.x), float(obj.rotation_euler.y), float(obj.rotation_euler.z)),
-        "rotation_quaternion": tuple(float(value) for value in obj.rotation_quaternion),
-        "scale": (float(obj.scale.x), float(obj.scale.y), float(obj.scale.z)),
-    }
+def _object_transform_defaults(obj: bpy.types.Object) -> tuple[tuple[float, ...], ...]:
+    return (
+        (float(obj.location.x), float(obj.location.y), float(obj.location.z)),
+        tuple(float(value) for value in obj.rotation_axis_angle),
+        (float(obj.rotation_euler.x), float(obj.rotation_euler.y), float(obj.rotation_euler.z)),
+        tuple(float(value) for value in obj.rotation_quaternion),
+        (float(obj.scale.x), float(obj.scale.y), float(obj.scale.z)),
+    )
 
 
-def _pose_bone_transform_defaults(pose_bone) -> dict[str, tuple[float, ...]]:
-    return {
-        "location": (float(pose_bone.location.x), float(pose_bone.location.y), float(pose_bone.location.z)),
-        "rotation_axis_angle": tuple(float(value) for value in pose_bone.rotation_axis_angle),
-        "rotation_euler": (float(pose_bone.rotation_euler.x), float(pose_bone.rotation_euler.y), float(pose_bone.rotation_euler.z)),
-        "rotation_quaternion": tuple(float(value) for value in pose_bone.rotation_quaternion),
-        "scale": (float(pose_bone.scale.x), float(pose_bone.scale.y), float(pose_bone.scale.z)),
-    }
+def _pose_bone_transform_defaults(pose_bone) -> tuple[tuple[float, ...], ...]:
+    return (
+        (float(pose_bone.location.x), float(pose_bone.location.y), float(pose_bone.location.z)),
+        tuple(float(value) for value in pose_bone.rotation_axis_angle),
+        (float(pose_bone.rotation_euler.x), float(pose_bone.rotation_euler.y), float(pose_bone.rotation_euler.z)),
+        tuple(float(value) for value in pose_bone.rotation_quaternion),
+        (float(pose_bone.scale.x), float(pose_bone.scale.y), float(pose_bone.scale.z)),
+    )
 
 
 def _action_transform_keyframes(action: bpy.types.Action, fcurves: tuple | None = None) -> tuple[float, ...]:
@@ -3038,16 +3044,12 @@ def _dedupe_animation_frames(frames: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(out)
 
 
-def _transform_fcurves_need_sampling(fcurves: tuple, paths: dict[str, str]) -> bool:
+def _transform_fcurves_need_sampling(fcurves: tuple, paths: tuple[str, ...]) -> bool:
     if not fcurves:
         return False
 
-    transform_paths = {path for path in paths.values() if path}
-    rotation_paths = {
-        paths[prop]
-        for prop in ("rotation_axis_angle", "rotation_euler", "rotation_quaternion")
-        if prop in paths and paths[prop]
-    }
+    transform_paths = tuple(path for path in paths if path)
+    rotation_paths = tuple(paths[index] for index in _BONE_ROTATION_PATH_INDICES if paths[index])
     if not transform_paths:
         return False
 
@@ -3089,7 +3091,7 @@ def _transform_curve_items_need_sampling(curves: tuple, rotation_paths: tuple[st
 
 def _action_keyframes_for_paths(
     action: bpy.types.Action,
-    paths: set[str],
+    paths,
     fcurves: tuple | None = None,
 ) -> tuple[float, ...]:
     frames: set[float] = set()
@@ -3105,7 +3107,7 @@ def _action_keyframes_for_paths(
 
 def _action_interpolation(
     action: bpy.types.Action,
-    paths: set[str],
+    paths,
     fcurves: tuple | None = None,
 ) -> int:
     if not paths:
@@ -3148,19 +3150,23 @@ def _iter_action_fcurves(action: bpy.types.Action, slot=None):
                     yield from getattr(channelbag, "fcurves", []) or []
 
 
-def _pose_bone_paths(armature: bpy.types.Object, bone_name: str) -> dict[str, str]:
+def _pose_bone_paths(armature: bpy.types.Object, bone_name: str) -> tuple[str, ...]:
     pose = getattr(armature, "pose", None)
     pose_bone = pose.bones.get(bone_name) if pose else None
     if pose_bone is None:
-        return {}
+        return ()
 
-    out: dict[str, str] = {}
+    out: list[str] = [""] * len(_BONE_TRANSFORM_PROPERTIES)
+    found = False
+    index = 0
     for prop in _BONE_TRANSFORM_PROPERTIES:
         try:
-            out[prop] = pose_bone.path_from_id(prop)
+            out[index] = pose_bone.path_from_id(prop)
+            found = True
         except Exception:
             pass
-    return out
+        index += 1
+    return tuple(out) if found else ()
 
 
 def _pose_bone_constraint_keyframes(pose_bone) -> tuple[float, ...]:
