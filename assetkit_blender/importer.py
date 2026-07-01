@@ -137,6 +137,8 @@ _ACTIVE_TEXTURE_LOAD_MODE = "IMMEDIATE"
 _ACTIVE_MATERIAL_TEMPLATE_CLONING = True
 _ACTIVE_PREBUILT_MATERIALS_BY_ID: dict[int, bpy.types.Material | None] | None = None
 _MATERIAL_NOT_PREBUILT = object()
+_MATERIAL_CACHE_KEY_AUTO = object()
+_NO_MATERIAL_CACHE_KEY = object()
 _MATERIAL_TEMPLATE_CLONE_PRIMITIVE_LIMIT = 1024
 _MATERIAL_PREBUILD_PRIMITIVE_LIMIT = 1024
 _DEFERRED_TEXTURE_WAITERS: dict[tuple[str, str], list[object]] = {}
@@ -1129,16 +1131,16 @@ def _prebuild_material_cache(
     created = 0
     skipped = 0
     for primitive in primitives:
-        if not _has_material_data(primitive):
+        cache_key = _material_cache_key_for_data(primitive)
+        if cache_key is _NO_MATERIAL_CACHE_KEY:
             prebuilt[id(primitive)] = None
             skipped += 1
             continue
-        cache_key = _material_cache_key(primitive)
         if cache_key in material_cache:
             prebuilt[id(primitive)] = material_cache[cache_key]
             skipped += 1
             continue
-        material = _create_material(primitive, material_cache)
+        material = _create_material(primitive, material_cache, cache_key=cache_key)
         prebuilt[id(primitive)] = material
         if material is not None:
             created += 1
@@ -2956,12 +2958,13 @@ def _try_defer_material_assignment(
         return False
 
     classic_deferred = False
-    if _has_material_data(data):
+    material_cache_key = _material_cache_key_for_data(data)
+    if material_cache_key is not _NO_MATERIAL_CACHE_KEY:
         color_attr = _color_attribute_name(data)
         base_color = _material_base_color(data)
         if _can_use_classic_texture_fast_material(data, color_attr):
             classic_deferred = True
-            cache_key = _material_cache_key(data)
+            cache_key = material_cache_key
         else:
             fast_key = _fast_simple_native_base_color_texture_key(data)
             if fast_key is None:
@@ -2971,7 +2974,7 @@ def _try_defer_material_assignment(
                 color_attr = ""
                 base_color = data.base_color
             elif _can_use_base_color_texture_fast_material(data, color_attr, base_color):
-                cache_key = _material_cache_key(data)
+                cache_key = material_cache_key
             else:
                 return False
     else:
@@ -6972,21 +6975,13 @@ def _gsplat_sorting_method_name(value: int) -> str:
 def _create_material(
     data: MeshPrimitiveData,
     material_cache: dict[object, bpy.types.Material] | None = None,
+    *,
+    cache_key: object = _MATERIAL_CACHE_KEY_AUTO,
 ) -> bpy.types.Material | None:
-    if not _has_material_data(data):
-        return None
-
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     profile_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = profile_started_at
     cache_key_ms = 0.0
-    new_ms = 0.0
-    simple_ms = 0.0
-    nodes_ms = 0.0
-    props_ms = 0.0
-    settings_ms = 0.0
-    textures_ms = 0.0
-    animation_ms = 0.0
 
     def lap_ms() -> float:
         nonlocal phase_started_at
@@ -6997,8 +6992,20 @@ def _create_material(
         phase_started_at = now
         return elapsed
 
-    cache_key = _material_cache_key(data)
-    cache_key_ms = lap_ms()
+    if cache_key is _MATERIAL_CACHE_KEY_AUTO:
+        cache_key = _material_cache_key_for_data(data)
+        cache_key_ms = lap_ms()
+    if cache_key is _NO_MATERIAL_CACHE_KEY:
+        return None
+
+    new_ms = 0.0
+    simple_ms = 0.0
+    nodes_ms = 0.0
+    props_ms = 0.0
+    settings_ms = 0.0
+    textures_ms = 0.0
+    animation_ms = 0.0
+
     if material_cache is not None and cache_key in material_cache:
         if profile_detail:
             _record_material_profile(
@@ -9236,6 +9243,47 @@ def _has_material_data(data: MeshPrimitiveData) -> bool:
     if _color_attribute_name(data):
         return True
     return _material_cache_key(data) != _default_material_cache_key()
+
+
+def _material_cache_key_for_data(data: MeshPrimitiveData) -> object:
+    if (
+        not data.material_name
+        and not data.material_key
+        and not data.material_type
+        and not data.alpha_mode
+        and not data.transparent_inverted
+        and not data.texture_infos
+        and not data.color_sets
+        and not data.base_color_texture
+        and not data.metallic_roughness_texture
+        and not data.occlusion_texture
+        and not data.normal_texture
+        and not data.emissive_texture
+        and not data.transparent_texture
+        and not data.specular_texture
+        and not data.specular_color_texture
+        and not data.clearcoat_texture
+        and not data.clearcoat_roughness_texture
+        and not data.clearcoat_normal_texture
+        and not data.transmission_texture
+        and not data.sheen_color_texture
+        and not data.sheen_roughness_texture
+        and not data.iridescence_texture
+        and not data.iridescence_thickness_texture
+        and not data.volume_thickness_texture
+        and not data.anisotropy_texture
+        and not data.diffuse_transmission_texture
+        and not data.diffuse_transmission_color_texture
+    ):
+        return _NO_MATERIAL_CACHE_KEY
+    if data.material_name:
+        return _material_cache_key(data)
+    if _color_attribute_name(data):
+        return _material_cache_key(data)
+    cache_key = _material_cache_key(data)
+    if cache_key == _default_material_cache_key():
+        return _NO_MATERIAL_CACHE_KEY
+    return cache_key
 
 
 def _material_base_color(data: MeshPrimitiveData) -> tuple[float, float, float, float]:
