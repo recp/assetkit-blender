@@ -134,6 +134,15 @@ jobs:
             --python "${{ steps.py313.outputs.python-path }}" `
             --extra-python "${{ steps.py311.outputs.python-path }}"
 
+      - name: Check animation roundtrip
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: |
+          "$BLENDER_BIN" --background --factory-startup \
+            --python tools/blender_animation_roundtrip_check.py -- \
+            --asset-cache "$RUNNER_TEMP/assetkit-import-suite" \
+            --out "$RUNNER_TEMP/assetkit-animation-roundtrip"
+
       - uses: actions/upload-artifact@v7
         with:
           name: assetkit-blender-${{ matrix.platform }}
