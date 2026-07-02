@@ -2,6 +2,11 @@
 
 Blender add-on for importing and exporting 3D assets through [AssetKit](https://github.com/recp/assetkit)
 
+**Blender 5 removed the built-in COLLADA/DAE importer and exporter.** 
+
+**AssetKit-Blender brings DAE support back to current Blender releases**, while also adding
+a fast, native path for other formats like glTF/GLB, OBJ, STL, PLY, and 3MF import/export.
+
 ## Formats
 
 - glTF / GLB (2.0+)
