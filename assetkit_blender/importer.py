@@ -823,6 +823,7 @@ def _begin_scene_build(
         apply_animation=apply_node_animation,
         skip_animation_nodes=node_animation_skip_indices,
         required_indices=required_node_indices,
+        has_visibility_animation=node_visibility_animation,
     )
     nodes_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     if profile_detail:
@@ -3529,9 +3530,9 @@ def _create_scene_nodes(
     apply_animation: bool = True,
     skip_animation_nodes: set[int] | None = None,
     required_indices: set[int] | None = None,
+    has_visibility_animation: bool = False,
 ) -> dict[int, bpy.types.Object]:
     objects: dict[int, bpy.types.Object] = {}
-    node_lookup = {index: node for index, node in enumerate(nodes)}
     skip_animation_nodes = skip_animation_nodes or set()
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     create_started_at = time.perf_counter() if profile_detail else 0.0
@@ -3552,15 +3553,18 @@ def _create_scene_nodes(
         parent = objects.get(node.parent_index) if node.parent_index >= 0 else coord_root
         _set_parent(obj, parent)
         _apply_matrix_buffer(obj, node.matrix_f32)
-        has_visibility_animation = _node_has_effective_visibility_animation(index, node_lookup)
+        node_has_visibility_animation = has_visibility_animation and _node_has_effective_visibility_animation(
+            index,
+            nodes,
+        )
         if apply_animation and index not in skip_animation_nodes:
             anim_started_at = time.perf_counter() if profile_detail else 0.0
-            _apply_animation(obj, node, skip_visibility=has_visibility_animation)
+            _apply_animation(obj, node, skip_visibility=node_has_visibility_animation)
             if profile_detail:
                 animation_ms += (time.perf_counter() - anim_started_at) * 1000.0
-            if has_visibility_animation:
+            if node_has_visibility_animation:
                 vis_started_at = time.perf_counter() if profile_detail else 0.0
-                _apply_effective_node_visibility_animation(obj, index, node_lookup)
+                _apply_effective_node_visibility_animation(obj, index, nodes)
                 if profile_detail:
                     visibility_anim_ms += (time.perf_counter() - vis_started_at) * 1000.0
         if obj.type == "EMPTY":
@@ -4164,12 +4168,12 @@ def _node_has_visibility_animation(node: SceneNodeData) -> bool:
 
 def _node_has_effective_visibility_animation(
     node_index: int,
-    node_data: dict[int, SceneNodeData],
+    node_data: dict[int, SceneNodeData] | list[SceneNodeData],
 ) -> bool:
     if node_index < 0 or not node_data:
         return False
     for ancestor_index in _node_ancestor_chain(node_index, node_data):
-        node = node_data.get(ancestor_index)
+        node = _node_data_get(node_data, ancestor_index)
         if node and _node_has_visibility_animation(node):
             return True
     return False
@@ -4178,7 +4182,7 @@ def _node_has_effective_visibility_animation(
 def _apply_effective_node_visibility_animation(
     obj: bpy.types.Object,
     node_index: int,
-    node_data: dict[int, SceneNodeData],
+    node_data: dict[int, SceneNodeData] | list[SceneNodeData],
 ) -> None:
     if node_index < 0 or not node_data:
         return
@@ -4229,26 +4233,29 @@ def _apply_effective_node_visibility_animation(
 
 def _node_ancestor_chain(
     node_index: int,
-    node_data: dict[int, SceneNodeData],
+    node_data: dict[int, SceneNodeData] | list[SceneNodeData],
 ) -> list[int]:
     chain: list[int] = []
     seen: set[int] = set()
     current = node_index
-    while current >= 0 and current in node_data and current not in seen:
+    while current >= 0 and current not in seen:
+        node = _node_data_get(node_data, current)
+        if node is None:
+            break
         seen.add(current)
         chain.append(current)
-        current = node_data[current].parent_index
+        current = node.parent_index
     chain.reverse()
     return chain
 
 
 def _visibility_channels_by_clip(
     chain: list[int],
-    node_data: dict[int, SceneNodeData],
+    node_data: dict[int, SceneNodeData] | list[SceneNodeData],
 ) -> dict[tuple[int, str], dict[int, list[dict]]]:
     clips: dict[tuple[int, str], dict[int, list[dict]]] = {}
     for node_index in chain:
-        node = node_data.get(node_index)
+        node = _node_data_get(node_data, node_index)
         if not node:
             continue
         for channel in node.anim_channels or ():
@@ -4261,12 +4268,12 @@ def _visibility_channels_by_clip(
 
 def _effective_visibility_at_time(
     chain: list[int],
-    node_data: dict[int, SceneNodeData],
+    node_data: dict[int, SceneNodeData] | list[SceneNodeData],
     channels_by_node: dict[int, list[dict]],
     time_value: float,
 ) -> bool:
     for node_index in chain:
-        node = node_data.get(node_index)
+        node = _node_data_get(node_data, node_index)
         if not node:
             continue
         channels = channels_by_node.get(node_index)
@@ -4277,6 +4284,15 @@ def _effective_visibility_at_time(
         if not visible:
             return False
     return True
+
+
+def _node_data_get(
+    node_data: dict[int, SceneNodeData] | list[SceneNodeData],
+    node_index: int,
+) -> SceneNodeData | None:
+    if isinstance(node_data, list):
+        return node_data[node_index] if 0 <= node_index < len(node_data) else None
+    return node_data.get(node_index)
 
 
 def _visibility_channels_value(
