@@ -11,6 +11,10 @@ assetkit_blender/libassetkit_*.*
 assetkit_blender/libassetkit*.dylib
 assetkit_blender/libassetkit*.so*
 assetkit_blender/assetkit*.dll
+assetkit_blender/libds*.dylib
+assetkit_blender/libds*.so*
+assetkit_blender/ds*.dll
+assetkit_blender/libds*.dll
 dist/
 addon_upload_ready/
 build-blender/
