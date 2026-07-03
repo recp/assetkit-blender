@@ -16,6 +16,22 @@ a fast, native path for other formats like glTF/GLB, OBJ, STL, PLY, and 3MF impo
 - STL
 - PLY
 
+
+## Install to Blender
+
+After a release a tag e.g. *v0.1.0*, [GitHub Actions](https://github.com/recp/assetkit-blender/actions/) builds package for multiple platforms then attaches
+the generated platform zip files to the *GitHub Release* for that tag automatically. 
+
+1. Download the zip for your platform from:
+   https://github.com/recp/assetkit-blender/releases/latest
+
+2. In Blender, install it with:
+   Edit > Preferences > Add-ons > Install from Disk
+
+3. Enable the add-on.
+
+4. Follow repo to get/report bugfixes and get new features asap
+
 ## Benchmarks
 
 Here are local benchmark results from an M1 Max MacBook Pro, measured with `tools/benchmark_review_imports.sh`.
@@ -58,6 +74,8 @@ By default it uses:
 - AssetKit shading mode `AS_IS`
 - AssetKit texture loading `IMMEDIATE`
 
+---
+
 ## Build
 
 Build AssetKit, then build the native Blender bridge with Blender's Python:
@@ -71,7 +89,7 @@ cmake --build build
 
 The bridge is written to `assetkit_blender/` as `_assetkit_blender.*`. If it is not present, the add-on can still use the configured AssetKit shared library through `ctypes`.
 
-## Production package
+### Production package
 
 Build and validate a Blender Extensions package zip with one command:
 
@@ -98,11 +116,7 @@ The release script stages the extension so `blender_manifest.toml` and
 `__init__.py` are at the zip root. Native bridge binaries and optional AssetKit
 decoder libraries are packaged as platform wheels under `wheels/`.
 
-## Release assets
+### Release assets
 
 Pushing a tag such as `v0.1.0` runs the package matrix on GitHub Actions and attaches
 the platform zip files to the GitHub Release for that tag automatically.
-
-## Install
-
-Download the addon in releases page and use "Install from Disk" select the downloaded addon zip.
