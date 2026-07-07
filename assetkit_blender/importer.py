@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 import math
 import os
+import threading
 import time
 
 import bpy
@@ -190,6 +191,10 @@ _TRI_LOOP_START_CACHE_LIMIT = 65536
 _ACTION_SLOTS_SUPPORTED: bool | None = None
 _USE_SHARED_ACTION_SLOTS = False
 _PROFILE_MATERIAL_STATS: dict[str, float | int] | None = None
+_PROGRESSIVE_BATCH_SIZE = 128
+_PROGRESSIVE_TIME_BUDGET = 0.006
+_PROGRESSIVE_LOAD_POLL_INTERVAL = 0.005
+_ACTIVE_IMPORT_JOBS: list[object] = []
 _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
 _IMPORT_ANIMATION_SCOPE_SERIAL = 0
 _AK_ACTION_CLIP_INDEX_PROP = "assetkit_animation_clip_index"
@@ -439,6 +444,310 @@ def import_assetkit_file(
     result = _import_result_objects(objects, state)
     _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
     return result
+
+
+def import_assetkit_file_progressive(
+    filepath: str,
+    library_path: str = "",
+    load_options: LoadOptions | None = None,
+    collection: bpy.types.Collection | None = None,
+    batch_size: int = _PROGRESSIVE_BATCH_SIZE,
+    time_budget: float = _PROGRESSIVE_TIME_BUDGET,
+    focus_mode: str = "NEVER",
+    placement_mode: str = "AS_AUTHORED",
+    scene_was_empty: bool = False,
+    focus_camera: bpy.types.Object | None = None,
+    select_imported: bool = False,
+    shading_mode: str = "AUTO",
+    set_viewport_shading: bool = True,
+    clean_viewport_overlays: bool = True,
+    fit_timeline: bool = False,
+    on_complete=None,
+    on_error=None,
+) -> object:
+    job = _ProgressiveImportJob(
+        filepath,
+        library_path,
+        load_options,
+        collection or bpy.context.collection,
+        max(1, int(batch_size)),
+        max(0.001, float(time_budget)),
+        focus_mode,
+        placement_mode,
+        scene_was_empty,
+        focus_camera,
+        select_imported,
+        shading_mode,
+        set_viewport_shading,
+        clean_viewport_overlays,
+        fit_timeline,
+        on_complete,
+        on_error,
+    )
+    _ACTIVE_IMPORT_JOBS.append(job)
+    job.start()
+    return job
+
+
+class _ProgressiveImportJob:
+    def __init__(
+        self,
+        filepath: str,
+        library_path: str,
+        load_options: LoadOptions | None,
+        collection: bpy.types.Collection,
+        batch_size: int,
+        time_budget: float,
+        focus_mode: str,
+        placement_mode: str,
+        scene_was_empty: bool,
+        focus_camera: bpy.types.Object | None,
+        select_imported: bool,
+        shading_mode: str,
+        set_viewport_shading: bool,
+        clean_viewport_overlays: bool,
+        fit_timeline: bool,
+        on_complete,
+        on_error,
+    ) -> None:
+        self.filepath = filepath
+        self.library_path = library_path
+        self.load_options = load_options
+        self.collection = collection
+        self.batch_size = batch_size
+        self.time_budget = time_budget
+        self.focus_mode = focus_mode
+        self.placement_mode = placement_mode
+        self.scene_was_empty = scene_was_empty
+        self.focus_camera = focus_camera
+        self.select_imported = select_imported
+        self.shading_mode = shading_mode
+        self.set_viewport_shading = set_viewport_shading
+        self.clean_viewport_overlays = clean_viewport_overlays
+        self.fit_timeline = fit_timeline
+        self.on_complete = on_complete
+        self.on_error = on_error
+        self.prepared = False
+        self.load_started = False
+        self.done = False
+        self.failed = False
+        self.texture_load_mode = "IMMEDIATE"
+        self.material_template_cloning = True
+        self.prebuilt_materials = None
+        self.animation_scope = ""
+        self.existing_actions = None
+        self.existing_frame_range = None
+        self.scene_had_timeline_content = False
+        self.defer_custom_normals = False
+        self.preserve_tangents = False
+        self.loaded_scene = None
+        self.load_error = None
+        self.state = None
+        self.import_units = []
+        self.unit_index = 0
+        self.objects: list[bpy.types.Object] = []
+        self.started_at = 0.0
+
+    def start(self) -> None:
+        bpy.app.timers.register(self._timer, first_interval=0.001)
+
+    def _timer(self) -> float | None:
+        previous = self._push_globals()
+        try:
+            if not self.load_started:
+                self._start_load()
+                return _PROGRESSIVE_LOAD_POLL_INTERVAL
+            if self.load_error is not None:
+                self._finish_error(self.load_error)
+                return None
+            if self.loaded_scene is None:
+                return _PROGRESSIVE_LOAD_POLL_INTERVAL
+            if not self.prepared:
+                self._prepare_loaded()
+                return 0.001
+            self._build_step()
+            if self.unit_index < len(self.import_units):
+                return 0.001
+            self._finish_success()
+            return None
+        except Exception as exc:
+            self._finish_error(exc)
+            return None
+        finally:
+            self._pop_globals(previous)
+
+    def _push_globals(self) -> tuple:
+        global _ACTIVE_TEXTURE_LOAD_MODE
+        global _ACTIVE_MATERIAL_TEMPLATE_CLONING
+        global _ACTIVE_PREBUILT_MATERIALS_BY_ID
+        global _ACTIVE_IMPORT_ANIMATION_SCOPE
+
+        previous = (
+            _ACTIVE_TEXTURE_LOAD_MODE,
+            _ACTIVE_MATERIAL_TEMPLATE_CLONING,
+            _ACTIVE_PREBUILT_MATERIALS_BY_ID,
+            _ACTIVE_IMPORT_ANIMATION_SCOPE,
+        )
+        _ACTIVE_TEXTURE_LOAD_MODE = self.texture_load_mode
+        _ACTIVE_MATERIAL_TEMPLATE_CLONING = self.material_template_cloning
+        _ACTIVE_PREBUILT_MATERIALS_BY_ID = self.prebuilt_materials
+        if self.animation_scope:
+            _ACTIVE_IMPORT_ANIMATION_SCOPE = self.animation_scope
+        return previous
+
+    def _pop_globals(self, previous: tuple) -> None:
+        global _ACTIVE_TEXTURE_LOAD_MODE
+        global _ACTIVE_MATERIAL_TEMPLATE_CLONING
+        global _ACTIVE_PREBUILT_MATERIALS_BY_ID
+        global _ACTIVE_IMPORT_ANIMATION_SCOPE
+
+        (
+            _ACTIVE_TEXTURE_LOAD_MODE,
+            _ACTIVE_MATERIAL_TEMPLATE_CLONING,
+            _ACTIVE_PREBUILT_MATERIALS_BY_ID,
+            _ACTIVE_IMPORT_ANIMATION_SCOPE,
+        ) = previous
+
+    def _start_load(self) -> None:
+        global _ACTIVE_IMPORT_ANIMATION_SCOPE
+
+        self.started_at = time.perf_counter()
+        _reset_action_cache()
+        _reset_material_template_cache()
+        _reset_material_profile()
+        self.animation_scope = _new_import_animation_scope(self.filepath)
+        _ACTIVE_IMPORT_ANIMATION_SCOPE = self.animation_scope
+        self.existing_actions = _snapshot_actions(self.fit_timeline)
+        self.existing_frame_range = _snapshot_scene_frame_range(self.fit_timeline)
+        self.scene_had_timeline_content = (
+            _scene_has_timeline_content(bpy.context.scene) if self.fit_timeline else False
+        )
+        self.texture_load_mode = _texture_load_mode(self.load_options)
+        self.defer_custom_normals = _defer_custom_normals(self.load_options, self.shading_mode)
+        self.preserve_tangents = _preserve_tangents(self.load_options)
+        self.load_started = True
+
+        worker = threading.Thread(target=self._load_worker, name="AssetKitImportLoad", daemon=True)
+        worker.start()
+
+    def _load_worker(self) -> None:
+        profile_detail = _PROFILE_MATERIAL_STATS is not None
+        load_started_at = time.perf_counter() if profile_detail else 0.0
+        try:
+            loaded_scene = _load_assetkit_scene(self.filepath, self.library_path, self.load_options)
+        except Exception as exc:
+            self.load_error = exc
+            return
+        if profile_detail:
+            primitives, curves, scene_nodes, _doc_extra, _scene_extra, _scene_info, _doc_images = loaded_scene
+            _profile_log(
+                "progressive load "
+                f"meshes={len(primitives)} curves={len(curves)} nodes={len(scene_nodes)} "
+                f"elapsed={(time.perf_counter() - load_started_at) * 1000.0:.3f}ms"
+            )
+        self.loaded_scene = loaded_scene
+
+    def _prepare_loaded(self) -> None:
+        global _ACTIVE_MATERIAL_TEMPLATE_CLONING
+        global _ACTIVE_PREBUILT_MATERIALS_BY_ID
+        global _ACTIVE_TEXTURE_LOAD_MODE
+
+        if self.loaded_scene is None:
+            return
+        primitives, curves, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = self.loaded_scene
+
+        self.state = _begin_scene_build(
+            primitives,
+            scene_nodes,
+            self.collection,
+            doc_extra,
+            scene_extra,
+            scene_info,
+            doc_images,
+            curves=curves,
+            defer_custom_normals=self.defer_custom_normals,
+            preserve_tangents=self.preserve_tangents,
+        )
+        self.import_units = _mesh_import_units(primitives)
+        self.material_template_cloning = len(primitives) <= _MATERIAL_TEMPLATE_CLONE_PRIMITIVE_LIMIT
+        self.prebuilt_materials = None
+        _ACTIVE_TEXTURE_LOAD_MODE = self.texture_load_mode
+        _ACTIVE_MATERIAL_TEMPLATE_CLONING = self.material_template_cloning
+        _ACTIVE_PREBUILT_MATERIALS_BY_ID = self.prebuilt_materials
+        self.objects.extend(_create_curve_objects(curves, self.state, self.collection))
+        self.prepared = True
+
+    def _build_step(self) -> None:
+        if self.state is None:
+            return
+        started_at = time.perf_counter()
+        processed = 0
+        while self.unit_index < len(self.import_units):
+            unit = self.import_units[self.unit_index]
+            self.objects.extend(_create_import_unit(unit, self.state, self.collection, self.shading_mode))
+            self.unit_index += 1
+            processed += 1
+            if processed >= self.batch_size:
+                break
+            if time.perf_counter() - started_at >= self.time_budget:
+                break
+
+    def _finish_success(self) -> None:
+        global _ACTIVE_IMPORT_ANIMATION_SCOPE
+
+        if self.done:
+            return
+        self.done = True
+        if self.state is not None:
+            _apply_deferred_bind_pose_skins(self.state)
+            _finish_import(
+                self.objects,
+                self.focus_mode,
+                self.placement_mode,
+                self.state[_S_ROOT_OBJECTS],
+                self.scene_was_empty,
+                self.collection,
+                self.focus_camera,
+                self.select_imported,
+                self.set_viewport_shading,
+                self.clean_viewport_overlays,
+                self.existing_actions,
+                self.existing_frame_range,
+                self.scene_had_timeline_content,
+            )
+        result = _import_result_objects(self.objects, self.state or {})
+        if _PROFILE_MATERIAL_STATS is not None:
+            _profile_log(
+                "progressive finish "
+                f"objects={len(result)} units={len(self.import_units)} "
+                f"elapsed={(time.perf_counter() - self.started_at) * 1000.0:.3f}ms"
+            )
+            _log_material_profile("progressive")
+        _reset_material_template_cache()
+        _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
+        _remove_active_import_job(self)
+        if self.on_complete:
+            self.on_complete(result)
+
+    def _finish_error(self, exc: Exception) -> None:
+        global _ACTIVE_IMPORT_ANIMATION_SCOPE
+
+        self.failed = True
+        self.done = True
+        _reset_material_template_cache()
+        _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
+        _remove_active_import_job(self)
+        if self.on_error:
+            self.on_error(exc)
+        else:
+            raise exc
+
+
+def _remove_active_import_job(job: object) -> None:
+    try:
+        _ACTIVE_IMPORT_JOBS.remove(job)
+    except ValueError:
+        pass
 
 
 def _new_import_animation_scope(filepath: str) -> str:
@@ -2984,11 +3293,15 @@ def _try_defer_material_assignment(
         return False
 
     classic_deferred = False
+    simple_deferred = False
     material_cache_key = _material_cache_key_for_data(data)
     if material_cache_key is not _NO_MATERIAL_CACHE_KEY:
         color_attr = _color_attribute_name(data)
         base_color = _material_base_color(data)
-        if _can_use_classic_texture_fast_material(data, color_attr):
+        if _can_defer_simple_material(data, color_attr):
+            simple_deferred = True
+            cache_key = material_cache_key
+        elif _can_use_classic_texture_fast_material(data, color_attr):
             classic_deferred = True
             cache_key = material_cache_key
         else:
@@ -3023,7 +3336,19 @@ def _try_defer_material_assignment(
         material_name = data.material_name or f"{data.name}_Material"
         if data.material_name and color_attr:
             material_name = f"{material_name}_{color_attr}"
-        if classic_deferred:
+        if simple_deferred:
+            spec = _DeferredMaterialSpec(
+                material_name,
+                material_cache,
+                cache_key,
+                "",
+                None,
+                base_color,
+                float(data.metallic),
+                float(data.roughness),
+                _is_double_sided_material(data),
+            )
+        elif classic_deferred:
             spec = _DeferredMaterialSpec(
                 material_name,
                 material_cache,
@@ -3558,11 +3883,17 @@ def _create_scene_nodes(
     skip_animation_nodes = skip_animation_nodes or set()
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     create_started_at = time.perf_counter() if profile_detail else 0.0
+    fallback_node_count = _fallback_scene_node_count(nodes, required_indices)
 
     for index, node in enumerate(nodes):
         if required_indices is not None and index not in required_indices:
             continue
-        obj = _new_scene_node_object(node, index, (node_visibility or {}).get(index, node.visible))
+        obj = _new_scene_node_object(
+            node,
+            index,
+            (node_visibility or {}).get(index, node.visible),
+            fallback_node_count,
+        )
         collection.objects.link(obj)
         objects[index] = obj
 
@@ -4382,8 +4713,19 @@ def _remove_fcurves(action: bpy.types.Action, data_path: str) -> None:
             fcurves.remove(fcurve)
 
 
-def _new_scene_node_object(node: SceneNodeData, index: int, visible: bool) -> bpy.types.Object:
-    name = node.name or f"AssetKit Node {index}"
+def _fallback_scene_node_count(nodes: list[SceneNodeData], required_indices: set[int] | None) -> int:
+    if required_indices is None:
+        return sum(1 for node in nodes if not node.name)
+    return sum(1 for index, node in enumerate(nodes) if index in required_indices and not node.name)
+
+
+def _new_scene_node_object(
+    node: SceneNodeData,
+    index: int,
+    visible: bool,
+    fallback_node_count: int,
+) -> bpy.types.Object:
+    name = node.name or ("AssetKit Node" if fallback_node_count == 1 else f"AssetKit Node {index}")
 
     if node.camera_type:
         camera = bpy.data.cameras.new(node.camera_name or name)
@@ -7687,6 +8029,16 @@ def _can_defer_base_color_texture_material(
     return (
         _ACTIVE_TEXTURE_LOAD_MODE == "DEFERRED"
         and _can_use_base_color_texture_fast_material(data, color_attr, base_color)
+    )
+
+
+def _can_defer_simple_material(data: MeshPrimitiveData, color_attr: str) -> bool:
+    return (
+        _ACTIVE_TEXTURE_LOAD_MODE == "DEFERRED"
+        and not data.material_extra
+        and not data.material_variants
+        and not _has_nondefault_assetkit_material_props(data)
+        and _can_use_simple_material(data, color_attr)
     )
 
 
