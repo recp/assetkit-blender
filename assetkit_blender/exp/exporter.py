@@ -72,11 +72,11 @@ from .materials import _material_bake_required, _material_tuple
 EXPORT_FORMATS = (
     ("GLTF", "glTF", "Export .gltf with external .bin/resources", AK_FILE_TYPE_GLTF, ".gltf"),
     ("GLB", "GLB", "Export binary .glb", AK_FILE_TYPE_GLB, ".glb"),
-    ("3MF", "3MF (.3mf)", "Export 3D Manufacturing Format package", AK_FILE_TYPE_3MF, ".3mf"),
     ("DAE", "COLLADA (.dae)", "Export COLLADA .dae", AK_FILE_TYPE_DAE, ".dae"),
     ("OBJ", "Wavefront OBJ (.obj)", "Export Wavefront OBJ .obj/.mtl", AK_FILE_TYPE_WAVEFRONT, ".obj"),
     ("STL", "STL (.stl)", "Export STL triangle mesh", AK_FILE_TYPE_STL, ".stl"),
     ("PLY", "PLY (.ply)", "Export Polygon File Format mesh", AK_FILE_TYPE_PLY, ".ply"),
+    ("3MF", "3MF (.3mf)", "Export 3D Manufacturing Format package", AK_FILE_TYPE_3MF, ".3mf"),
 )
 
 _AKB_NATIVE_MESH_PAYLOAD = 0x414B4D46
@@ -233,6 +233,7 @@ def export_scene(
     ply_export_normals: bool = True,
     ply_export_colors: str = "SRGB",
     ply_export_triangulated_mesh: bool = False,
+    three_mf_compression_level: int = 1,
 ) -> int:
     module = _native_module()
     if module is None:
@@ -281,6 +282,7 @@ def export_scene(
     )
     ply_export_format = _ply_export_format_id(ply_format)
     ply_color_mode = _ply_export_color_mode_id(ply_export_colors)
+    three_mf_compression_level = max(0, min(12, int(three_mf_compression_level)))
     ply_scale_value = _resolve_format_float(global_scale, ply_global_scale, 1.0)
     ply_scene_unit = _resolve_format_bool(use_scene_unit, ply_use_scene_unit, False)
     ply_forward = _resolve_format_text(forward_axis, ply_forward_axis, "Y")
@@ -385,6 +387,7 @@ def export_scene(
         ply_export_uv=bool(ply_export_uv) and bool(export_uv),
         ply_export_color_mode=ply_color_mode if export_vertex_colors else AK_PLY_EXPORT_COLOR_NONE,
         ply_export_triangulated=bool(ply_export_triangulated_mesh),
+        three_mf_compression_level=three_mf_compression_level,
         apply_modifiers=bool(mesh_apply_modifiers),
     )
 
@@ -434,6 +437,7 @@ def _export_scene_once(
     ply_export_uv: bool,
     ply_export_color_mode: int,
     ply_export_triangulated: bool,
+    three_mf_compression_level: int,
     apply_modifiers: bool,
 ) -> int:
 
@@ -525,6 +529,7 @@ def _export_scene_once(
                 int(bool(ply_export_uv)),
                 int(ply_export_color_mode),
                 int(bool(ply_export_triangulated)),
+                int(three_mf_compression_level),
                 _assetkit_blender_authoring_tool(),
                 float(stl_scale),
                 str(stl_forward_axis or "Y"),
@@ -650,6 +655,7 @@ def _export_stl_batch_scene(
             ply_export_uv=ply_export_uv,
             ply_export_color_mode=ply_export_color_mode,
             ply_export_triangulated=ply_export_triangulated,
+            three_mf_compression_level=1,
             apply_modifiers=apply_modifiers,
         )
     return AK_OK

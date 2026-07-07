@@ -76,6 +76,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   uintptr_t saved_ply_export_uv;
   uintptr_t saved_ply_export_color_mode;
   uintptr_t saved_ply_export_triangulated;
+  uintptr_t saved_zip_export_compression_level;
   uintptr_t saved_authoring_tool;
   const char *authoring_tool_fragment;
   const char *stl_forward_axis;
@@ -105,12 +106,14 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int ply_export_uv;
   int ply_export_color_mode;
   int ply_export_triangulated;
+  int zip_export_compression_level;
   int export_coord_system_id;
   int export_coord_conversion_id;
   int set_gltf_options;
   int set_dae_options;
   int set_stl_options;
   int set_ply_options;
+  int set_zip_options;
   int set_authoring_tool;
   double stl_global_scale;
   AkCoordSys *export_coord;
@@ -130,6 +133,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   ply_export_uv = 1;
   ply_export_color_mode = AK_PLY_EXPORT_COLOR_SRGB;
   ply_export_triangulated = 0;
+  zip_export_compression_level = 1;
   export_coord_system_id = AKB_LOAD_COORD_Y_UP;
   export_coord_conversion_id = AKB_COORD_TRANSFORM;
   authoring_tool_fragment = NULL;
@@ -137,7 +141,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   stl_forward_axis = "Y";
   stl_up_axis = "Z";
   if (!PyArg_ParseTuple(args,
-                        "sisO|O" "iiiiiiiiiii" "sdss",
+                        "sisO|O" "iiiiiiiiiiii" "sdss",
                         &out_dir,
                         &file_type_int,
                         &name,
@@ -154,6 +158,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
                         &ply_export_uv,
                         &ply_export_color_mode,
                         &ply_export_triangulated,
+                        &zip_export_compression_level,
                         &authoring_tool_fragment,
                         &stl_global_scale,
                         &stl_forward_axis,
@@ -543,6 +548,17 @@ akb_export_scene(PyObject *self, PyObject *args) {
     ak_opt_set(AK_OPT_PLY_EXPORT_TRIANGULATED,
                (uintptr_t)(ply_export_triangulated != 0));
   }
+  set_zip_options = file_type_int == AK_FILE_TYPE_3MF;
+  if (set_zip_options) {
+    if (zip_export_compression_level < 0)
+      zip_export_compression_level = 0;
+    else if (zip_export_compression_level > 12)
+      zip_export_compression_level = 12;
+    saved_zip_export_compression_level =
+      ak_opt_get(AK_OPT_ZIP_EXPORT_COMPRESSION_LEVEL);
+    ak_opt_set(AK_OPT_ZIP_EXPORT_COMPRESSION_LEVEL,
+               (uintptr_t)zip_export_compression_level);
+  }
   saved_authoring_tool = ak_opt_get(AK_OPT_EXPORT_AUTHORING_TOOL);
   set_authoring_tool = 0;
   if (authoring_tool_fragment && authoring_tool_fragment[0]) {
@@ -572,6 +588,9 @@ akb_export_scene(PyObject *self, PyObject *args) {
     ak_opt_set(AK_OPT_PLY_EXPORT_COLOR_MODE, saved_ply_export_color_mode);
     ak_opt_set(AK_OPT_PLY_EXPORT_TRIANGULATED, saved_ply_export_triangulated);
   }
+  if (set_zip_options)
+    ak_opt_set(AK_OPT_ZIP_EXPORT_COMPRESSION_LEVEL,
+               saved_zip_export_compression_level);
   if (profile)
     core_export_ms = akb_now_ms() - phase_started_at;
   Py_END_ALLOW_THREADS

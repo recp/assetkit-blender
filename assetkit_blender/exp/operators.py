@@ -343,6 +343,18 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         ),
         default="AUTO",
     )
+    three_mf_compression_level: bpy.props.IntProperty(
+        name="Compression",
+        description=(
+            "3MF ZIP compression level. 0 stores files fastest, "
+            "1 is fastest deflate, 12 is maximum compression"
+        ),
+        default=1,
+        min=0,
+        max=12,
+        soft_min=0,
+        soft_max=12,
+    )
     material_export_mode: bpy.props.EnumProperty(
         name="Shader Graphs",
         description="How unsupported Blender shader graphs are exported",
@@ -503,6 +515,10 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             if dae:
                 dae.prop(self, "dae_version")
                 dae.prop(self, "dae_index_mode")
+        elif self.export_format == "3MF":
+            three_mf = _draw_panel(layout, "ASSETKIT_export_3mf", "3MF", default_closed=False)
+            if three_mf:
+                three_mf.prop(self, "three_mf_compression_level")
         elif self.export_format == "STL":
             stl = _draw_panel(layout, "ASSETKIT_export_stl", "STL", default_closed=False)
             if stl:
@@ -747,6 +763,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                     "SRGB" if self.export_format == "PLY" and self.export_vertex_colors else self.ply_export_colors
                 ),
                 ply_export_triangulated_mesh=self.ply_export_triangulated_mesh,
+                three_mf_compression_level=self.three_mf_compression_level,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
