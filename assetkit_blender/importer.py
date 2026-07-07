@@ -4725,7 +4725,7 @@ def _new_scene_node_object(
     visible: bool,
     fallback_node_count: int,
 ) -> bpy.types.Object:
-    name = node.name or ("AssetKit Node" if fallback_node_count == 1 else f"AssetKit Node {index}")
+    name = node.name or ("AssetKit Node" if fallback_node_count == 1 or index == 0 else f"AssetKit Node {index}")
 
     if node.camera_type:
         camera = bpy.data.cameras.new(node.camera_name or name)
