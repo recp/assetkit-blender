@@ -579,9 +579,8 @@ akb_vec4_eq(const float v[4], float x, float y, float z, float w) {
 }
 
 static int
-akb_primitive_has_default_material_values(const AkbPrimitive *prim) {
+akb_primitive_has_simple_material_values(const AkbPrimitive *prim) {
   return prim
-         && akb_vec4_eq(prim->base_color, 1.0f, 1.0f, 1.0f, 1.0f)
          && akb_vec4_eq(prim->transparent_color, 1.0f, 1.0f, 1.0f, 1.0f)
          && akb_vec3_eq(prim->emissive_color, 0.0f, 0.0f, 0.0f)
          && akb_vec3_eq(prim->specular_color, 1.0f, 1.0f, 1.0f)
@@ -591,7 +590,6 @@ akb_primitive_has_default_material_values(const AkbPrimitive *prim) {
          && akb_vec3_eq(prim->diffuse_transmission_color, 1.0f, 1.0f, 1.0f)
          && akb_float_eq(prim->alpha_cutoff, 0.5f)
          && akb_float_eq(prim->transparent_amount, 1.0f)
-         && akb_float_eq(prim->opacity, 1.0f)
          && akb_float_eq(prim->normal_scale, 1.0f)
          && akb_float_eq(prim->occlusion_strength, 1.0f)
          && akb_float_eq(prim->emissive_strength, 1.0f)
@@ -657,7 +655,7 @@ akb_primitive_simple_base_color_texture_ok(const AkbPrimitive *prim) {
 static int
 akb_primitive_is_simple_py(const AkbPrimitive *prim) {
   return prim
-         && akb_primitive_has_default_material_values(prim)
+         && akb_primitive_has_simple_material_values(prim)
          && akb_primitive_simple_uvs_ok(prim)
          && akb_primitive_simple_base_color_texture_ok(prim)
          && !prim->color_set_count
@@ -665,7 +663,6 @@ akb_primitive_is_simple_py(const AkbPrimitive *prim) {
          && !prim->has_skin
          && !prim->has_gsplat
          && !prim->has_sheen
-         && !prim->alpha_mode
          && !prim->transparent_inverted
          && !prim->primitive_extra
          && !prim->mesh_extra
@@ -802,6 +799,15 @@ akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_ROUGHNESS, PyFloat_FromDouble(prim->roughness));
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_DOUBLE_SIDED, PyBool_FromLong(prim->double_sided));
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_SMOOTH_SHADING, PyBool_FromLong(prim->smooth_shading));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_MATERIAL_NAME,
+                 akb_unicode_from_cstr(prim->material_name));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_BASE_COLOR,
+                 akb_vec4_or_none(prim->base_color, 1.0f, 1.0f, 1.0f, 1.0f));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_OPACITY, akb_float_or_none(prim->opacity, 1.0f));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_ALPHA_MODE,
+                 prim->alpha_mode
+                 ? PyLong_FromUnsignedLong(prim->alpha_mode)
+                 : akb_none());
 
 #undef AKB_SIMPLE_SET
 

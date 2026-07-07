@@ -1242,6 +1242,28 @@ def _create_import_unit(
     return _create_import_object(unit, state, collection, shading_mode)
 
 
+def _mesh_data_for_replace(data: MeshPrimitiveData) -> MeshPrimitiveData:
+    if hasattr(data, "__dataclass_fields__"):
+        return data
+
+    clone = MeshPrimitiveData(
+        data.name,
+        data.vertices,
+        data.faces,
+        data.normals,
+        data.uvs,
+        data.loop_vertex_indices,
+    )
+    for field_name in MeshPrimitiveData.__dataclass_fields__:
+        if field_name in {"name", "vertices", "faces", "normals", "uvs", "loop_vertex_indices"}:
+            continue
+        try:
+            setattr(clone, field_name, getattr(data, field_name))
+        except AttributeError:
+            pass
+    return clone
+
+
 def _create_grouped_mesh_object(
     primitives: list[MeshPrimitiveData],
     state: dict,
@@ -1355,7 +1377,7 @@ def _create_grouped_mesh_object(
 
     replace_started_at = time.perf_counter() if profile_detail else 0.0
     data = replace(
-        first,
+        _mesh_data_for_replace(first),
         name=_group_mesh_name(first),
         vertex_count=total_vertex_count,
         loop_count=total_loop_count,

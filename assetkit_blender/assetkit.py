@@ -545,6 +545,10 @@ def _native_module():
     return _NATIVE_MODULE
 
 
+def warmup_native_module() -> None:
+    _native_module()
+
+
 class AssetKit:
     def __init__(self, library_path: str | os.PathLike[str] | None = None):
         self.library_path = resolve_library_path(library_path)
@@ -1416,9 +1420,13 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     _S_ROUGHNESS,
     _S_DOUBLE_SIDED,
     _S_SMOOTH_SHADING,
-) = range(36)
+    _S_MATERIAL_NAME,
+    _S_BASE_COLOR,
+    _S_OPACITY,
+    _S_ALPHA_MODE,
+) = range(40)
 _S_LEGACY_FIELD_COUNT = _S_GEOMETRY_KEY + 1
-_S_FIELD_COUNT = _S_SMOOTH_SHADING + 1
+_S_FIELD_COUNT = _S_ALPHA_MODE + 1
 
 
 class NativeSimpleMeshData:
@@ -1664,6 +1672,22 @@ class NativeSimpleMeshData:
     @property
     def material_key(self):
         return self._get(_S_MATERIAL_KEY, 0) or 0
+
+    @property
+    def material_name(self):
+        return self._get(_S_MATERIAL_NAME, "") or ""
+
+    @property
+    def base_color(self):
+        return self._get(_S_BASE_COLOR, (1.0, 1.0, 1.0, 1.0)) or (1.0, 1.0, 1.0, 1.0)
+
+    @property
+    def opacity(self):
+        return self._get(_S_OPACITY, 1.0)
+
+    @property
+    def alpha_mode(self):
+        return self._get(_S_ALPHA_MODE, 0) or 0
 
     @property
     def metallic(self):
@@ -2017,6 +2041,18 @@ def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
     data.has_node = bool(get("has_node"))
     data.file_type = int(get("file_type") or 0)
     data.mesh_key = int(get("mesh_key") or 0)
+    data.material_name = get("material_name") or ""
+    data.base_color = tuple(get("base_color") or (1.0, 1.0, 1.0, 1.0))
+    opacity = get("opacity")
+    data.opacity = float(opacity if opacity is not None else 1.0)
+    data.alpha_mode = int(get("alpha_mode") or 0)
+    data.material_type = int(get("material_type") or 0)
+    data.material_key = int(get("material_key") or 0)
+    metallic = get("metallic")
+    roughness = get("roughness")
+    data.metallic = float(metallic if metallic is not None else 1.0)
+    data.roughness = float(roughness if roughness is not None else 1.0)
+    data.double_sided = bool(get("double_sided"))
     data.primitive_index = int(get("primitive_index") or 0)
     data.zero_copy_flags = int(get("zero_copy_flags") or 0)
     data.geometry_key = int(get("geometry_key") or 0)

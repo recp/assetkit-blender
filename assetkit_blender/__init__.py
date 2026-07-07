@@ -43,6 +43,7 @@ from .operators import (
     ASSETKIT_OT_apply_morph_preset,
     ASSETKIT_OT_import_assetkit,
 )
+from .assetkit import warmup_native_module
 from .exp import ASSETKIT_OT_export_assetkit
 from .preferences import AssetKitPreferences
 
@@ -99,6 +100,7 @@ def menu_func_assetkit(self, _context):
 
 
 def register():
+    warmup_native_module()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.prepend(menu_func_import)
