@@ -52,6 +52,7 @@ set(ASSETKIT_CACHE_PATH_VARS
   ASSETKIT_SPZ_LIBRARY
   ASSETKIT_SPZ_RUNTIME_LIBRARY
   ASSETKIT_DS_LIBRARY
+  ASSETKIT_LIBDEFLATE_LIBRARY
   ASSETKIT_DS_RUNTIME_LIBRARY)
 
 if(ASSETKIT_ROOT AND ASSETKIT_STRICT_ROOT AND DEFINED ASSETKIT_CACHED_ROOT
@@ -79,6 +80,7 @@ set(ASSETKIT_INCLUDE_HINTS)
 set(ASSETKIT_LIBRARY_HINTS)
 set(CGLM_INCLUDE_HINTS)
 set(ASSETKIT_DS_LIBRARY_HINTS)
+set(ASSETKIT_LIBDEFLATE_LIBRARY_HINTS)
 if(ASSETKIT_ROOT)
   list(APPEND ASSETKIT_INCLUDE_HINTS "${ASSETKIT_ROOT}/include")
   list(APPEND CGLM_INCLUDE_HINTS "${ASSETKIT_ROOT}/deps/cglm/include")
@@ -86,16 +88,35 @@ if(ASSETKIT_ROOT)
     list(APPEND ASSETKIT_LIBRARY_HINTS
       "${ASSETKIT_ROOT}/build-static"
       "${ASSETKIT_ROOT}/build-static/src"
-      "${ASSETKIT_ROOT}/build-static/Release")
+      "${ASSETKIT_ROOT}/build-static/Release"
+      "${ASSETKIT_ROOT}/build-static/RelWithDebInfo"
+      "${ASSETKIT_ROOT}/build-static/Debug"
+      "${ASSETKIT_ROOT}/build-static/MinSizeRel")
     list(APPEND ASSETKIT_DS_LIBRARY_HINTS
       "${ASSETKIT_ROOT}/build-static/deps/ds"
       "${ASSETKIT_ROOT}/build-static/deps/ds/Release"
-      "${ASSETKIT_ROOT}/build-static/deps/ds/RelWithDebInfo")
+      "${ASSETKIT_ROOT}/build-static/deps/ds/RelWithDebInfo"
+      "${ASSETKIT_ROOT}/build-static/deps/ds/Debug"
+      "${ASSETKIT_ROOT}/build-static/deps/ds/MinSizeRel")
+    list(APPEND ASSETKIT_LIBDEFLATE_LIBRARY_HINTS
+      "${ASSETKIT_ROOT}/build-static"
+      "${ASSETKIT_ROOT}/build-static/Release"
+      "${ASSETKIT_ROOT}/build-static/RelWithDebInfo"
+      "${ASSETKIT_ROOT}/build-static/Debug"
+      "${ASSETKIT_ROOT}/build-static/MinSizeRel"
+      "${ASSETKIT_ROOT}/build-static/deps/libdeflate"
+      "${ASSETKIT_ROOT}/build-static/deps/libdeflate/Release"
+      "${ASSETKIT_ROOT}/build-static/deps/libdeflate/RelWithDebInfo"
+      "${ASSETKIT_ROOT}/build-static/deps/libdeflate/Debug"
+      "${ASSETKIT_ROOT}/build-static/deps/libdeflate/MinSizeRel")
   endif()
   list(APPEND ASSETKIT_LIBRARY_HINTS
     "${ASSETKIT_ROOT}/build"
     "${ASSETKIT_ROOT}/build/src"
     "${ASSETKIT_ROOT}/build/Release"
+    "${ASSETKIT_ROOT}/build/RelWithDebInfo"
+    "${ASSETKIT_ROOT}/build/Debug"
+    "${ASSETKIT_ROOT}/build/MinSizeRel"
     "${ASSETKIT_ROOT}/lib")
   list(APPEND ASSETKIT_DS_LIBRARY_HINTS
     "${ASSETKIT_ROOT}/build/deps/ds"
@@ -106,6 +127,23 @@ if(ASSETKIT_ROOT)
     "${ASSETKIT_ROOT}/deps/ds/build/RelWithDebInfo"
     "${ASSETKIT_ROOT}/lib"
     "${ASSETKIT_ROOT}/bin")
+  list(APPEND ASSETKIT_LIBDEFLATE_LIBRARY_HINTS
+    "${ASSETKIT_ROOT}/build"
+    "${ASSETKIT_ROOT}/build/Release"
+    "${ASSETKIT_ROOT}/build/RelWithDebInfo"
+    "${ASSETKIT_ROOT}/build/Debug"
+    "${ASSETKIT_ROOT}/build/MinSizeRel"
+    "${ASSETKIT_ROOT}/build/deps/libdeflate"
+    "${ASSETKIT_ROOT}/build/deps/libdeflate/Release"
+    "${ASSETKIT_ROOT}/build/deps/libdeflate/RelWithDebInfo"
+    "${ASSETKIT_ROOT}/build/deps/libdeflate/Debug"
+    "${ASSETKIT_ROOT}/build/deps/libdeflate/MinSizeRel"
+    "${ASSETKIT_ROOT}/deps/libdeflate/build"
+    "${ASSETKIT_ROOT}/deps/libdeflate/build/Release"
+    "${ASSETKIT_ROOT}/deps/libdeflate/build/RelWithDebInfo"
+    "${ASSETKIT_ROOT}/deps/libdeflate/build/Debug"
+    "${ASSETKIT_ROOT}/deps/libdeflate/build/MinSizeRel"
+    "${ASSETKIT_ROOT}/lib")
 endif()
 
 set(ASSETKIT_FIND_ROOT_ARGS)
@@ -144,6 +182,10 @@ find_library(ASSETKIT_SPZ_LIBRARY
 find_library(ASSETKIT_DS_LIBRARY
   NAMES ds libds
   HINTS ${ASSETKIT_DS_LIBRARY_HINTS}
+  ${ASSETKIT_FIND_ROOT_ARGS})
+find_library(ASSETKIT_LIBDEFLATE_LIBRARY
+  NAMES deflatestatic libdeflatestatic deflate libdeflate libdeflate_static
+  HINTS ${ASSETKIT_LIBDEFLATE_LIBRARY_HINTS}
   ${ASSETKIT_FIND_ROOT_ARGS})
 
 if(WIN32)
@@ -218,8 +260,16 @@ else()
   target_compile_definitions(_assetkit_blender PRIVATE ASSETKIT_BLENDER_STATIC_ASSETKIT=0)
 endif()
 target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_LIBRARY}")
-if(ASSETKIT_BLENDER_STATIC_ASSETKIT AND ASSETKIT_DS_LIBRARY)
-  target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_DS_LIBRARY}")
+if(ASSETKIT_BLENDER_STATIC_ASSETKIT)
+  if(ASSETKIT_DS_LIBRARY)
+    target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_DS_LIBRARY}")
+  endif()
+  if(NOT ASSETKIT_LIBDEFLATE_LIBRARY)
+    message(FATAL_ERROR
+      "AssetKit static libdeflate library not found. "
+      "Build AssetKit with AK_STATIC_INTERNAL_DEPS=ON or set ASSETKIT_LIBDEFLATE_LIBRARY.")
+  endif()
+  target_link_libraries(_assetkit_blender PRIVATE "${ASSETKIT_LIBDEFLATE_LIBRARY}")
 endif()
 if(UNIX AND NOT APPLE)
   target_link_libraries(_assetkit_blender PRIVATE m ${CMAKE_DL_LIBS})
@@ -251,6 +301,9 @@ elseif(UNIX)
 endif()
 
 message(STATUS "AssetKit library: ${ASSETKIT_LIBRARY}")
+if(ASSETKIT_BLENDER_STATIC_ASSETKIT)
+  message(STATUS "AssetKit libdeflate library: ${ASSETKIT_LIBDEFLATE_LIBRARY}")
+endif()
 function(assetkit_blender_copy_runtime_library runtime_library runtime_label)
   if(NOT runtime_library)
     return()
