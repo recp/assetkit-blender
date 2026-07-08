@@ -149,9 +149,6 @@ _DEFERRED_TEXTURE_TIME_BUDGET = 0.006
 _DEFERRED_MATERIAL_NODE_TASKS: deque[tuple[object, ...]] = deque()
 _DEFERRED_MATERIAL_NODE_TIMER_ACTIVE = False
 _DEFERRED_MATERIAL_NODE_TIME_BUDGET = 0.006
-_DEFERRED_MATERIAL_SLOT_TASKS: deque["_DeferredMaterialSpec"] = deque()
-_DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE = False
-_DEFERRED_MATERIAL_SLOT_TIME_BUDGET = 0.006
 _REQUIRED_NODE_INDICES_AUTO = object()
 _INTERPOLATION_LINEAR = 1
 _INTERPOLATION_HERMITE = 4
@@ -253,78 +250,6 @@ _CH_KEYS = (
     _S_PRESERVE_TANGENTS,
 ) = range(19)
 _SKIN_CACHE_DEFER_BIND_SKINS = object()
-
-
-class _DeferredMaterialSpec:
-    __slots__ = (
-        "name",
-        "cache",
-        "cache_key",
-        "path",
-        "tex_info",
-        "base_color",
-        "metallic",
-        "roughness",
-        "double_sided",
-        "classic",
-        "normal_path",
-        "normal_tex_info",
-        "normal_scale",
-        "specular",
-        "has_specular_tint",
-        "specular_color",
-        "has_emission",
-        "emissive_color",
-        "emissive_strength",
-        "ior",
-        "slots",
-    )
-
-    def __init__(
-        self,
-        name: str,
-        cache: dict | None,
-        cache_key: object,
-        path: str,
-        tex_info: TextureRefData | None,
-        base_color: tuple[float, float, float, float],
-        metallic: float,
-        roughness: float,
-        double_sided: bool,
-        *,
-        classic: bool = False,
-        normal_path: str = "",
-        normal_tex_info: TextureRefData | None = None,
-        normal_scale: float = 1.0,
-        specular: float = 0.5,
-        has_specular_tint: bool = False,
-        specular_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
-        has_emission: bool = False,
-        emissive_color: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        emissive_strength: float = 0.0,
-        ior: float = 1.5,
-    ) -> None:
-        self.name = name
-        self.cache = cache
-        self.cache_key = cache_key
-        self.path = path
-        self.tex_info = tex_info
-        self.base_color = base_color
-        self.metallic = metallic
-        self.roughness = roughness
-        self.double_sided = double_sided
-        self.classic = classic
-        self.normal_path = normal_path
-        self.normal_tex_info = normal_tex_info
-        self.normal_scale = normal_scale
-        self.specular = specular
-        self.has_specular_tint = has_specular_tint
-        self.specular_color = specular_color
-        self.has_emission = has_emission
-        self.emissive_color = emissive_color
-        self.emissive_strength = emissive_strength
-        self.ior = ior
-        self.slots: list[tuple[object, object | None, int, bool]] = []
 
 
 def import_assetkit_file(
@@ -1920,10 +1845,9 @@ def _create_grouped_mesh_object_bulk(
 
     if has_materials:
         for primitive in primitives:
-            if not _try_defer_material_assignment(mesh, obj, primitive, material_cache, False):
-                material = _material_for_data(primitive, material_cache)
-                if material:
-                    _assign_mesh_material(obj, mesh, material)
+            material = _material_for_data(primitive, material_cache)
+            if material:
+                _assign_mesh_material(obj, mesh, material)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"materials={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -3194,10 +3118,9 @@ def _finish_mesh_object(
         object_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
     if assign_material:
-        if not _try_defer_material_assignment(mesh, obj, data, material_cache, object_material_slot):
-            material = _material_for_data(data, material_cache)
-            if material:
-                _assign_mesh_material(obj, mesh, material, object_material_slot=object_material_slot)
+        material = _material_for_data(data, material_cache)
+        if material:
+            _assign_mesh_material(obj, mesh, material, object_material_slot=object_material_slot)
     if profile_detail:
         now = time.perf_counter()
         material_ms = (now - phase_started_at) * 1000.0
@@ -3280,116 +3203,6 @@ def _finish_mesh_object(
             f"total={total_ms:.3f}ms"
         )
     return objects
-
-
-def _try_defer_material_assignment(
-    mesh: bpy.types.Mesh,
-    obj: bpy.types.Object,
-    data: MeshPrimitiveData,
-    material_cache: dict[object, object] | None,
-    object_material_slot: bool,
-) -> bool:
-    if _ACTIVE_TEXTURE_LOAD_MODE != "DEFERRED":
-        return False
-
-    classic_deferred = False
-    simple_deferred = False
-    material_cache_key = _material_cache_key_for_data(data)
-    if material_cache_key is not _NO_MATERIAL_CACHE_KEY:
-        color_attr = _color_attribute_name(data)
-        base_color = _material_base_color(data)
-        if _can_defer_simple_material(data, color_attr):
-            simple_deferred = True
-            cache_key = material_cache_key
-        elif _can_use_classic_texture_fast_material(data, color_attr):
-            classic_deferred = True
-            cache_key = material_cache_key
-        else:
-            fast_key = _fast_simple_native_base_color_texture_key(data)
-            if fast_key is None:
-                fast_key = _fast_base_color_texture_visual_key(data, "")
-            if fast_key is not None:
-                cache_key = fast_key
-                color_attr = ""
-                base_color = data.base_color
-            elif _can_use_base_color_texture_fast_material(data, color_attr, base_color):
-                cache_key = material_cache_key
-            else:
-                return False
-    else:
-        fast_key = _fast_simple_native_base_color_texture_key(data)
-        if fast_key is None:
-            fast_key = _fast_base_color_texture_visual_key(data, "")
-        if fast_key is None:
-            return False
-        cache_key = fast_key
-        color_attr = ""
-        base_color = data.base_color
-
-    cached = material_cache.get(cache_key) if material_cache is not None else None
-    if isinstance(cached, _DeferredMaterialSpec):
-        spec = cached
-    elif cached is not None:
-        _assign_mesh_material(obj, mesh, cached, object_material_slot=object_material_slot)
-        return True
-    else:
-        material_name = data.material_name or f"{data.name}_Material"
-        if data.material_name and color_attr:
-            material_name = f"{material_name}_{color_attr}"
-        if simple_deferred:
-            spec = _DeferredMaterialSpec(
-                material_name,
-                material_cache,
-                cache_key,
-                "",
-                None,
-                base_color,
-                float(data.metallic),
-                float(data.roughness),
-                _is_double_sided_material(data),
-            )
-        elif classic_deferred:
-            spec = _DeferredMaterialSpec(
-                material_name,
-                material_cache,
-                cache_key,
-                data.base_color_texture,
-                _texture_info(data, "base_color"),
-                base_color,
-                0.0,
-                _classic_roughness(data.specular_strength),
-                _is_double_sided_material(data),
-                classic=True,
-                normal_path=data.normal_texture,
-                normal_tex_info=_texture_info(data, "normal"),
-                normal_scale=float(data.normal_scale),
-                specular=_classic_specular(data),
-                has_specular_tint=_has_specular(data),
-                specular_color=tuple(data.specular_color),
-                has_emission=_has_emission(data),
-                emissive_color=tuple(data.emissive_color),
-                emissive_strength=_emission_strength(data),
-                ior=_material_ior(data),
-            )
-        else:
-            spec = _DeferredMaterialSpec(
-                material_name,
-                material_cache,
-                cache_key,
-                data.base_color_texture,
-                _texture_info(data, "base_color"),
-                base_color,
-                float(data.metallic),
-                float(data.roughness),
-                _is_double_sided_material(data),
-            )
-        if material_cache is not None:
-            material_cache[cache_key] = spec
-        _queue_deferred_material_slot(spec)
-
-    slot_index = -1
-    spec.slots.append((mesh, obj, slot_index, object_material_slot))
-    return True
 
 
 def _ensure_object_material_slot(mesh: bpy.types.Mesh) -> int:
@@ -8032,16 +7845,6 @@ def _can_defer_base_color_texture_material(
     )
 
 
-def _can_defer_simple_material(data: MeshPrimitiveData, color_attr: str) -> bool:
-    return (
-        _ACTIVE_TEXTURE_LOAD_MODE == "DEFERRED"
-        and not data.material_extra
-        and not data.material_variants
-        and not _has_nondefault_assetkit_material_props(data)
-        and _can_use_simple_material(data, color_attr)
-    )
-
-
 def _configure_deferred_base_color_texture_material(
     mat: bpy.types.Material,
     data: MeshPrimitiveData,
@@ -8067,134 +7870,6 @@ def _configure_deferred_base_color_texture_material(
         float(data.roughness),
         _is_double_sided_material(data),
     )
-
-
-def _queue_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
-    global _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE
-    _DEFERRED_MATERIAL_SLOT_TASKS.append(spec)
-    if not _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE:
-        _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE = True
-        bpy.app.timers.register(_deferred_material_slot_timer, first_interval=0.001)
-
-
-def _deferred_material_slot_timer() -> float | None:
-    global _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE
-    started_at = time.perf_counter()
-    processed = 0
-    profile_detail = _PROFILE_MATERIAL_STATS is not None
-
-    while _DEFERRED_MATERIAL_SLOT_TASKS:
-        spec = _DEFERRED_MATERIAL_SLOT_TASKS.popleft()
-        try:
-            _apply_deferred_material_slot(spec)
-            processed += 1
-        except Exception:
-            pass
-        if time.perf_counter() - started_at >= _DEFERRED_MATERIAL_SLOT_TIME_BUDGET:
-            if profile_detail and processed:
-                _profile_log(
-                    "deferred_material_slots "
-                    f"materials={processed} remaining={len(_DEFERRED_MATERIAL_SLOT_TASKS)} "
-                    f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
-                )
-            return 0.001
-
-    _DEFERRED_MATERIAL_SLOT_TIMER_ACTIVE = False
-    if profile_detail and processed:
-        _profile_log(
-            "deferred_material_slots "
-            f"materials={processed} remaining=0 "
-            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
-        )
-    return None
-
-
-def _apply_deferred_material_slot(spec: _DeferredMaterialSpec) -> None:
-    if not spec.slots:
-        return
-
-    mat = bpy.data.materials.new(spec.name)
-    mat.diffuse_color = spec.base_color
-    mat.use_backface_culling = not spec.double_sided
-    _set_material_scalar(mat, "metallic", spec.metallic)
-    _set_material_scalar(mat, "roughness", spec.roughness)
-    _set_material_scalar(mat, "specular_intensity", spec.specular if spec.classic else 0.5)
-    try:
-        mat["assetkit_deferred_material_nodes"] = True
-        mat["assetkit_deferred_base_color_texture"] = spec.path
-    except Exception:
-        pass
-
-    cache = spec.cache
-    if cache is not None:
-        cache[spec.cache_key] = mat
-
-    for mesh, obj, slot_index, object_material_slot in spec.slots:
-        try:
-            if not _mesh_ref_alive(mesh):
-                continue
-            if object_material_slot and obj is not None and _object_ref_alive(obj):
-                if slot_index < 0:
-                    slot_index = _ensure_object_material_slot(mesh)
-                elif slot_index >= len(mesh.materials):
-                    continue
-                slot = obj.material_slots[slot_index]
-                slot.link = "OBJECT"
-                slot.material = mat
-            else:
-                if slot_index < 0:
-                    if obj is not None and _object_ref_alive(obj):
-                        _assign_mesh_material(obj, mesh, mat)
-                    else:
-                        mesh.materials.append(mat)
-                elif slot_index < len(mesh.materials):
-                    mesh.materials[slot_index] = mat
-        except Exception:
-            continue
-
-    if spec.classic:
-        _queue_deferred_classic_material_nodes(
-            mat,
-            spec.path,
-            spec.tex_info,
-            spec.normal_path,
-            spec.normal_tex_info,
-            spec.base_color,
-            spec.roughness,
-            spec.specular,
-            spec.has_specular_tint,
-            spec.specular_color,
-            spec.has_emission,
-            spec.emissive_color,
-            spec.emissive_strength,
-            spec.ior,
-            spec.normal_scale,
-            spec.double_sided,
-        )
-    else:
-        _queue_deferred_material_nodes(
-            mat,
-            spec.path,
-            spec.tex_info,
-            spec.base_color,
-            spec.metallic,
-            spec.roughness,
-            spec.double_sided,
-        )
-
-
-def _mesh_ref_alive(mesh: bpy.types.Mesh) -> bool:
-    try:
-        return bpy.data.meshes.get(mesh.name) is mesh
-    except Exception:
-        return False
-
-
-def _object_ref_alive(obj: bpy.types.Object) -> bool:
-    try:
-        return bpy.data.objects.get(obj.name) is obj
-    except Exception:
-        return False
 
 
 def _configure_base_color_texture_fast_material(
