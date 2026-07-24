@@ -729,8 +729,11 @@ akb_extract_primitive(AkbArena *arena,
 
     normal_input = input_scan.normal;
     akb_try_extract_vertex_normals(&out,
+                                   prim,
                                    normal_input,
-                                   pos_input,
+                                   attr_index_view,
+                                   out.indices,
+                                   out.loop_count,
                                    doc_owner,
                                    node);
     if (!out.has_vertex_normals) {

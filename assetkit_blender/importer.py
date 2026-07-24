@@ -189,7 +189,7 @@ _ACTION_SLOTS_SUPPORTED: bool | None = None
 _USE_SHARED_ACTION_SLOTS = False
 _PROFILE_MATERIAL_STATS: dict[str, float | int] | None = None
 _PROGRESSIVE_BATCH_SIZE = 128
-_PROGRESSIVE_TIME_BUDGET = 0.006
+_PROGRESSIVE_TIME_BUDGET = 0.016
 _PROGRESSIVE_LOAD_POLL_INTERVAL = 0.005
 _ACTIVE_IMPORT_JOBS: list[object] = []
 _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
@@ -489,10 +489,10 @@ class _ProgressiveImportJob:
                 return _PROGRESSIVE_LOAD_POLL_INTERVAL
             if not self.prepared:
                 self._prepare_loaded()
-                return 0.001
+                return 0.0
             self._build_step()
             if self.unit_index < len(self.import_units):
-                return 0.001
+                return 0.0
             self._finish_success()
             return None
         except Exception as exc:
@@ -625,6 +625,7 @@ class _ProgressiveImportJob:
         self.done = True
         if self.state is not None:
             _apply_deferred_bind_pose_skins(self.state)
+            _reset_material_template_cache()
             _finish_import(
                 self.objects,
                 self.focus_mode,
@@ -648,7 +649,6 @@ class _ProgressiveImportJob:
                 f"elapsed={(time.perf_counter() - self.started_at) * 1000.0:.3f}ms"
             )
             _log_material_profile("progressive")
-        _reset_material_template_cache()
         _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
         _remove_active_import_job(self)
         if self.on_complete:
@@ -8139,6 +8139,7 @@ def _copy_classic_texture_template_material(
     mat.name = name
     mat.diffuse_color = base_color
     mat.use_backface_culling = not _is_double_sided_material(data)
+    _set_material_alpha_mode(mat, data)
 
     tree = mat.node_tree
     bsdf = tree.nodes.get("Principled BSDF") if tree else None
@@ -8254,6 +8255,7 @@ def _configure_classic_texture_fast_material(
     mat.diffuse_color = base_color
     mat.use_nodes = True
     mat.use_backface_culling = not _is_double_sided_material(data)
+    _set_material_alpha_mode(mat, data)
 
     tree = mat.node_tree
     bsdf = tree.nodes.get("Principled BSDF") if tree else None
@@ -11464,9 +11466,7 @@ def _find_texture_image(path: str, colorspace: str):
             continue
         if _image_colorspace(image) != colorspace:
             continue
-        image["assetkit_source_path"] = source_path
-        image["assetkit_colorspace"] = colorspace
-        _TEXTURE_IMAGE_CACHE[key] = image
+        _register_texture_image(image, source_path, colorspace)
         return image
     return None
 
@@ -11481,6 +11481,7 @@ def _cached_texture_image_by_key(key: tuple[str, str]):
         try:
             if bpy.data.images.get(cached.name) == cached:
                 if _image_colorspace(cached) == key[1]:
+                    _set_image_alpha_mode(cached, key[0])
                     return cached
         except ReferenceError:
             pass
@@ -11493,6 +11494,7 @@ def _register_texture_image(image, path: str, colorspace: str) -> None:
     image["assetkit_source_path"] = source_path
     image["assetkit_colorspace"] = colorspace
     _set_image_colorspace(image, colorspace)
+    _set_image_alpha_mode(image, source_path)
     _TEXTURE_IMAGE_CACHE[(source_path, normalized_colorspace)] = image
 
 
@@ -11531,6 +11533,15 @@ def _set_image_colorspace(image, colorspace: str) -> None:
     try:
         image.colorspace_settings.name = colorspace
     except TypeError:
+        pass
+
+
+def _set_image_alpha_mode(image, path: str) -> None:
+    if not os.fspath(path).lower().endswith(".dds"):
+        return
+    try:
+        image.alpha_mode = "CHANNEL_PACKED"
+    except (TypeError, ValueError):
         pass
 
 

@@ -428,6 +428,76 @@ fail:
   return 0;
 }
 
+static int
+akb_loop_attribute_indices_are_identity(AkMeshPrimitive *prim,
+                                        AkInput *input,
+                                        const AkbIndexView *index_view,
+                                        const uint32_t *vertex_indices,
+                                        uint32_t loop_count) {
+  uint32_t stride, offset, i;
+  size_t src_index;
+
+  if (!prim || !input || !vertex_indices)
+    return 0;
+
+  stride = prim->indexStride ? prim->indexStride : 1;
+  offset = input->indexOffset;
+  if (!stride || offset >= stride)
+    return 0;
+
+  for (i = 0; i < loop_count; i++) {
+    uint32_t index;
+
+    src_index = (size_t)i * stride + offset;
+    if (index_view) {
+      if (src_index >= index_view->count)
+        return 0;
+      index = akb_index_view_get(index_view, src_index);
+    } else {
+      index = vertex_indices[i];
+    }
+    if (index != i)
+      return 0;
+  }
+
+  return 1;
+}
+
+static int
+akb_loop_attribute_indices_match_vertices(AkMeshPrimitive *prim,
+                                           AkInput *input,
+                                           const AkbIndexView *index_view,
+                                           const uint32_t *vertex_indices,
+                                           uint32_t loop_count) {
+  uint32_t stride, offset, i;
+  size_t src_index;
+
+  if (!prim || !input || !vertex_indices)
+    return 0;
+
+  stride = prim->indexStride ? prim->indexStride : 1;
+  offset = input->indexOffset;
+  if (!stride || offset >= stride)
+    return 0;
+
+  for (i = 0; i < loop_count; i++) {
+    uint32_t index;
+
+    src_index = (size_t)i * stride + offset;
+    if (index_view) {
+      if (src_index >= index_view->count)
+        return 0;
+      index = akb_index_view_get(index_view, src_index);
+    } else {
+      index = vertex_indices[i];
+    }
+    if (index != vertex_indices[i])
+      return 0;
+  }
+
+  return 1;
+}
+
 static float *
 akb_loop_attribute_copy(AkbArena *arena,
                         AkMeshPrimitive *prim,
@@ -444,6 +514,7 @@ akb_loop_attribute_copy(AkbArena *arena,
   uint32_t stride, offset, i, j, idx;
   size_t src_index;
   uint8_t borrowed_values = 0;
+  int indices_are_identity;
 
   *has_attr = 0;
   if (arena_values)
@@ -451,21 +522,40 @@ akb_loop_attribute_copy(AkbArena *arena,
   if (!input || !input->accessor || loop_count == 0)
     return NULL;
 
+  indices_are_identity = 0;
   values = akb_accessor_float_borrow(input->accessor, width, &value_count);
   if (values) {
-    if (value_count == loop_count && (!flip_v || width < 2)) {
+    if (value_count == loop_count) {
+      indices_are_identity = akb_loop_attribute_indices_are_identity(
+        prim,
+        input,
+        index_view,
+        vertex_indices,
+        loop_count);
+    }
+    if (value_count == loop_count
+        && indices_are_identity
+        && (!flip_v || width < 2)) {
       if (arena_values)
         *arena_values = 1;
       *has_attr = 1;
       return values;
     }
-    if (value_count != loop_count) {
+    if (value_count != loop_count || !indices_are_identity) {
       borrowed_values = 1;
     } else {
       values = akb_accessor_float_copy(input->accessor, width, &value_count);
     }
   } else {
     values = akb_accessor_float_copy(input->accessor, width, &value_count);
+    if (values && value_count == loop_count) {
+      indices_are_identity = akb_loop_attribute_indices_are_identity(
+        prim,
+        input,
+        index_view,
+        vertex_indices,
+        loop_count);
+    }
   }
   if (!values || value_count == 0) {
     if (!borrowed_values)
@@ -473,7 +563,7 @@ akb_loop_attribute_copy(AkbArena *arena,
     return NULL;
   }
 
-  if (value_count == loop_count) {
+  if (value_count == loop_count && indices_are_identity) {
     if (flip_v && width >= 2) {
       for (i = 0; i < loop_count; i++)
         values[(size_t)i * width + 1] = 1.0f - values[(size_t)i * width + 1];
@@ -584,21 +674,27 @@ akb_loop_attribute_copy(AkbArena *arena,
 
 static void
 akb_try_extract_vertex_normals(AkbPrimitive *out,
+                               AkMeshPrimitive *prim,
                                AkInput *normal_input,
-                               AkInput *pos_input,
+                               const AkbIndexView *index_view,
+                               const uint32_t *vertex_indices,
+                               uint32_t loop_count,
                                AkbSharedDoc *doc_owner,
                                const AkNode *node) {
   uint32_t normal_count = 0;
 
   if (!out
+      || !prim
       || !normal_input
       || !normal_input->accessor
-      || !pos_input
-      || !pos_input->accessor
       || (node && node->geometry && node->geometry->skinner))
     return;
 
-  if (normal_input->indexOffset != pos_input->indexOffset)
+  if (!akb_loop_attribute_indices_match_vertices(prim,
+                                                 normal_input,
+                                                 index_view,
+                                                 vertex_indices,
+                                                 loop_count))
     return;
 
   out->vertex_normals = akb_accessor_float_borrow(normal_input->accessor,
@@ -1192,4 +1288,3 @@ akb_extract_point_float_attrs(AkbPrimitive *out,
   out->point_attr_count = count;
   return 1;
 }
-
