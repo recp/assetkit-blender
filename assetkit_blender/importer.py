@@ -3538,9 +3538,11 @@ def _apply_shading(
 
     try:
         if vertex_normals is not None:
-            mesh.normals_split_custom_set_from_vertices(vertex_normals)
+            if not _set_free_custom_normals(mesh, vertex_normals, "POINT"):
+                mesh.normals_split_custom_set_from_vertices(vertex_normals)
         elif isinstance(normals, memoryview):
-            mesh.corner_normals.foreach_set("vector", normals)
+            if not _set_free_custom_normals(mesh, normals, "CORNER"):
+                mesh.corner_normals.foreach_set("vector", normals)
         else:
             mesh.normals_split_custom_set(normals)
         if not smooth_already:
@@ -3549,6 +3551,25 @@ def _apply_shading(
     except Exception:
         if not smooth_already:
             _set_mesh_smooth(mesh, True)
+        return False
+
+
+def _set_free_custom_normals(mesh: bpy.types.Mesh, normals: object, domain: str) -> bool:
+    count = len(mesh.vertices) if domain == "POINT" else len(mesh.loops)
+    if count <= 0 or len(normals) != count * 3:
+        return False
+
+    attr = _mesh_attribute_ensure(mesh, "custom_normal", "FLOAT_VECTOR", domain)
+    if attr is None:
+        return False
+    try:
+        attr.data.foreach_set("vector", normals)
+        return True
+    except Exception:
+        try:
+            mesh.attributes.remove(attr)
+        except Exception:
+            pass
         return False
 
 

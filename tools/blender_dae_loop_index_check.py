@@ -12,7 +12,10 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from array import array
 from pathlib import Path
+
+import bpy
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from assetkit_blender.assetkit import native_load_meshes  # noqa: E402
+from assetkit_blender.importer import _apply_shading, import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 
@@ -104,13 +108,53 @@ def float_values(buffer: object) -> list[float]:
     return list(view)
 
 
+def assert_blender_custom_normals(
+    mesh: bpy.types.Mesh,
+    expected_normals: list[tuple[float, float, float]],
+    expected_domain: str,
+) -> None:
+    custom_normal = mesh.attributes.get("custom_normal")
+    if custom_normal is None:
+        raise AssertionError("missing free custom_normal attribute")
+    if custom_normal.domain != expected_domain or custom_normal.data_type != "FLOAT_VECTOR":
+        raise AssertionError(
+            "unexpected custom_normal layout: "
+            f"{custom_normal.domain}/{custom_normal.data_type}"
+        )
+
+    blender_normal_values = array("f", [0.0]) * (len(mesh.loops) * 3)
+    mesh.corner_normals.foreach_get("vector", blender_normal_values)
+    blender_normals = list(
+        zip(
+            blender_normal_values[0::3],
+            blender_normal_values[1::3],
+            blender_normal_values[2::3],
+        )
+    )
+    for actual, expected in zip(blender_normals, expected_normals):
+        if any(abs(a - e) > 1e-6 for a, e in zip(actual, expected)):
+            raise AssertionError(f"Blender custom normals differ: {blender_normals}")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="assetkit-dae-index-") as temp_dir:
         path = Path(temp_dir) / "indexed-attrs.dae"
         path.write_text(FIXTURE, encoding="utf-8")
+        options = make_load_options(texture_loading="DEFERRED")
         loaded = native_load_meshes(
             os.fspath(path),
-            make_load_options(texture_loading="DEFERRED"),
+            options,
+        )
+        objects = import_assetkit_file(
+            os.fspath(path),
+            load_options=options,
+            collection=bpy.context.collection,
+            focus_mode="NEVER",
+            placement_mode="AS_AUTHORED",
+            select_imported=False,
+            shading_mode="AUTO",
+            set_viewport_shading=False,
+            clean_viewport_overlays=False,
         )
 
     if loaded is None or len(loaded.meshes) != 1:
@@ -142,6 +186,26 @@ def main() -> None:
     )
     if actual_normals != expected_normals:
         raise AssertionError(f"normal multi-index ignored: {actual_normals}")
+
+    imported_meshes = [
+        obj.data for obj in objects if obj.type == "MESH" and obj.data is not None
+    ]
+    if len(imported_meshes) != 1:
+        raise AssertionError(f"expected one imported Blender mesh, got {len(imported_meshes)}")
+
+    imported_mesh = imported_meshes[0]
+    assert_blender_custom_normals(imported_mesh, expected_normals, "POINT")
+
+    corner_mesh = bpy.data.meshes.new("indexed-corner-normal-check")
+    corner_mesh.from_pydata(
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+        [],
+        [(0, 1, 2), (0, 2, 3)],
+    )
+    corner_values = array("f", (component for normal in expected_normals for component in normal))
+    if not _apply_shading(corner_mesh, "AUTO", memoryview(corner_values)):
+        raise AssertionError("failed to apply corner custom normals")
+    assert_blender_custom_normals(corner_mesh, expected_normals, "CORNER")
 
     print("DAE indexed loop attribute check passed")
 
