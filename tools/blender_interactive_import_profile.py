@@ -42,6 +42,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         choices=("AUTO", "SMOOTH", "FLAT", "AS_IS"),
         default="AS_IS",
     )
+    parser.add_argument(
+        "--build-mode",
+        choices=("AUTO", "PROGRESSIVE", "BLOCKING"),
+        default="AUTO",
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
     return parser.parse_args(argv)
 
@@ -64,24 +69,49 @@ class InteractiveProfile:
 
         options = make_load_options(texture_loading=self.args.texture_loading)
         self.started_at = time.perf_counter()
-        assetkit_importer.import_assetkit_file_progressive(
-            os.fspath(self.path),
-            "",
-            options,
-            collection=bpy.context.collection,
-            batch_size=128,
-            focus_mode="EMPTY_SCENE",
-            placement_mode="AS_AUTHORED",
-            scene_was_empty=True,
-            select_imported=False,
-            shading_mode=self.args.shading,
-            set_viewport_shading=True,
-            clean_viewport_overlays=True,
-            fit_timeline=False,
-            on_complete=self.on_complete,
-            on_error=self.on_error,
+        use_blocking = self.args.build_mode == "BLOCKING" or (
+            self.args.build_mode == "AUTO" and self.path.suffix.lower() == ".dae"
         )
-        bpy.app.timers.register(self.poll, first_interval=0.001)
+        if use_blocking:
+            try:
+                self.on_complete(
+                    assetkit_importer.import_assetkit_file(
+                        os.fspath(self.path),
+                        "",
+                        options,
+                        collection=bpy.context.collection,
+                        focus_mode="EMPTY_SCENE",
+                        placement_mode="AS_AUTHORED",
+                        scene_was_empty=True,
+                        select_imported=False,
+                        shading_mode=self.args.shading,
+                        set_viewport_shading=True,
+                        clean_viewport_overlays=True,
+                        fit_timeline=False,
+                    )
+                )
+            except Exception as exc:
+                self.on_error(exc)
+                return
+        else:
+            assetkit_importer.import_assetkit_file_progressive(
+                os.fspath(self.path),
+                "",
+                options,
+                collection=bpy.context.collection,
+                batch_size=128,
+                focus_mode="EMPTY_SCENE",
+                placement_mode="AS_AUTHORED",
+                scene_was_empty=True,
+                select_imported=False,
+                shading_mode=self.args.shading,
+                set_viewport_shading=True,
+                clean_viewport_overlays=True,
+                fit_timeline=False,
+                on_complete=self.on_complete,
+                on_error=self.on_error,
+            )
+        bpy.app.timers.register(self.poll, first_interval=0.020)
 
     def on_complete(self, objects) -> None:
         self.objects = list(objects or ())
@@ -102,13 +132,13 @@ class InteractiveProfile:
             bpy.app.timers.register(self.quit, first_interval=0.01)
             return None
         if not self.imported_at:
-            return 0.001
+            return 0.020
 
         pending_materials = len(assetkit_importer._DEFERRED_MATERIAL_NODE_TASKS)
         pending_textures = len(assetkit_importer._DEFERRED_TEXTURE_KEYS)
         pending_normals = len(assetkit_importer._DEFERRED_NORMAL_TASKS)
         if pending_materials or pending_textures or pending_normals:
-            return 0.001
+            return 0.020
 
         redraw_started_at = time.perf_counter()
         try:
@@ -149,6 +179,7 @@ class InteractiveProfile:
                 {
                     "file": os.fspath(self.path),
                     "texture_loading": self.args.texture_loading,
+                    "build_mode": self.args.build_mode,
                     "objects": len(self.objects),
                     "meshes": len(bpy.data.meshes),
                     "materials": len(bpy.data.materials),

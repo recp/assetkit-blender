@@ -190,7 +190,7 @@ _USE_SHARED_ACTION_SLOTS = False
 _PROFILE_MATERIAL_STATS: dict[str, float | int] | None = None
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_TIME_BUDGET = 0.016
-_PROGRESSIVE_LOAD_POLL_INTERVAL = 0.005
+_PROGRESSIVE_LOAD_POLL_INTERVAL = 0.020
 _ACTIVE_IMPORT_JOBS: list[object] = []
 _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
 _IMPORT_ANIMATION_SCOPE_SERIAL = 0
@@ -481,6 +481,11 @@ class _ProgressiveImportJob:
         try:
             if not self.load_started:
                 self._start_load()
+                if self.load_error is not None:
+                    self._finish_error(self.load_error)
+                    return None
+                if self.loaded_scene is not None:
+                    return 0.0
                 return _PROGRESSIVE_LOAD_POLL_INTERVAL
             if self.load_error is not None:
                 self._finish_error(self.load_error)
@@ -552,8 +557,19 @@ class _ProgressiveImportJob:
         self.preserve_tangents = _preserve_tangents(self.load_options)
         self.load_started = True
 
-        worker = threading.Thread(target=self._load_worker, name="AssetKitImportLoad", daemon=True)
-        worker.start()
+        if os.path.splitext(self.filepath)[1].lower() == ".dae":
+            # DAE parsing is native and short enough to run in this timer
+            # callback. Keeping it on the main Blender thread avoids a
+            # first-load priority inversion when the Python worker hands the
+            # completed scene back through a frequently polled GIL.
+            self._load_worker()
+        else:
+            worker = threading.Thread(
+                target=self._load_worker,
+                name="AssetKitImportLoad",
+                daemon=True,
+            )
+            worker.start()
 
     def _load_worker(self) -> None:
         profile_detail = _PROFILE_MATERIAL_STATS is not None

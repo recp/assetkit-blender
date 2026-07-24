@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from array import array
 
 import bpy
@@ -108,7 +109,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         name="Build",
         description="How Blender objects are created after AssetKit loads the file",
         items=(
-            ("AUTO", "Auto", "Use progressive import in the UI and blocking import in background scripts"),
+            ("AUTO", "Auto", "Use blocking import for DAE and progressive import for other UI formats"),
             ("PROGRESSIVE", "Progressive", "Create Blender objects in small UI timer batches"),
             ("BLOCKING", "Blocking", "Create all Blender objects in one synchronous pass"),
         ),
@@ -188,7 +189,11 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         focus_camera = context.scene.camera if scene_was_empty else None
 
         if not bpy.app.background:
-            if self.build_mode == "BLOCKING":
+            extension = os.path.splitext(self.filepath)[1].lower()
+            use_blocking = self.build_mode == "BLOCKING" or (
+                self.build_mode == "AUTO" and extension == ".dae"
+            )
+            if use_blocking:
                 _schedule_blocking_import(
                     self.filepath,
                     assetkit_library,
