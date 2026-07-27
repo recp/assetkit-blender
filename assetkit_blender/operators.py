@@ -192,7 +192,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
             extension = os.path.splitext(self.filepath)[1].lower()
             use_blocking = self.build_mode == "BLOCKING" or (
                 self.build_mode == "AUTO"
-                and extension in {".dae", ".zae", ".kmz", ".zip"}
+                and extension in {".dae", ".zae", ".kmz"}
             )
             if use_blocking:
                 _schedule_blocking_import(

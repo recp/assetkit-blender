@@ -9,8 +9,8 @@ The extension bundles or links the following third-party/runtime components:
 - cglm: MIT License
 - ds: MIT License
 - json: MIT License
+- libdeflate: MIT License
 - xml: MIT License
-- miniz: MIT-style license
 
 The Apache-2.0 and MIT-licensed components keep their upstream licenses.
 Copies of those license texts are included under `LICENSES/`.

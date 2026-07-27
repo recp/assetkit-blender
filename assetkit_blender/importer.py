@@ -561,7 +561,6 @@ class _ProgressiveImportJob:
             ".dae",
             ".zae",
             ".kmz",
-            ".zip",
         }:
             # COLLADA parsing is native and short enough to run in this timer
             # callback. Keeping it on the main Blender thread avoids a
