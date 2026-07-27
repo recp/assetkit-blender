@@ -1027,6 +1027,15 @@ akb_export_fast_vertex_eq(const AkbExportFastVertex *entry,
                  && memcmp(entry->weights, weights, sizeof(float) * 4u) == 0));
 }
 
+static float **
+akb_export_fast_group_color_slot(AkbExportFastGroup *group, uint32_t index) {
+  if (index < AKB_EXPORT_FAST_COLOR_MAX)
+    return &group->colors[index];
+  return group->extraColors
+           ? &group->extraColors[index - AKB_EXPORT_FAST_COLOR_MAX]
+           : NULL;
+}
+
 static void
 akb_export_fast_group_free(AkbExportFastGroup *group,
                            uint32_t uv_count,
@@ -1048,8 +1057,14 @@ akb_export_fast_group_free(AkbExportFastGroup *group,
   }
   for (i = 0; i < uv_count; i++)
     free(group->uvs[i]);
-  for (i = 0; i < color_count; i++)
-    free(group->colors[i]);
+  for (i = 0; i < color_count; i++) {
+    float **colors;
+
+    colors = akb_export_fast_group_color_slot(group, i);
+    if (colors)
+      free(*colors);
+  }
+  free(group->extraColors);
   free(group->indices);
   free(group->table);
 }
@@ -1138,6 +1153,17 @@ akb_export_fast_group_reserve_vertices(AkbExportFastGroup *group,
     }
   }
 
+  if (color_count > AKB_EXPORT_FAST_COLOR_MAX && !group->extraColors) {
+    size_t extra_count;
+
+    extra_count = (size_t)color_count - AKB_EXPORT_FAST_COLOR_MAX;
+    group->extraColors = (float **)calloc(extra_count, sizeof(*group->extraColors));
+    if (!group->extraColors) {
+      PyErr_NoMemory();
+      return 0;
+    }
+  }
+
   for (i = 0; i < uv_count; i++) {
     float *new_uvs;
 
@@ -1150,14 +1176,20 @@ akb_export_fast_group_reserve_vertices(AkbExportFastGroup *group,
   }
 
   for (i = 0; i < color_count; i++) {
+    float **colors;
     float *new_colors;
 
-    new_colors = (float *)realloc(group->colors[i], new_cap * 4u * sizeof(float));
+    colors = akb_export_fast_group_color_slot(group, i);
+    if (!colors) {
+      PyErr_NoMemory();
+      return 0;
+    }
+    new_colors = (float *)realloc(*colors, new_cap * 4u * sizeof(float));
     if (!new_colors) {
       PyErr_NoMemory();
       return 0;
     }
-    group->colors[i] = new_colors;
+    *colors = new_colors;
   }
 
   group->vertexCap = new_cap;
@@ -1312,62 +1344,74 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
   size_t   mask;
   size_t   slot;
   float    position[3];
+  int      use_table;
 
   position[0] = src_positions[(size_t)vertex_index * 3u];
   position[1] = src_positions[(size_t)vertex_index * 3u + 1u];
   position[2] = src_positions[(size_t)vertex_index * 3u + 2u];
 
-  if (!akb_export_fast_group_table_reserve(group,
-                                           uv_count,
-                                           color_count,
-                                           morph_count,
-                                           has_normals,
-                                           has_tangents,
-                                           has_skin,
-                                           group->tableCount + 1u))
-    return 0;
+  /*
+   * The fixed hash entry keeps the common path compact. Rare interchange
+   * files with more color sets still export losslessly, but use one output
+   * vertex per corner instead of inflating every hash slot for every mesh.
+   */
+  use_table = color_count <= AKB_EXPORT_FAST_COLOR_MAX;
+  h = 0;
+  mask = 0;
+  slot = 0;
+  if (use_table) {
+    if (!akb_export_fast_group_table_reserve(group,
+                                             uv_count,
+                                             color_count,
+                                             morph_count,
+                                             has_normals,
+                                             has_tangents,
+                                             has_skin,
+                                             group->tableCount + 1u))
+      return 0;
 
-  h = akb_export_fast_vertex_hash(position,
-                                  vertex_index,
-                                  normal,
-                                  has_normals,
-                                  tangent,
-                                  has_tangents,
-                                  uv,
-                                  uv_count,
-                                  color,
-                                  color_count,
-                                  joints,
-                                  weights,
-                                  has_skin,
-                                  morph_count > 0);
-  mask = group->tableCap - 1u;
-  slot = (size_t)h & mask;
-  for (;;) {
-    AkbExportFastVertex *entry;
+    h = akb_export_fast_vertex_hash(position,
+                                    vertex_index,
+                                    normal,
+                                    has_normals,
+                                    tangent,
+                                    has_tangents,
+                                    uv,
+                                    uv_count,
+                                    color,
+                                    color_count,
+                                    joints,
+                                    weights,
+                                    has_skin,
+                                    morph_count > 0);
+    mask = group->tableCap - 1u;
+    slot = (size_t)h & mask;
+    for (;;) {
+      AkbExportFastVertex *entry;
 
-    entry = &group->table[slot];
-    if (!entry->used)
-      break;
-    if (akb_export_fast_vertex_eq(entry,
-                                  position,
-                                  vertex_index,
-                                  normal,
-                                  has_normals,
-                                  tangent,
-                                  has_tangents,
-                                  uv,
-                                  uv_count,
-                                  color,
-                                  color_count,
-                                  joints,
-                                  weights,
-                                  has_skin,
-                                  morph_count > 0)) {
-      *out_index = entry->outIndex;
-      return 1;
+      entry = &group->table[slot];
+      if (!entry->used)
+        break;
+      if (akb_export_fast_vertex_eq(entry,
+                                    position,
+                                    vertex_index,
+                                    normal,
+                                    has_normals,
+                                    tangent,
+                                    has_tangents,
+                                    uv,
+                                    uv_count,
+                                    color,
+                                    color_count,
+                                    joints,
+                                    weights,
+                                    has_skin,
+                                    morph_count > 0)) {
+        *out_index = entry->outIndex;
+        return 1;
+      }
+      slot = (slot + 1u) & mask;
     }
-    slot = (slot + 1u) & mask;
   }
 
   if (group->vertexCount > UINT32_MAX) {
@@ -1406,28 +1450,37 @@ akb_export_fast_group_vertex(AkbExportFastGroup *group,
     group->uvs[i][group->vertexCount * 2u + 1u] = uv[(size_t)i * 2u + 1u];
   }
   for (uint32_t i = 0; i < color_count; i++) {
-    memcpy(&group->colors[i][group->vertexCount * 4u],
+    float **colors;
+
+    colors = akb_export_fast_group_color_slot(group, i);
+    if (!colors || !*colors) {
+      PyErr_NoMemory();
+      return 0;
+    }
+    memcpy(&(*colors)[group->vertexCount * 4u],
            &color[(size_t)i * 4u],
            sizeof(float) * 4u);
   }
 
   group->vertexCount++;
-  group->tableCount++;
+  if (use_table) {
+    group->tableCount++;
 
-  group->table[slot].used = 1;
-  group->table[slot].vertexIndex = vertex_index;
-  group->table[slot].outIndex = *out_index;
-  memcpy(group->table[slot].position, position, sizeof(float) * 3u);
-  if (has_normals)
-    memcpy(group->table[slot].normal, normal, sizeof(float) * 3u);
-  if (has_tangents)
-    memcpy(group->table[slot].tangent, tangent, sizeof(float) * 4u);
-  if (has_skin) {
-    memcpy(group->table[slot].joints, joints, sizeof(uint16_t) * 4u);
-    memcpy(group->table[slot].weights, weights, sizeof(float) * 4u);
+    group->table[slot].used = 1;
+    group->table[slot].vertexIndex = vertex_index;
+    group->table[slot].outIndex = *out_index;
+    memcpy(group->table[slot].position, position, sizeof(float) * 3u);
+    if (has_normals)
+      memcpy(group->table[slot].normal, normal, sizeof(float) * 3u);
+    if (has_tangents)
+      memcpy(group->table[slot].tangent, tangent, sizeof(float) * 4u);
+    if (has_skin) {
+      memcpy(group->table[slot].joints, joints, sizeof(uint16_t) * 4u);
+      memcpy(group->table[slot].weights, weights, sizeof(float) * 4u);
+    }
+    memcpy(group->table[slot].uv, uv, sizeof(float) * (size_t)uv_count * 2u);
+    memcpy(group->table[slot].color, color, sizeof(float) * (size_t)color_count * 4u);
   }
-  memcpy(group->table[slot].uv, uv, sizeof(float) * (size_t)uv_count * 2u);
-  memcpy(group->table[slot].color, color, sizeof(float) * (size_t)color_count * 4u);
 
   return 1;
 }
@@ -1806,10 +1859,15 @@ akb_export_add_native_group_primitive(AkDoc              *doc,
   }
 
   for (i = 0; i < color_count; i++) {
+    float **colors;
+
+    colors = akb_export_fast_group_color_slot(group, i);
+    if (!colors || !*colors)
+      return NULL;
     if (!akb_export_add_input_buffer(heap,
                                      doc,
                                      prim,
-                                     group->colors[i],
+                                     *colors,
                                      (size_t)vertex_count * 4u * sizeof(float),
                                      vertex_count,
                                      AK_COMPONENT_SIZE_VEC4,
@@ -1935,10 +1993,15 @@ akb_export_add_ply_poly_group_primitive(AkDoc              *doc,
   }
 
   for (i = 0; i < color_count; i++) {
+    float **colors;
+
+    colors = akb_export_fast_group_color_slot(group, i);
+    if (!colors || !*colors)
+      return NULL;
     if (!akb_export_add_input_buffer(heap,
                                      doc,
                                      prim,
-                                     group->colors[i],
+                                     *colors,
                                      (size_t)vertex_count * 4u * sizeof(float),
                                      vertex_count,
                                      AK_COMPONENT_SIZE_VEC4,
@@ -1983,6 +2046,8 @@ akb_export_add_ply_compact_poly_mesh_payload_to_node(AkDoc                      
   uint32_t          *vcounts;
   size_t             vcount_count;
   int                ok;
+  float              color_value_storage[AKB_EXPORT_FAST_COLOR_MAX * 4u];
+  float             *color_values;
 
   if (!doc || !node || !positions || !loop_vertices || !poly_loop_starts
       || !poly_loop_totals || vertex_count <= 0 || loop_count <= 0
@@ -1995,8 +2060,19 @@ akb_export_add_ply_compact_poly_mesh_payload_to_node(AkDoc                      
 
   memset(&group, 0, sizeof(group));
   group.materialIndex = -1;
+  color_values = color_value_storage;
+  if (color_count > AKB_EXPORT_FAST_COLOR_MAX) {
+    color_values = (float *)malloc((size_t)color_count * 4u
+                                   * sizeof(*color_values));
+    if (!color_values) {
+      PyErr_NoMemory();
+      return 0;
+    }
+  }
   vcounts = (uint32_t *)malloc((size_t)polygon_count * sizeof(*vcounts));
   if (!vcounts) {
+    if (color_values != color_value_storage)
+      free(color_values);
     PyErr_NoMemory();
     return 0;
   }
@@ -2029,9 +2105,10 @@ akb_export_add_ply_compact_poly_mesh_payload_to_node(AkDoc                      
       uint16_t joints[4] = {0, 0, 0, 0};
       float    weights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       float    uv[AKB_EXPORT_FAST_UV_MAX * 2u];
-      float    color[AKB_EXPORT_FAST_COLOR_MAX * 4u];
+      float   *color;
       uint32_t out_index;
 
+      color = color_values;
       loop_index = (uint32_t)(loop_start_i + corner);
       vertex_index_i = loop_vertices[loop_index];
       if (vertex_index_i < 0 || vertex_index_i >= vertex_count) {
@@ -2156,6 +2233,8 @@ akb_export_add_ply_compact_poly_mesh_payload_to_node(AkDoc                      
 done_ply_poly:
   free(vcounts);
   akb_export_fast_group_free(&group, uv_count, color_count, 0);
+  if (color_values != color_value_storage)
+    free(color_values);
   return ok;
 }
 
@@ -2347,6 +2426,223 @@ done_point_normal:
   Py_XDECREF(data_obj);
   Py_DECREF(normal_attr);
   return ok;
+}
+
+static int
+akb_export_add_remapped_point_normal_input(AkHeap          *heap,
+                                           AkDoc           *doc,
+                                           AkMeshPrimitive *prim,
+                                           PyObject        *mesh_py,
+                                           uint32_t         mesh_vertex_count,
+                                           const uint32_t  *source_vertices,
+                                           uint32_t         out_vertex_count) {
+  PyObject *attrs_obj;
+  PyObject *normal_attr;
+  PyObject *data_obj;
+  PyObject *normal_buf;
+  Py_buffer normal_view;
+  float *normals;
+  float *out_normals;
+  AkbExportFastAttrDomain domain;
+  int ok;
+
+  attrs_obj = PyObject_GetAttrString(mesh_py, "attributes");
+  if (!attrs_obj) {
+    PyErr_Clear();
+    return 1;
+  }
+
+  normal_attr = akb_export_fast_attr_get(attrs_obj, "assetkit_normal");
+  Py_DECREF(attrs_obj);
+  if (!normal_attr || normal_attr == Py_None) {
+    Py_XDECREF(normal_attr);
+    return 1;
+  }
+
+  ok = 1;
+  memset(&normal_view, 0, sizeof(normal_view));
+  data_obj = NULL;
+  normal_buf = NULL;
+  out_normals = NULL;
+  if (!akb_export_fast_attr_domain(normal_attr, &domain)) {
+    PyErr_Clear();
+    goto done_remapped_point_normal;
+  }
+  if (domain != AKB_EXPORT_FAST_ATTR_POINT)
+    goto done_remapped_point_normal;
+
+  data_obj = PyObject_GetAttrString(normal_attr, "data");
+  if (!data_obj) {
+    ok = 0;
+    goto done_remapped_point_normal;
+  }
+  if (PyObject_Length(data_obj) < (Py_ssize_t)mesh_vertex_count) {
+    PyErr_SetString(PyExc_ValueError,
+                    "point normal attribute is shorter than mesh vertex count");
+    ok = 0;
+    goto done_remapped_point_normal;
+  }
+
+  normal_buf = akb_export_array_new("f",
+                                    (Py_ssize_t)mesh_vertex_count * 3);
+  if (!normal_buf
+      || PyObject_GetBuffer(normal_buf, &normal_view, PyBUF_SIMPLE) < 0) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done_remapped_point_normal;
+  }
+  normals = (float *)normal_view.buf;
+  if (!normals
+      || !akb_export_foreach_get_buffer(data_obj, "vector", normal_buf, "f")) {
+    ok = 0;
+    goto done_remapped_point_normal;
+  }
+
+  out_normals = (float *)malloc((size_t)out_vertex_count * 3u
+                                * sizeof(*out_normals));
+  if (!out_normals) {
+    PyErr_NoMemory();
+    ok = 0;
+    goto done_remapped_point_normal;
+  }
+  for (uint32_t i = 0; i < out_vertex_count; i++) {
+    uint32_t source_index;
+
+    source_index = source_vertices[i];
+    memcpy(&out_normals[(size_t)i * 3u],
+           &normals[(size_t)source_index * 3u],
+           3u * sizeof(*out_normals));
+  }
+  if (!akb_export_add_input_buffer(heap,
+                                   doc,
+                                   prim,
+                                   out_normals,
+                                   (size_t)out_vertex_count * 3u
+                                     * sizeof(*out_normals),
+                                   out_vertex_count,
+                                   AK_COMPONENT_SIZE_VEC3,
+                                   AKT_FLOAT,
+                                   3,
+                                   AK_INPUT_NORMAL,
+                                   "NORMAL",
+                                   0))
+    ok = 0;
+
+done_remapped_point_normal:
+  free(out_normals);
+  if (normal_view.buf)
+    PyBuffer_Release(&normal_view);
+  Py_XDECREF(normal_buf);
+  Py_XDECREF(data_obj);
+  Py_DECREF(normal_attr);
+  return ok;
+}
+
+static int
+akb_export_add_remapped_point_color_inputs(AkHeap          *heap,
+                                           AkDoc           *doc,
+                                           AkMeshPrimitive *prim,
+                                           PyObject        *color_layers_seq,
+                                           uint32_t         mesh_vertex_count,
+                                           const uint32_t  *source_vertices,
+                                           uint32_t         out_vertex_count) {
+  Py_ssize_t color_count;
+
+  if (!color_layers_seq || color_layers_seq == Py_None)
+    return 1;
+
+  color_count = PySequence_Fast_GET_SIZE(color_layers_seq);
+  if (color_count < 0)
+    return 0;
+
+  for (Py_ssize_t i = 0; i < color_count; i++) {
+    PyObject *color_layer;
+    PyObject *data_obj;
+    PyObject *color_buf;
+    Py_buffer color_view;
+    float *colors;
+    float *out_colors;
+    AkbExportFastAttrDomain domain;
+    int ok;
+
+    color_layer = PySequence_Fast_GET_ITEM(color_layers_seq, i);
+    if (!akb_export_fast_attr_domain(color_layer, &domain)) {
+      PyErr_Clear();
+      continue;
+    }
+    if (domain != AKB_EXPORT_FAST_ATTR_POINT)
+      continue;
+
+    data_obj = PyObject_GetAttrString(color_layer, "data");
+    if (!data_obj)
+      return 0;
+    if (PyObject_Length(data_obj) < (Py_ssize_t)mesh_vertex_count) {
+      Py_DECREF(data_obj);
+      PyErr_SetString(PyExc_ValueError,
+                      "point color attribute is shorter than mesh vertex count");
+      return 0;
+    }
+
+    memset(&color_view, 0, sizeof(color_view));
+    color_buf = akb_export_array_new("f",
+                                     (Py_ssize_t)mesh_vertex_count * 4);
+    if (!color_buf
+        || PyObject_GetBuffer(color_buf, &color_view, PyBUF_SIMPLE) < 0) {
+      Py_XDECREF(color_buf);
+      Py_DECREF(data_obj);
+      PyErr_NoMemory();
+      return 0;
+    }
+    colors = (float *)color_view.buf;
+    out_colors = NULL;
+    ok = colors
+         && akb_export_foreach_get_buffer(data_obj,
+                                          "color",
+                                          color_buf,
+                                          "f");
+    if (ok) {
+      out_colors = (float *)malloc((size_t)out_vertex_count * 4u
+                                   * sizeof(*out_colors));
+      if (!out_colors) {
+        PyErr_NoMemory();
+        ok = 0;
+      }
+    }
+    if (ok) {
+      for (uint32_t j = 0; j < out_vertex_count; j++) {
+        uint32_t source_index;
+
+        source_index = source_vertices[j];
+        memcpy(&out_colors[(size_t)j * 4u],
+               &colors[(size_t)source_index * 4u],
+               4u * sizeof(*out_colors));
+      }
+      for (size_t j = 0; j < (size_t)out_vertex_count * 4u; j++)
+        out_colors[j] = akb_export_clamp01_float(out_colors[j]);
+      ok = akb_export_add_input_buffer(heap,
+                                       doc,
+                                       prim,
+                                       out_colors,
+                                       (size_t)out_vertex_count * 4u
+                                         * sizeof(*out_colors),
+                                       out_vertex_count,
+                                       AK_COMPONENT_SIZE_VEC4,
+                                       AKT_FLOAT,
+                                       4,
+                                       AK_INPUT_COLOR,
+                                       "COLOR",
+                                       (uint32_t)i);
+    }
+
+    free(out_colors);
+    PyBuffer_Release(&color_view);
+    Py_DECREF(color_buf);
+    Py_DECREF(data_obj);
+    if (!ok)
+      return 0;
+  }
+
+  return 1;
 }
 
 static int
@@ -2587,6 +2883,247 @@ done_point_line:
   return ok;
 }
 
+static AkMeshPrimitive *
+akb_export_add_loose_line_primitive(AkHeap          *heap,
+                                    AkDoc           *doc,
+                                    AkGeometry      *geom,
+                                    AkObject        *mesh_obj,
+                                    AkMesh          *mesh,
+                                    PyObject        *mesh_py,
+                                    PyObject        *materials_seq,
+                                    PyObject        *color_layers_seq,
+                                    const float     *positions,
+                                    uint32_t         vertex_count,
+                                    int              material_index,
+                                    uint32_t         source_mode,
+                                    PyObject        *primitive_extra_obj) {
+  PyObject *edges_obj;
+  PyObject *edge_indices_buf;
+  PyObject *edge_loose_buf;
+  Py_buffer edge_indices_view;
+  Py_buffer edge_loose_view;
+  int32_t *edge_indices;
+  int8_t *edge_loose;
+  int32_t *loose_indices;
+  uint32_t *vertex_remap;
+  uint32_t *source_vertices;
+  float *line_positions;
+  Py_ssize_t edge_count_py;
+  size_t loose_count;
+  uint32_t line_vertex_count;
+  AkLines *lines;
+  AkMeshPrimitive *prim;
+  PyObject *material_obj;
+  AkMaterial *material;
+
+  if (!heap || !doc || !geom || !mesh_obj || !mesh || !mesh_py
+      || !materials_seq || !positions || !vertex_count)
+    return NULL;
+
+  memset(&edge_indices_view, 0, sizeof(edge_indices_view));
+  memset(&edge_loose_view, 0, sizeof(edge_loose_view));
+  edges_obj = NULL;
+  edge_indices_buf = NULL;
+  edge_loose_buf = NULL;
+  loose_indices = NULL;
+  vertex_remap = NULL;
+  source_vertices = NULL;
+  line_positions = NULL;
+  prim = NULL;
+
+  edges_obj = akb_export_attr_obj(mesh_py, "edges");
+  if (!edges_obj)
+    goto done_loose_line;
+  edge_count_py = PyObject_Length(edges_obj);
+  if (edge_count_py <= 0
+      || edge_count_py > (Py_ssize_t)(UINT32_MAX / 2u)) {
+    if (edge_count_py <= 0)
+      PyErr_SetString(PyExc_ValueError,
+                      "mixed line mesh does not contain any edges");
+    else
+      PyErr_SetString(PyExc_OverflowError,
+                      "too many exported mixed line indices");
+    goto done_loose_line;
+  }
+
+  edge_indices_buf = akb_export_array_new("i", edge_count_py * 2);
+  edge_loose_buf = akb_export_array_new("b", edge_count_py);
+  if (!edge_indices_buf || !edge_loose_buf
+      || PyObject_GetBuffer(edge_indices_buf,
+                           &edge_indices_view,
+                           PyBUF_SIMPLE) < 0
+      || PyObject_GetBuffer(edge_loose_buf,
+                           &edge_loose_view,
+                           PyBUF_SIMPLE) < 0) {
+    PyErr_NoMemory();
+    goto done_loose_line;
+  }
+  edge_indices = (int32_t *)edge_indices_view.buf;
+  edge_loose = (int8_t *)edge_loose_view.buf;
+  if (!edge_indices || !edge_loose
+      || !akb_export_foreach_get_buffer(edges_obj,
+                                        "vertices",
+                                        edge_indices_buf,
+                                        "i")
+      || !akb_export_foreach_get_buffer(edges_obj,
+                                        "is_loose",
+                                        edge_loose_buf,
+                                        "b"))
+    goto done_loose_line;
+
+  loose_count = 0;
+  for (Py_ssize_t i = 0; i < edge_count_py; i++) {
+    if (edge_loose[i])
+      loose_count++;
+  }
+  if (!loose_count) {
+    PyErr_SetString(PyExc_ValueError,
+                    "mixed line mesh does not contain any loose edges");
+    goto done_loose_line;
+  }
+  if (loose_count > SIZE_MAX / (2u * sizeof(*loose_indices))) {
+    PyErr_NoMemory();
+    goto done_loose_line;
+  }
+  loose_indices = (int32_t *)malloc(loose_count * 2u
+                                    * sizeof(*loose_indices));
+  vertex_remap = (uint32_t *)malloc((size_t)vertex_count
+                                    * sizeof(*vertex_remap));
+  source_vertices = (uint32_t *)malloc((size_t)vertex_count
+                                       * sizeof(*source_vertices));
+  if (!loose_indices || !vertex_remap || !source_vertices) {
+    PyErr_NoMemory();
+    goto done_loose_line;
+  }
+  for (uint32_t i = 0; i < vertex_count; i++)
+    vertex_remap[i] = UINT32_MAX;
+
+  {
+    size_t out_index;
+
+    out_index = 0;
+    line_vertex_count = 0;
+    for (Py_ssize_t i = 0; i < edge_count_py; i++) {
+      int32_t index_a;
+      int32_t index_b;
+      uint32_t source_index_a;
+      uint32_t source_index_b;
+
+      if (!edge_loose[i])
+        continue;
+      index_a = edge_indices[i * 2];
+      index_b = edge_indices[i * 2 + 1];
+      if (index_a < 0 || index_b < 0
+          || (uint32_t)index_a >= vertex_count
+          || (uint32_t)index_b >= vertex_count) {
+        PyErr_SetString(PyExc_ValueError,
+                        "mixed line edge index is outside the vertex buffer");
+        goto done_loose_line;
+      }
+      source_index_a = (uint32_t)index_a;
+      source_index_b = (uint32_t)index_b;
+      if (vertex_remap[source_index_a] == UINT32_MAX) {
+        vertex_remap[source_index_a] = line_vertex_count;
+        source_vertices[line_vertex_count++] = source_index_a;
+      }
+      if (vertex_remap[source_index_b] == UINT32_MAX) {
+        vertex_remap[source_index_b] = line_vertex_count;
+        source_vertices[line_vertex_count++] = source_index_b;
+      }
+      loose_indices[out_index++] = (int32_t)vertex_remap[source_index_a];
+      loose_indices[out_index++] = (int32_t)vertex_remap[source_index_b];
+    }
+  }
+
+  line_positions = (float *)malloc((size_t)line_vertex_count * 3u
+                                   * sizeof(*line_positions));
+  if (!line_positions) {
+    PyErr_NoMemory();
+    goto done_loose_line;
+  }
+  for (uint32_t i = 0; i < line_vertex_count; i++) {
+    uint32_t source_index;
+
+    source_index = source_vertices[i];
+    memcpy(&line_positions[(size_t)i * 3u],
+           &positions[(size_t)source_index * 3u],
+           3u * sizeof(*line_positions));
+  }
+
+  if (material_index >= 0
+      && material_index < PySequence_Fast_GET_SIZE(materials_seq))
+    material_obj = PySequence_Fast_GET_ITEM(materials_seq, material_index);
+  else
+    material_obj = Py_None;
+  material = akb_export_material(doc, material_obj);
+  if (PyErr_Occurred())
+    goto done_loose_line;
+
+  lines = (AkLines *)ak_heap_calloc(heap, mesh_obj, sizeof(*lines));
+  if (!lines) {
+    PyErr_NoMemory();
+    goto done_loose_line;
+  }
+  lines->mode = akb_export_line_mode_from_source(source_mode);
+  prim = &lines->base;
+  prim->type = AKB_PRIMITIVE_LINES;
+  prim->nPolygons = (uint32_t)loose_count;
+  prim->mesh = mesh;
+  prim->material = material;
+  prim->indices = akb_export_index_array_from_i32(heap,
+                                                  prim,
+                                                  loose_indices,
+                                                  loose_count * 2u,
+                                                  line_vertex_count);
+  if (!prim->indices
+      || !akb_export_add_input_buffer(heap,
+                                      doc,
+                                      prim,
+                                      line_positions,
+                                      (size_t)line_vertex_count * 3u
+                                        * sizeof(*line_positions),
+                                      line_vertex_count,
+                                      AK_COMPONENT_SIZE_VEC3,
+                                      AKT_FLOAT,
+                                      3,
+                                      AK_INPUT_POSITION,
+                                      "POSITION",
+                                      0)
+      || !akb_export_add_remapped_point_normal_input(heap,
+                                                     doc,
+                                                     prim,
+                                                     mesh_py,
+                                                     vertex_count,
+                                                     source_vertices,
+                                                     line_vertex_count)
+      || !akb_export_add_remapped_point_color_inputs(heap,
+                                                     doc,
+                                                     prim,
+                                                     color_layers_seq,
+                                                     vertex_count,
+                                                     source_vertices,
+                                                     line_vertex_count)
+      || !akb_export_apply_direct_extra(doc,
+                                        geom,
+                                        &prim->extra,
+                                        primitive_extra_obj))
+    prim = NULL;
+
+done_loose_line:
+  free(line_positions);
+  free(source_vertices);
+  free(vertex_remap);
+  free(loose_indices);
+  if (edge_loose_view.buf)
+    PyBuffer_Release(&edge_loose_view);
+  if (edge_indices_view.buf)
+    PyBuffer_Release(&edge_indices_view);
+  Py_XDECREF(edge_loose_buf);
+  Py_XDECREF(edge_indices_buf);
+  Py_XDECREF(edges_obj);
+  return prim;
+}
+
 static int
 akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                                            AkNode     *node,
@@ -2622,7 +3159,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   PyObject *morph_basis_data_obj;
   PyObject **morph_data_objs;
   PyObject *uv_data_objs[AKB_EXPORT_FAST_UV_MAX];
-  PyObject *color_data_objs[AKB_EXPORT_FAST_COLOR_MAX];
+  PyObject *color_data_storage[AKB_EXPORT_FAST_COLOR_MAX];
+  PyObject **color_data_objs;
   PyObject *positions_buf;
   PyObject *normals_buf;
   PyObject *tangents_buf;
@@ -2633,7 +3171,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   PyObject *tri_materials_buf;
   PyObject **morph_bufs;
   PyObject *uv_bufs[AKB_EXPORT_FAST_UV_MAX];
-  PyObject *color_bufs[AKB_EXPORT_FAST_COLOR_MAX];
+  PyObject *color_buf_storage[AKB_EXPORT_FAST_COLOR_MAX];
+  PyObject **color_bufs;
   Py_buffer positions_view;
   Py_buffer normals_view;
   Py_buffer tangents_view;
@@ -2644,7 +3183,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   Py_buffer tri_materials_view;
   Py_buffer *morph_views;
   Py_buffer uv_views[AKB_EXPORT_FAST_UV_MAX];
-  Py_buffer color_views[AKB_EXPORT_FAST_COLOR_MAX];
+  Py_buffer color_view_storage[AKB_EXPORT_FAST_COLOR_MAX];
+  Py_buffer *color_views;
   float *positions;
   float *normals;
   float *tangents;
@@ -2653,13 +3193,15 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   AkbExportSkinVertexCache *skin_cache;
   float **morph_deltas;
   float *uvs[AKB_EXPORT_FAST_UV_MAX];
-  float *colors[AKB_EXPORT_FAST_COLOR_MAX];
+  float *color_storage[AKB_EXPORT_FAST_COLOR_MAX];
+  float **colors;
   int32_t *loop_vertices;
   int32_t *poly_loop_starts;
   int32_t *poly_loop_totals;
   int32_t *tri_loops;
   int32_t *tri_materials;
-  AkbExportFastAttrDomain color_domains[AKB_EXPORT_FAST_COLOR_MAX];
+  AkbExportFastAttrDomain color_domain_storage[AKB_EXPORT_FAST_COLOR_MAX];
+  AkbExportFastAttrDomain *color_domains;
   Py_ssize_t vertex_count;
   Py_ssize_t loop_count;
   Py_ssize_t polygon_count;
@@ -2682,6 +3224,9 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   size_t invalid_group_index;
   uint32_t source_primitive_type;
   uint32_t source_primitive_mode;
+  int mixed_line_material_index;
+  uint32_t mixed_line_mode;
+  PyObject *mixed_line_extra_obj;
   int has_tangents;
   int has_skin;
   int has_morph;
@@ -2696,6 +3241,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   int use_ply_polygons;
   int flip_uv_v;
   int ok;
+  float color_value_storage[AKB_EXPORT_FAST_COLOR_MAX * 4u];
+  float *color_values;
 
   if (!doc || !node || !payload_obj)
     return 0;
@@ -2720,6 +3267,9 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   primitive_extra_obj = Py_None;
   source_primitive_type = 0;
   source_primitive_mode = 0;
+  mixed_line_material_index = INT_MIN;
+  mixed_line_mode = 0;
+  mixed_line_extra_obj = Py_None;
   if (payload_size >= 7) {
     skin_mapping_obj = PyTuple_GET_ITEM(payload_obj, 5);
     skin_obj = PyTuple_GET_ITEM(payload_obj, 6);
@@ -2777,6 +3327,29 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     if (export_tangents < 0)
       return 0;
   }
+  if (payload_size >= 19) {
+    long value;
+
+    value = PyLong_AsLong(PyTuple_GET_ITEM(payload_obj, 18));
+    if (PyErr_Occurred())
+      return 0;
+    if (value < INT_MIN || value > INT_MAX) {
+      PyErr_SetString(PyExc_OverflowError,
+                      "mixed line material slot is outside the supported range");
+      return 0;
+    }
+    mixed_line_material_index = (int)value;
+  }
+  if (payload_size >= 20) {
+    unsigned long value;
+
+    value = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(payload_obj, 19));
+    if (PyErr_Occurred())
+      return 0;
+    mixed_line_mode = (uint32_t)value;
+  }
+  if (payload_size >= 21)
+    mixed_line_extra_obj = PyTuple_GET_ITEM(payload_obj, 20);
   want_normals = !is_stl_export
                  && !is_3mf_export
                  && export_normals
@@ -2851,7 +3424,8 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   color_count_py = PySequence_Fast_GET_SIZE(color_layers_seq);
   material_count_py = PySequence_Fast_GET_SIZE(materials_seq);
   if (uv_count_py < 0 || uv_count_py > (Py_ssize_t)AKB_EXPORT_FAST_UV_MAX
-      || color_count_py < 0 || color_count_py > (Py_ssize_t)AKB_EXPORT_FAST_COLOR_MAX) {
+      || color_count_py < 0
+      || (uint64_t)color_count_py > UINT32_MAX) {
     Py_XDECREF(morph_targets_seq);
     Py_DECREF(uv_layers_seq);
     Py_DECREF(color_layers_seq);
@@ -2938,14 +3512,30 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   memset(&tri_loops_view, 0, sizeof(tri_loops_view));
   memset(&tri_materials_view, 0, sizeof(tri_materials_view));
   memset(uv_data_objs, 0, sizeof(uv_data_objs));
-  memset(color_data_objs, 0, sizeof(color_data_objs));
+  memset(color_data_storage, 0, sizeof(color_data_storage));
   memset(uv_bufs, 0, sizeof(uv_bufs));
-  memset(color_bufs, 0, sizeof(color_bufs));
+  memset(color_buf_storage, 0, sizeof(color_buf_storage));
   memset(uv_views, 0, sizeof(uv_views));
-  memset(color_views, 0, sizeof(color_views));
+  memset(color_view_storage, 0, sizeof(color_view_storage));
   memset(uvs, 0, sizeof(uvs));
-  memset(colors, 0, sizeof(colors));
-  memset(color_domains, 0, sizeof(color_domains));
+  memset(color_storage, 0, sizeof(color_storage));
+  memset(color_domain_storage, 0, sizeof(color_domain_storage));
+  color_data_objs = color_data_storage;
+  color_bufs = color_buf_storage;
+  color_views = color_view_storage;
+  colors = color_storage;
+  color_domains = color_domain_storage;
+  color_values = color_value_storage;
+  if (color_count > AKB_EXPORT_FAST_COLOR_MAX) {
+    color_data_objs = (PyObject **)calloc(color_count, sizeof(*color_data_objs));
+    color_bufs = (PyObject **)calloc(color_count, sizeof(*color_bufs));
+    color_views = (Py_buffer *)calloc(color_count, sizeof(*color_views));
+    colors = (float **)calloc(color_count, sizeof(*colors));
+    color_domains = (AkbExportFastAttrDomain *)calloc(color_count,
+                                                      sizeof(*color_domains));
+    color_values = (float *)malloc((size_t)color_count * 4u
+                                   * sizeof(*color_values));
+  }
   positions_buf = akb_export_array_new("f", vertex_count * 3);
   normals_buf = want_normals ? akb_export_array_new("f", loop_count * 3) : NULL;
   tangents_buf = NULL;
@@ -2975,6 +3565,9 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       || !loop_vertices_buf
       || (use_ply_polygons && (!poly_loop_starts_buf || !poly_loop_totals_buf))
       || (!use_ply_polygons && !tri_loops_buf)
+      || (color_count > AKB_EXPORT_FAST_COLOR_MAX
+          && (!color_data_objs || !color_bufs || !color_views
+              || !colors || !color_domains || !color_values))
       || (has_morph && (!morph_deltas || !morph_bufs || !morph_views || !morph_data_objs))) {
     PyErr_NoMemory();
     ok = 0;
@@ -3313,9 +3906,10 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
       uint16_t joints[4];
       float    weights[4];
       float    uv[AKB_EXPORT_FAST_UV_MAX * 2u];
-      float    color[AKB_EXPORT_FAST_COLOR_MAX * 4u];
+      float   *color;
       uint32_t out_index;
 
+      color = color_values;
       loop_index_i = tri_loops[(size_t)tri_index * 3u + corner];
       if (loop_index_i < 0 || loop_index_i >= loop_count) {
         PyErr_SetString(PyExc_ValueError, "loop triangle references a missing mesh loop");
@@ -3527,6 +4121,37 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     mesh->primitiveCount++;
   }
 
+  if (mixed_line_material_index != INT_MIN
+      && !is_3mf_export
+      && !is_stl_export
+      && !is_ply_export) {
+    AkMeshPrimitive *line_prim;
+
+    line_prim = akb_export_add_loose_line_primitive(heap,
+                                                    doc,
+                                                    geom,
+                                                    mesh_obj,
+                                                    mesh,
+                                                    mesh_py,
+                                                    materials_seq,
+                                                    color_layers_seq,
+                                                    positions,
+                                                    (uint32_t)vertex_count,
+                                                    mixed_line_material_index,
+                                                    mixed_line_mode,
+                                                    mixed_line_extra_obj);
+    if (!line_prim) {
+      ok = 0;
+      goto done_native;
+    }
+    if (last_prim)
+      last_prim->next = line_prim;
+    else
+      mesh->primitive = line_prim;
+    last_prim = line_prim;
+    mesh->primitiveCount++;
+  }
+
   if (!mesh->primitive) {
     ok = 1;
     goto done_native;
@@ -3602,14 +4227,32 @@ done_native:
   }
   for (uint32_t i = 0; i < uv_count; i++)
     Py_XDECREF(uv_bufs[i]);
-  for (uint32_t i = 0; i < color_count; i++)
-    Py_XDECREF(color_data_objs[i]);
-  for (uint32_t i = 0; i < color_count; i++) {
-    if (color_views[i].buf)
-      PyBuffer_Release(&color_views[i]);
+  if (color_data_objs) {
+    for (uint32_t i = 0; i < color_count; i++)
+      Py_XDECREF(color_data_objs[i]);
   }
-  for (uint32_t i = 0; i < color_count; i++)
-    Py_XDECREF(color_bufs[i]);
+  if (color_views) {
+    for (uint32_t i = 0; i < color_count; i++) {
+      if (color_views[i].buf)
+        PyBuffer_Release(&color_views[i]);
+    }
+  }
+  if (color_bufs) {
+    for (uint32_t i = 0; i < color_count; i++)
+      Py_XDECREF(color_bufs[i]);
+  }
+  if (color_data_objs != color_data_storage)
+    free(color_data_objs);
+  if (color_bufs != color_buf_storage)
+    free(color_bufs);
+  if (color_views != color_view_storage)
+    free(color_views);
+  if (colors != color_storage)
+    free(colors);
+  if (color_domains != color_domain_storage)
+    free(color_domains);
+  if (color_values != color_value_storage)
+    free(color_values);
   if (tri_materials_view.buf)
     PyBuffer_Release(&tri_materials_view);
   if (tri_loops_view.buf)

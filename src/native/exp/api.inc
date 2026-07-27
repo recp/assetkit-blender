@@ -648,6 +648,7 @@ typedef struct AkbExportFastGroup {
   float              **morphs;
   float               *uvs[AKB_EXPORT_FAST_UV_MAX];
   float               *colors[AKB_EXPORT_FAST_COLOR_MAX];
+  float              **extraColors;
   uint32_t            *indices;
   size_t               vertexCount;
   size_t               vertexCap;

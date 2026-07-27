@@ -23,7 +23,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
 
     filename_ext = ""
     filter_glob: bpy.props.StringProperty(
-        default="*.gltf;*.glb;*.dae;*.obj;*.stl;*.ply;*.3mf",
+        default="*.gltf;*.glb;*.dae;*.zae;*.kmz;*.zip;*.obj;*.stl;*.ply;*.3mf",
         options={"HIDDEN"},
     )
     coordinate_conversion: bpy.props.EnumProperty(
@@ -191,7 +191,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         if not bpy.app.background:
             extension = os.path.splitext(self.filepath)[1].lower()
             use_blocking = self.build_mode == "BLOCKING" or (
-                self.build_mode == "AUTO" and extension == ".dae"
+                self.build_mode == "AUTO"
+                and extension in {".dae", ".zae", ".kmz", ".zip"}
             )
             if use_blocking:
                 _schedule_blocking_import(

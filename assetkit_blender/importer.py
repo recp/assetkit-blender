@@ -557,8 +557,13 @@ class _ProgressiveImportJob:
         self.preserve_tangents = _preserve_tangents(self.load_options)
         self.load_started = True
 
-        if os.path.splitext(self.filepath)[1].lower() == ".dae":
-            # DAE parsing is native and short enough to run in this timer
+        if os.path.splitext(self.filepath)[1].lower() in {
+            ".dae",
+            ".zae",
+            ".kmz",
+            ".zip",
+        }:
+            # COLLADA parsing is native and short enough to run in this timer
             # callback. Keeping it on the main Blender thread avoids a
             # first-load priority inversion when the Python worker hands the
             # completed scene back through a frequently polled GIL.
@@ -1522,7 +1527,18 @@ def _create_grouped_mesh_object(
 ) -> list[bpy.types.Object]:
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
-    first = primitives[0]
+    surface_primitives = [
+        primitive
+        for primitive in primitives
+        if int(primitive.primitive_type) != AK_PRIMITIVE_LINES
+    ]
+    line_primitives = [
+        primitive
+        for primitive in primitives
+        if int(primitive.primitive_type) == AK_PRIMITIVE_LINES
+    ]
+    first = surface_primitives[0]
+    line_primitive = line_primitives[0] if len(line_primitives) == 1 else None
     node_objects = state[_S_NODE_OBJECTS]
     parent, use_node_parent = _mesh_node_parent(state, int(first.node_index))
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
@@ -1530,14 +1546,24 @@ def _create_grouped_mesh_object(
     preserve_tangents = bool(state[_S_PRESERVE_TANGENTS])
 
     count_started_at = time.perf_counter() if profile_detail else 0.0
-    total_vertex_count = sum(int(primitive.vertex_count) for primitive in primitives)
-    total_loop_count = sum(int(primitive.loop_count) for primitive in primitives)
-    total_face_count = sum(int(primitive.face_count) for primitive in primitives)
+    surface_vertex_count = sum(int(primitive.vertex_count) for primitive in surface_primitives)
+    total_loop_count = sum(int(primitive.loop_count) for primitive in surface_primitives)
+    total_face_count = sum(int(primitive.face_count) for primitive in surface_primitives)
+    total_edge_count = int(line_primitive.loop_count) // 2 if line_primitive else 0
+    line_vertex_offset = (
+        _line_surface_vertex_offset(line_primitive, surface_primitives)
+        if line_primitive
+        else -1
+    )
+    total_vertex_count = surface_vertex_count
+    if line_primitive is not None and line_vertex_offset == surface_vertex_count:
+        total_vertex_count += int(line_primitive.vertex_count)
     count_ms = (time.perf_counter() - count_started_at) * 1000.0 if profile_detail else 0.0
 
     skin_joint_width = max(1, int(first.skin_joint_width or 4))
     vertices = bytearray(total_vertex_count * 3 * 4)
     indices = bytearray(total_loop_count * 4)
+    edges = bytearray(total_edge_count * 2 * 4)
     loop_starts = bytearray(total_face_count * 4)
     normals = bytearray(total_loop_count * 3 * 4) if first.normals_f32 else None
     vertex_normals = bytearray(total_vertex_count * 3 * 4) if first.vertex_normals_f32 else None
@@ -1545,22 +1571,31 @@ def _create_grouped_mesh_object(
     skin_joints = bytearray(total_vertex_count * skin_joint_width * 2) if first.has_skin else None
     skin_weights = bytearray(total_vertex_count * skin_joint_width * 4) if first.has_skin else None
     attr_started_at = time.perf_counter() if profile_detail else 0.0
-    uv_sets = _group_loop_float_attrs(primitives, "uv_sets")
-    color_sets = _group_loop_float_attrs(primitives, "color_sets")
-    has_materials = any(_has_material_data(primitive) for primitive in primitives)
+    uv_sets = _group_loop_float_attrs(surface_primitives, "uv_sets")
+    color_sets = _group_loop_float_attrs(surface_primitives, "color_sets")
+    point_attrs = _group_line_point_attrs(
+        line_primitive,
+        total_vertex_count,
+        line_vertex_offset,
+    )
+    has_materials = any(_has_material_data(primitive) for primitive in surface_primitives)
     material_indices = bytearray(total_face_count * 4) if has_materials else b""
-    sharp_faces = _group_wavefront_sharp_faces(primitives, total_face_count)
+    sharp_faces = _group_wavefront_sharp_faces(surface_primitives, total_face_count)
     attr_ms = (time.perf_counter() - attr_started_at) * 1000.0 if profile_detail else 0.0
 
     assemble_started_at = time.perf_counter() if profile_detail else 0.0
     vertex_offset = 0
     loop_offset = 0
     face_offset = 0
-    for slot_index, primitive in enumerate(primitives):
+    for slot_index, primitive in enumerate(surface_primitives):
         primitive_vertices = _buffer_view(primitive.vertices_f32, "f")
         primitive_indices = _buffer_view(primitive.indices_u32, "i")
         if primitive_vertices is None or primitive_indices is None:
-            return [_create_import_object(primitive, state, collection, shading_mode)[0]]
+            return [
+                obj
+                for source in primitives
+                for obj in _create_import_object(source, state, collection, shading_mode)
+            ]
 
         _copy_buffer_bytes(vertices, vertex_offset * 3 * 4, primitive_vertices, "f")
         copied = native_write_offset_i32(indices, loop_offset * 4, primitive_indices, vertex_offset)
@@ -1623,6 +1658,36 @@ def _create_grouped_mesh_object(
         vertex_offset += int(primitive.vertex_count)
         loop_offset += int(primitive.loop_count)
         face_offset += int(primitive.face_count)
+    if line_primitive is not None:
+        line_indices = _buffer_view(line_primitive.indices_u32, "i")
+        if line_indices is None or line_vertex_offset < 0:
+            return [
+                obj
+                for source in primitives
+                for obj in _create_import_object(source, state, collection, shading_mode)
+            ]
+        if line_vertex_offset == surface_vertex_count:
+            line_vertices = _buffer_view(line_primitive.vertices_f32, "f")
+            if line_vertices is None:
+                return [
+                    obj
+                    for source in primitives
+                    for obj in _create_import_object(source, state, collection, shading_mode)
+                ]
+            _copy_buffer_bytes(
+                vertices,
+                line_vertex_offset * 3 * 4,
+                line_vertices,
+                "f",
+            )
+        copied = native_write_offset_i32(edges, 0, line_indices, line_vertex_offset)
+        if copied is None:
+            shifted_indices = native_offset_i32(line_indices, line_vertex_offset)
+            if shifted_indices is not None:
+                copied = _copy_buffer_bytes(edges, 0, shifted_indices, "i")
+        if copied is None:
+            tmp_indices = array("i", (int(index) + line_vertex_offset for index in line_indices))
+            _copy_buffer_bytes(edges, 0, tmp_indices, "i")
     assemble_ms = (time.perf_counter() - assemble_started_at) * 1000.0 if profile_detail else 0.0
 
     replace_started_at = time.perf_counter() if profile_detail else 0.0
@@ -1632,8 +1697,10 @@ def _create_grouped_mesh_object(
         vertex_count=total_vertex_count,
         loop_count=total_loop_count,
         face_count=total_face_count,
+        edge_count=total_edge_count,
         vertices_f32=vertices,
         indices_u32=indices,
+        edges_u32=edges,
         loop_starts_i32=loop_starts,
         loop_totals_i32=b"",
         normals_f32=normals or b"",
@@ -1641,6 +1708,8 @@ def _create_grouped_mesh_object(
         tangents_f32=tangents or b"",
         uv_sets=uv_sets,
         color_sets=color_sets,
+        point_attrs=point_attrs,
+        point_attr_count=len(point_attrs),
         skin_joints_u16=skin_joints or b"",
         skin_weights_f32=skin_weights or b"",
         skin_vertex_count=total_vertex_count if first.has_skin else 0,
@@ -1651,7 +1720,7 @@ def _create_grouped_mesh_object(
     bulk_started_at = time.perf_counter() if profile_detail else 0.0
     objects = _create_grouped_mesh_object_bulk(
         data,
-        primitives,
+        surface_primitives,
         material_indices,
         parent,
         node_objects=node_objects,
@@ -1669,6 +1738,7 @@ def _create_grouped_mesh_object(
         preserve_tangents=preserve_tangents,
         collection=collection,
         node_visibility_animation=node_visibility_animation,
+        line_primitive=line_primitive,
     )
     if profile_detail:
         _profile_log(
@@ -1689,6 +1759,54 @@ def _group_mesh_name(data: MeshPrimitiveData) -> str:
     if name.endswith("_0"):
         return name[:-2]
     return name
+
+
+def _line_surface_vertex_offset(
+    line: MeshPrimitiveData,
+    surfaces: list[MeshPrimitiveData],
+) -> int:
+    line_positions = _buffer_view(line.vertices_f32, "f")
+    if line_positions is None:
+        return -1
+    line_bytes = line_positions.cast("B")
+    vertex_offset = 0
+    for surface in surfaces:
+        surface_positions = _buffer_view(surface.vertices_f32, "f")
+        if (
+            surface_positions is not None
+            and len(surface_positions) == len(line_positions)
+            and surface_positions.cast("B") == line_bytes
+        ):
+            return vertex_offset
+        vertex_offset += int(surface.vertex_count)
+    return vertex_offset
+
+
+def _group_line_point_attrs(
+    line: MeshPrimitiveData | None,
+    total_vertex_count: int,
+    vertex_offset: int,
+) -> list[LoopFloatAttributeData]:
+    if line is None or vertex_offset < 0:
+        return []
+
+    grouped = []
+    for attr in line.point_attrs or ():
+        width = int(attr.width or 0)
+        values = _buffer_view(attr.values_f32, "f")
+        if width <= 0 or values is None:
+            continue
+        merged = bytearray(total_vertex_count * width * 4)
+        copied = _copy_buffer_bytes(
+            merged,
+            vertex_offset * width * 4,
+            values,
+            "f",
+        )
+        if copied != len(values) * 4:
+            continue
+        grouped.append(replace(attr, values_f32=merged))
+    return grouped
 
 
 def _group_loop_float_attrs(
@@ -1744,6 +1862,7 @@ def _create_grouped_mesh_object_bulk(
     preserve_tangents: bool = False,
     collection: bpy.types.Collection | None = None,
     node_visibility_animation: bool = True,
+    line_primitive: MeshPrimitiveData | None = None,
 ) -> list[bpy.types.Object]:
     total_started_at = time.perf_counter()
     profile_detail = _PROFILE_MATERIAL_STATS is not None
@@ -1751,6 +1870,8 @@ def _create_grouped_mesh_object_bulk(
     detail_parts: list[str] = []
     mesh = bpy.data.meshes.new(data.name)
     mesh.vertices.add(data.vertex_count)
+    if data.edge_count:
+        mesh.edges.add(data.edge_count)
     mesh.loops.add(data.loop_count)
     mesh.polygons.add(data.face_count)
     if profile_detail:
@@ -1760,6 +1881,7 @@ def _create_grouped_mesh_object_bulk(
 
     vertices = _buffer_view(data.vertices_f32, "f")
     indices = _buffer_view(data.indices_u32, "i")
+    edges = _buffer_view(data.edges_u32, "i") if data.edges_u32 else None
     loop_starts = _buffer_view(data.loop_starts_i32, "i")
     loop_totals = _buffer_view(data.loop_totals_i32, "i")
     if vertices is None or indices is None or loop_starts is None:
@@ -1770,11 +1892,14 @@ def _create_grouped_mesh_object_bulk(
         phase_started_at = now
 
     _set_mesh_positions(mesh, vertices)
+    if edges is not None:
+        _set_mesh_edges(mesh, edges)
     _set_mesh_loop_vertex_indices(mesh, indices)
     _set_mesh_loop_starts(mesh, loop_starts, int(data.loop_count), int(data.face_count))
     if loop_totals is not None and int(data.loop_count) != int(data.face_count) * 3:
         mesh.polygons.foreach_set("loop_total", _rna_i32_values(loop_totals))
     _set_mesh_material_indices(mesh, material_indices)
+    _apply_point_attributes(mesh, data)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"topology={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -1864,6 +1989,25 @@ def _create_grouped_mesh_object_bulk(
             material = _material_for_data(primitive, material_cache)
             if material:
                 _assign_mesh_material(obj, mesh, material)
+    if line_primitive is not None:
+        line_material = _material_for_data(line_primitive, material_cache)
+        line_material_slot = -1
+        if line_material:
+            for index, material in enumerate(mesh.materials):
+                if material == line_material:
+                    line_material_slot = index
+                    break
+            if line_material_slot < 0:
+                mesh.materials.append(line_material)
+                line_material_slot = len(mesh.materials) - 1
+        obj["assetkit_mixed_line_material_slot"] = int(line_material_slot)
+        obj["assetkit_mixed_line_mode"] = int(line_primitive.primitive_mode)
+        obj["assetkit_mixed_line_edge_count"] = int(data.edge_count)
+        _set_assetkit_json_prop(
+            obj,
+            "assetkit_mixed_line_primitive_extra_json",
+            line_primitive.primitive_extra,
+        )
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"materials={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -1938,9 +2082,49 @@ def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiv
         while index < count and _mesh_group_key(primitives[index]) == key:
             group.append(primitives[index])
             index += 1
+        if (
+            index < count
+            and _line_primitive_can_join_surface_group(primitives[index], group)
+        ):
+            group.append(primitives[index])
+            index += 1
         units.append(group if len(group) > 1 else primitive)
 
     return units
+
+
+def _same_mesh_run(candidate: MeshPrimitiveData, first: MeshPrimitiveData) -> bool:
+    return (
+        int(candidate.node_index) == int(first.node_index)
+        and int(candidate.mesh_key or 0) == int(first.mesh_key or 0)
+    )
+
+
+def _line_primitive_can_join_surface_group(
+    line: MeshPrimitiveData,
+    surfaces: list[MeshPrimitiveData],
+) -> bool:
+    if not surfaces or int(line.primitive_type) != AK_PRIMITIVE_LINES:
+        return False
+    first = surfaces[0]
+    if not _same_mesh_run(line, first) or not line.vertices_f32 or not line.indices_u32:
+        return False
+    if line.instance_count or line.has_gsplat or line.has_skin:
+        return False
+    if line.morph_targets or line.morph_anim_channels or line.material_anim_channels:
+        return False
+    if line.material_variants:
+        return False
+
+    line_positions = _buffer_view(line.vertices_f32, "f")
+    line_indices = _buffer_view(line.indices_u32, "i")
+    return (
+        line_positions is not None
+        and len(line_positions) == int(line.vertex_count) * 3
+        and line_indices is not None
+        and len(line_indices) == int(line.loop_count)
+        and len(line_indices) % 2 == 0
+    )
 
 
 def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
@@ -7257,8 +7441,6 @@ def _create_material(
 
     color_attr = _color_attribute_name(data)
     material_name = data.material_name or f"{data.name}_Material"
-    if data.material_name and color_attr:
-        material_name = f"{material_name}_{color_attr}"
     base_color = _material_base_color(data)
     if (
         _ACTIVE_TEXTURE_LOAD_MODE != "DEFERRED"

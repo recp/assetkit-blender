@@ -3507,6 +3507,18 @@ def _native_mesh_payload(
             skin_setup[3],
         )
     morph_payload = _native_morph_payload(morph_targets, morph_animation)
+    mixed_line_material_slot = -(2**31)
+    if "assetkit_mixed_line_material_slot" in obj:
+        try:
+            mixed_line_material_slot = int(
+                obj.get("assetkit_mixed_line_material_slot", -1)
+            )
+        except (TypeError, ValueError):
+            mixed_line_material_slot = -1
+    try:
+        mixed_line_mode = int(obj.get("assetkit_mixed_line_mode", 0))
+    except (TypeError, ValueError):
+        mixed_line_mode = 0
     return (
         _AKB_NATIVE_MESH_PAYLOAD,
         mesh,
@@ -3526,6 +3538,13 @@ def _native_mesh_payload(
         bool(ply_export_triangulated),
         bool(export_normals),
         bool(export_tangents),
+        mixed_line_material_slot,
+        mixed_line_mode,
+        (
+            _assetkit_json_prop(obj, "assetkit_mixed_line_primitive_extra_json")
+            if export_custom_properties
+            else None
+        ),
     )
 
 
