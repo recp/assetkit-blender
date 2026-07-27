@@ -128,14 +128,23 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
     return 0;
 
   source = image->source;
-  if (source && source->resolvedPath) {
+  buff = source ? source->buffer : NULL;
+  data = buff ? (const unsigned char *)buff->data : NULL;
+  length = buff ? buff->length : 0;
+
+  /*
+   * Package loaders retain the archive member name in resolvedPath while
+   * exposing the member bytes through source->buffer.  That member name is
+   * not a filesystem path Blender can open, so only reuse resolvedPath for
+   * buffered images when it already names the extracted payload.
+   */
+  if (source && source->resolvedPath
+      && (!data || length == 0
+          || akb_file_has_size(source->resolvedPath, length))) {
     snprintf(dest, capacity, "%s", source->resolvedPath);
     return dest[0] != '\0';
   }
 
-  buff = source ? source->buffer : NULL;
-  data = buff ? (const unsigned char *)buff->data : NULL;
-  length = buff ? buff->length : 0;
   if (!data || length == 0)
     return 0;
   borrowed_slice = buff->name
@@ -187,6 +196,13 @@ akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
   source = image->source;
   if (!source)
     return;
+
+  if (source->buffer
+      && source->buffer->data
+      && source->buffer->length > 0) {
+    akb_copy_embedded_texture_path(doc, image, dest, capacity);
+    return;
+  }
 
   path = source->resolvedPath ? source->resolvedPath : source->uri;
   if (!path || !path[0]) {
@@ -1057,4 +1073,3 @@ akb_extract_material_variants(AkDoc *doc,
   out->material_variant_count = count;
   return 1;
 }
-
