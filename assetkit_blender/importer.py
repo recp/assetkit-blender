@@ -3,6 +3,8 @@ from __future__ import annotations
 from array import array
 from collections import deque
 from dataclasses import replace
+from functools import wraps
+import gc
 import json
 import math
 import os
@@ -27,6 +29,8 @@ from .assetkit import (
     native_animation_component_constant,
     native_animation_coords,
     native_animation_quat_slerp_coords,
+    native_buffer_sequences_equal,
+    native_buffers_equal,
     native_load_meshes,
     native_fill_i32,
     native_fill_triangle_loop_offsets_ptr,
@@ -48,6 +52,7 @@ from .load_options import (
     AKB_LOAD_DEFER_NORMALS_NO,
     AKB_LOAD_DEFER_NORMALS_YES,
     AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
+    AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS,
     AKB_LOAD_OPT_TEXTURE_LOADING,
     AKB_LOAD_OPT_PRESERVE_TANGENTS,
     AKB_LOAD_TEXTURE_AUTO,
@@ -190,10 +195,13 @@ _USE_SHARED_ACTION_SLOTS = False
 _PROFILE_MATERIAL_STATS: dict[str, float | int] | None = None
 _PROGRESSIVE_BATCH_SIZE = 128
 _PROGRESSIVE_TIME_BUDGET = 0.016
+_PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD = 1024
 _PROGRESSIVE_LOAD_POLL_INTERVAL = 0.020
+_COMPACT_STATIC_INSTANCES_ENV = "ASSETKIT_BLENDER_COMPACT_STATIC_INSTANCES"
 _ACTIVE_IMPORT_JOBS: list[object] = []
 _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
 _IMPORT_ANIMATION_SCOPE_SERIAL = 0
+_SUSPEND_GC_DURING_BLOCKING_IMPORT = True
 _AK_ACTION_CLIP_INDEX_PROP = "assetkit_animation_clip_index"
 _AK_ACTION_CLIP_NAME_PROP = "assetkit_animation_clip_name"
 _AK_ACTION_CLIP_EXPORT_NAME_PROP = "assetkit_animation_clip_export_name"
@@ -248,10 +256,33 @@ _CH_KEYS = (
     _S_DYNAMIC_SKIN_ANIMATION_SKIP,
     _S_NODE_PARENT_CACHE,
     _S_PRESERVE_TANGENTS,
-) = range(19)
+    _S_PROTOTYPE_COLLECTIONS,
+    _S_DEFERRED_COLLECTION_INSTANCES,
+    _S_DEFERRED_SCENE_NODE_BUILD,
+    _S_COMPACT_INSTANCE_PLAN,
+    _S_COMPACT_INSTANCE_OBJECTS,
+    _S_SCENE_BOUNDS,
+) = range(25)
 _SKIN_CACHE_DEFER_BIND_SKINS = object()
 
 
+def _suspend_gc_during_import_call(func):
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        gc_was_enabled = gc.isenabled()
+        suspend = _SUSPEND_GC_DURING_BLOCKING_IMPORT and gc_was_enabled
+        if suspend:
+            gc.disable()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            if suspend:
+                gc.enable()
+
+    return wrapped
+
+
+@_suspend_gc_during_import_call
 def import_assetkit_file(
     filepath: str,
     library_path: str = "",
@@ -272,6 +303,7 @@ def import_assetkit_file(
     _reset_material_template_cache()
     _reset_material_profile()
     _ACTIVE_IMPORT_ANIMATION_SCOPE = _new_import_animation_scope(filepath)
+    load_options = _compact_content_key_options(load_options)
     existing_actions = _snapshot_actions(fit_timeline)
     existing_frame_range = _snapshot_scene_frame_range(fit_timeline)
     scene_had_timeline_content = _scene_has_timeline_content(bpy.context.scene) if fit_timeline else False
@@ -292,11 +324,18 @@ def import_assetkit_file(
             f"meshes={len(primitives)} curves={len(curves)} nodes={len(scene_nodes)} "
             f"elapsed={(time.perf_counter() - load_started_at) * 1000.0:.3f}ms"
         )
+    destination_collection = collection or bpy.context.collection
+    staging_collection = (
+        _new_progressive_staging_collection()
+        if len(primitives) >= _PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD
+        else None
+    )
+    build_collection = staging_collection or destination_collection
     scene_started_at = time.perf_counter() if profile_detail else 0.0
     state = _begin_scene_build(
         primitives,
         scene_nodes,
-        collection or bpy.context.collection,
+        build_collection,
         doc_extra,
         scene_extra,
         scene_info,
@@ -304,6 +343,10 @@ def import_assetkit_file(
         curves=curves,
         defer_custom_normals=defer_custom_normals,
         preserve_tangents=preserve_tangents,
+        defer_scene_nodes=(
+            staging_collection is not None
+            and _can_defer_scene_nodes(primitives, curves)
+        ),
     )
     if profile_detail:
         _profile_log(
@@ -313,7 +356,20 @@ def import_assetkit_file(
         )
     objects: list[bpy.types.Object] = []
     build_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = build_started_at
     import_units = _mesh_import_units(primitives)
+    import_units_ms = (
+        (time.perf_counter() - phase_started_at) * 1000.0
+        if profile_detail
+        else 0.0
+    )
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
+    _sort_mesh_import_units_for_blender(import_units)
+    sort_units_ms = (
+        (time.perf_counter() - phase_started_at) * 1000.0
+        if profile_detail
+        else 0.0
+    )
     global _ACTIVE_MATERIAL_TEMPLATE_CLONING, _ACTIVE_PREBUILT_MATERIALS_BY_ID, _ACTIVE_TEXTURE_LOAD_MODE
     previous_texture_load_mode = _ACTIVE_TEXTURE_LOAD_MODE
     previous_material_template_cloning = _ACTIVE_MATERIAL_TEMPLATE_CLONING
@@ -321,15 +377,87 @@ def import_assetkit_file(
     _ACTIVE_TEXTURE_LOAD_MODE = texture_load_mode
     _ACTIVE_MATERIAL_TEMPLATE_CLONING = len(primitives) <= _MATERIAL_TEMPLATE_CLONE_PRIMITIVE_LIMIT
     try:
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
         _ACTIVE_PREBUILT_MATERIALS_BY_ID = _prebuild_material_cache(
             primitives,
             state[_S_MATERIAL_CACHE],
             texture_load_mode,
         )
-        objects.extend(_create_curve_objects(curves, state, collection or bpy.context.collection))
+        prebuild_materials_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
+        objects.extend(_create_curve_objects(curves, state, build_collection))
+        curves_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
+        unit_profile = {
+            "group_hit": [0, 0.0],
+            "group_miss": [0, 0.0],
+            "single_hit": [0, 0.0],
+            "single_miss": [0, 0.0],
+        } if profile_detail else None
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
         for unit in import_units:
-            objects.extend(_create_import_unit(unit, state, collection or bpy.context.collection, shading_mode))
+            if profile_detail:
+                unit_started_at = time.perf_counter()
+                cache_hits_before = int(state[_S_MESH_CACHE_HITS])
+            objects.extend(_create_import_unit(unit, state, build_collection, shading_mode))
+            if profile_detail:
+                cache_hit = int(state[_S_MESH_CACHE_HITS]) != cache_hits_before
+                kind = "group" if isinstance(unit, list) else "single"
+                bucket = unit_profile[f"{kind}_{'hit' if cache_hit else 'miss'}"]
+                bucket[0] += 1
+                bucket[1] += (time.perf_counter() - unit_started_at) * 1000.0
+        create_units_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
+        _finish_deferred_scene_nodes(state, objects)
+        finish_nodes_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
+        _finish_compact_static_instances(state)
+        compact_instances_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
+        _apply_deferred_collection_instances(state)
+        collection_instances_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
         _apply_deferred_bind_pose_skins(state)
+        bind_pose_skins_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
+        if staging_collection is not None:
+            _drain_deferred_staging_work()
+            _publish_progressive_staging_collection(
+                destination_collection,
+                staging_collection,
+            )
+        publish_ms = (
+            (time.perf_counter() - phase_started_at) * 1000.0
+            if profile_detail
+            else 0.0
+        )
     finally:
         _ACTIVE_TEXTURE_LOAD_MODE = previous_texture_load_mode
         _ACTIVE_MATERIAL_TEMPLATE_CLONING = previous_material_template_cloning
@@ -342,16 +470,37 @@ def import_assetkit_file(
             f"mesh_cache_hits={int(state[_S_MESH_CACHE_HITS])} "
             f"elapsed={(time.perf_counter() - build_started_at) * 1000.0:.3f}ms"
         )
+        _profile_log(
+            "blocking build_objects_detail "
+            f"import_units={import_units_ms:.3f}ms "
+            f"sort_units={sort_units_ms:.3f}ms "
+            f"prebuild_materials={prebuild_materials_ms:.3f}ms "
+            f"curves={curves_ms:.3f}ms "
+            f"create_units={create_units_ms:.3f}ms "
+            f"finish_nodes={finish_nodes_ms:.3f}ms "
+            f"compact_instances={compact_instances_ms:.3f}ms "
+            f"collection_instances={collection_instances_ms:.3f}ms "
+            f"bind_pose_skins={bind_pose_skins_ms:.3f}ms "
+            f"publish={publish_ms:.3f}ms"
+        )
+        _profile_log(
+            "blocking create_units_detail "
+            + " ".join(
+                f"{name}_calls={values[0]} {name}={values[1]:.3f}ms"
+                for name, values in unit_profile.items()
+            )
+        )
         _log_material_profile("blocking")
 
+    result = _import_result_objects(objects, state)
     finish_started_at = time.perf_counter() if profile_detail else 0.0
     _finish_import(
-        objects,
+        result,
         focus_mode,
         placement_mode,
         state[_S_ROOT_OBJECTS],
         scene_was_empty,
-        collection or bpy.context.collection,
+        staging_collection or destination_collection,
         focus_camera,
         select_imported,
         set_viewport_shading,
@@ -359,6 +508,11 @@ def import_assetkit_file(
         existing_actions,
         existing_frame_range,
         scene_had_timeline_content,
+        (
+            state.get(_S_SCENE_BOUNDS)
+            if state.get(_S_COMPACT_INSTANCE_PLAN) is not None
+            else None
+        ),
     )
     if profile_detail:
         _profile_log(
@@ -366,9 +520,26 @@ def import_assetkit_file(
             f"elapsed={(time.perf_counter() - finish_started_at) * 1000.0:.3f}ms "
             f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
         )
-    result = _import_result_objects(objects, state)
     _ACTIVE_IMPORT_ANIMATION_SCOPE = ""
     return result
+
+
+def _new_progressive_staging_collection() -> bpy.types.Collection:
+    staging = bpy.data.collections.new("AssetKit Import")
+    staging["assetkit_progressive_staging"] = True
+    return staging
+
+
+def _publish_progressive_staging_collection(
+    destination: bpy.types.Collection,
+    staging: bpy.types.Collection,
+) -> None:
+    if destination.children.get(staging.name) is None:
+        destination.children.link(staging)
+    try:
+        del staging["assetkit_progressive_staging"]
+    except Exception:
+        pass
 
 
 def import_assetkit_file_progressive(
@@ -437,7 +608,7 @@ class _ProgressiveImportJob:
     ) -> None:
         self.filepath = filepath
         self.library_path = library_path
-        self.load_options = load_options
+        self.load_options = _compact_content_key_options(load_options)
         self.collection = collection
         self.batch_size = batch_size
         self.time_budget = time_budget
@@ -453,6 +624,7 @@ class _ProgressiveImportJob:
         self.on_complete = on_complete
         self.on_error = on_error
         self.prepared = False
+        self.build_all_at_once = False
         self.load_started = False
         self.done = False
         self.failed = False
@@ -468,6 +640,7 @@ class _ProgressiveImportJob:
         self.loaded_scene = None
         self.load_error = None
         self.state = None
+        self.staging_collection: bpy.types.Collection | None = None
         self.import_units = []
         self.unit_index = 0
         self.objects: list[bpy.types.Object] = []
@@ -601,10 +774,15 @@ class _ProgressiveImportJob:
             return
         primitives, curves, scene_nodes, doc_extra, scene_extra, scene_info, doc_images = self.loaded_scene
 
+        # Keep progressive construction outside the active scene. Linking every
+        # partial batch makes Blender redraw and re-evaluate an increasingly
+        # large scene between timer callbacks; collection instances make that
+        # cost grow especially quickly. Publish the completed import once.
+        self.staging_collection = _new_progressive_staging_collection()
         self.state = _begin_scene_build(
             primitives,
             scene_nodes,
-            self.collection,
+            self.staging_collection,
             doc_extra,
             scene_extra,
             scene_info,
@@ -612,16 +790,24 @@ class _ProgressiveImportJob:
             curves=curves,
             defer_custom_normals=self.defer_custom_normals,
             preserve_tangents=self.preserve_tangents,
+            defer_scene_nodes=(
+                len(primitives) >= _PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD
+                and _can_defer_scene_nodes(primitives, curves)
+            ),
         )
         self.import_units = _mesh_import_units(primitives)
+        _sort_mesh_import_units_for_blender(self.import_units)
+        if len(self.import_units) >= _PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD:
+            self.build_all_at_once = True
         self.material_template_cloning = len(primitives) <= _MATERIAL_TEMPLATE_CLONE_PRIMITIVE_LIMIT
         self.prebuilt_materials = None
         _ACTIVE_TEXTURE_LOAD_MODE = self.texture_load_mode
         _ACTIVE_MATERIAL_TEMPLATE_CLONING = self.material_template_cloning
         _ACTIVE_PREBUILT_MATERIALS_BY_ID = self.prebuilt_materials
-        self.objects.extend(_create_curve_objects(curves, self.state, self.collection))
+        self.objects.extend(_create_curve_objects(curves, self.state, self.staging_collection))
         self.prepared = True
 
+    @_suspend_gc_during_import_call
     def _build_step(self) -> None:
         if self.state is None:
             return
@@ -629,9 +815,18 @@ class _ProgressiveImportJob:
         processed = 0
         while self.unit_index < len(self.import_units):
             unit = self.import_units[self.unit_index]
-            self.objects.extend(_create_import_unit(unit, self.state, self.collection, self.shading_mode))
+            self.objects.extend(
+                _create_import_unit(
+                    unit,
+                    self.state,
+                    self.staging_collection or self.collection,
+                    self.shading_mode,
+                )
+            )
             self.unit_index += 1
             processed += 1
+            if self.build_all_at_once:
+                continue
             if processed >= self.batch_size:
                 break
             if time.perf_counter() - started_at >= self.time_budget:
@@ -643,16 +838,61 @@ class _ProgressiveImportJob:
         if self.done:
             return
         self.done = True
+        result: list[bpy.types.Object] = []
         if self.state is not None:
+            profile_detail = _PROFILE_MATERIAL_STATS is not None
+            phase_started_at = time.perf_counter() if profile_detail else 0.0
+            _finish_deferred_scene_nodes(self.state, self.objects)
+            node_finish_ms = (
+                (time.perf_counter() - phase_started_at) * 1000.0
+                if profile_detail
+                else 0.0
+            )
+            phase_started_at = time.perf_counter() if profile_detail else 0.0
+            _finish_compact_static_instances(self.state)
+            _apply_deferred_collection_instances(self.state)
+            instances_ms = (
+                (time.perf_counter() - phase_started_at) * 1000.0
+                if profile_detail
+                else 0.0
+            )
+            phase_started_at = time.perf_counter() if profile_detail else 0.0
             _apply_deferred_bind_pose_skins(self.state)
+            skins_ms = (
+                (time.perf_counter() - phase_started_at) * 1000.0
+                if profile_detail
+                else 0.0
+            )
+            staging = self.staging_collection
+            if staging is not None:
+                phase_started_at = time.perf_counter() if profile_detail else 0.0
+                if self.build_all_at_once:
+                    _drain_deferred_staging_work()
+                deferred_ms = (
+                    (time.perf_counter() - phase_started_at) * 1000.0
+                    if profile_detail
+                    else 0.0
+                )
+                phase_started_at = time.perf_counter() if profile_detail else 0.0
+                _publish_progressive_staging_collection(self.collection, staging)
+                publish_ms = (
+                    (time.perf_counter() - phase_started_at) * 1000.0
+                    if profile_detail
+                    else 0.0
+                )
+            else:
+                deferred_ms = 0.0
+                publish_ms = 0.0
             _reset_material_template_cache()
+            result = _import_result_objects(self.objects, self.state)
+            phase_started_at = time.perf_counter() if profile_detail else 0.0
             _finish_import(
-                self.objects,
+                result,
                 self.focus_mode,
                 self.placement_mode,
                 self.state[_S_ROOT_OBJECTS],
                 self.scene_was_empty,
-                self.collection,
+                staging or self.collection,
                 self.focus_camera,
                 self.select_imported,
                 self.set_viewport_shading,
@@ -660,8 +900,20 @@ class _ProgressiveImportJob:
                 self.existing_actions,
                 self.existing_frame_range,
                 self.scene_had_timeline_content,
+                (
+                    self.state.get(_S_SCENE_BOUNDS)
+                    if self.state.get(_S_COMPACT_INSTANCE_PLAN) is not None
+                    else None
+                ),
             )
-        result = _import_result_objects(self.objects, self.state or {})
+            if profile_detail:
+                _profile_log(
+                    "progressive_finish_detail "
+                    f"scene_nodes={node_finish_ms:.3f}ms "
+                    f"instances={instances_ms:.3f}ms skins={skins_ms:.3f}ms "
+                    f"deferred={deferred_ms:.3f}ms publish={publish_ms:.3f}ms "
+                    f"finish_import={(time.perf_counter() - phase_started_at) * 1000.0:.3f}ms"
+                )
         if _PROFILE_MATERIAL_STATS is not None:
             _profile_log(
                 "progressive finish "
@@ -1017,6 +1269,7 @@ def _scene_info_from_loaded(loaded: object | None) -> dict:
         "count": int(getattr(loaded, "scene_count", 0)),
         "name": str(getattr(loaded, "scene_name", "") or ""),
         "names": list(getattr(loaded, "scene_names", []) or []),
+        "bounds": getattr(loaded, "scene_bounds", None),
     }
 
 
@@ -1035,6 +1288,7 @@ def _begin_scene_build(
     required_node_indices: object = _REQUIRED_NODE_INDICES_AUTO,
     curves: list[CurveData] | None = None,
     preserve_tangents: bool = False,
+    defer_scene_nodes: bool = False,
 ) -> dict:
     profile_detail = _PROFILE_MATERIAL_STATS is not None
     started_at = time.perf_counter() if profile_detail else 0.0
@@ -1063,22 +1317,51 @@ def _begin_scene_build(
     visibility_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
     node_animation_skip_indices = _skinned_node_animation_skip_indices(primitives)
-    if create_all_nodes:
+    compact_instance_plan = (
+        None
+        if create_all_nodes
+        else _compact_static_instance_plan(primitives, curves, scene_nodes)
+    )
+    if compact_instance_plan is not None:
+        compact_instance_plan["collection"] = collection
+        required_node_indices = compact_instance_plan["required_indices"]
+        defer_scene_nodes = False
+    elif create_all_nodes:
         required_node_indices = None
     elif required_node_indices is _REQUIRED_NODE_INDICES_AUTO:
         required_node_indices = _required_scene_node_indices(primitives, scene_nodes, node_animation_skip_indices, curves)
     elif required_node_indices is not None:
         required_node_indices = set(required_node_indices)
-    node_objects = _create_scene_nodes(
-        scene_nodes,
-        coord_root,
-        collection,
-        node_object_visibility,
-        apply_animation=apply_node_animation,
-        skip_animation_nodes=node_animation_skip_indices,
-        required_indices=required_node_indices,
-        has_visibility_animation=node_visibility_animation,
-    )
+    prototype_collections = _create_prototype_collections(scene_nodes)
+    deferred_collection_instances: list[tuple] = []
+    deferred_scene_node_build = None
+    if defer_scene_nodes:
+        node_objects = {}
+        deferred_scene_node_build = {
+            "nodes": scene_nodes,
+            "coord_root": coord_root,
+            "collection": collection,
+            "prototype_collections": prototype_collections,
+            "deferred_collection_instances": deferred_collection_instances,
+            "node_visibility": node_object_visibility,
+            "apply_animation": apply_node_animation,
+            "skip_animation_nodes": node_animation_skip_indices,
+            "required_indices": required_node_indices,
+            "has_visibility_animation": node_visibility_animation,
+        }
+    else:
+        node_objects = _create_scene_nodes(
+            scene_nodes,
+            coord_root,
+            collection,
+            prototype_collections,
+            deferred_collection_instances,
+            node_object_visibility,
+            apply_animation=apply_node_animation,
+            skip_animation_nodes=node_animation_skip_indices,
+            required_indices=required_node_indices,
+            has_visibility_animation=node_visibility_animation,
+        )
     nodes_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     if profile_detail:
         _profile_log(
@@ -1110,6 +1393,12 @@ def _begin_scene_build(
         _S_DYNAMIC_SKIN_ANIMATION_SKIP: dynamic_skin_animation_skip,
         _S_NODE_PARENT_CACHE: {},
         _S_PRESERVE_TANGENTS: preserve_tangents,
+        _S_PROTOTYPE_COLLECTIONS: prototype_collections,
+        _S_DEFERRED_COLLECTION_INSTANCES: deferred_collection_instances,
+        _S_DEFERRED_SCENE_NODE_BUILD: deferred_scene_node_build,
+        _S_COMPACT_INSTANCE_PLAN: compact_instance_plan,
+        _S_COMPACT_INSTANCE_OBJECTS: [],
+        _S_SCENE_BOUNDS: _scene_bounds_from_info(scene_info),
     }
 
 
@@ -1331,12 +1620,256 @@ def _scene_root_objects(
         return [coord_root]
     roots = []
     for index, node in enumerate(scene_nodes):
-        if node.parent_index < 0 and index in node_objects:
+        if (
+            node.parent_index < 0
+            and int(node.prototype_root_index) < 0
+            and index in node_objects
+        ):
             roots.append(node_objects[index])
     return roots
 
 
+def _can_defer_scene_nodes(
+    primitives: list[MeshPrimitiveData],
+    curves: list[CurveData] | None,
+) -> bool:
+    if curves:
+        return False
+    return not any(
+        primitive.has_skin or primitive.instance_count
+        for primitive in primitives
+    )
+
+
+def _compact_static_instances_enabled() -> bool:
+    value = str(os.environ.get(_COMPACT_STATIC_INSTANCES_ENV, "") or "").strip().lower()
+    if not value or value == "auto":
+        return True
+    return value in {"1", "true", "yes", "on", "flat", "shallow"}
+
+
+def _compact_content_key_options(
+    options: LoadOptions | None,
+) -> LoadOptions | None:
+    if not _compact_static_instances_enabled() or options is None:
+        return options
+    if len(options) <= AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS:
+        return options
+    if options[AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS]:
+        return options
+    values = list(options)
+    values[AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS] = 1
+    return tuple(values)
+
+
+def _compact_static_instance_plan(
+    primitives: list[MeshPrimitiveData],
+    curves: list[CurveData] | None,
+    nodes: list[SceneNodeData],
+) -> dict | None:
+    started_at = time.perf_counter() if _profile_enabled() else 0.0
+    if not _compact_static_instances_enabled() or not nodes or curves:
+        return None
+    if not hasattr(bpy.types, "GeometryNodeSetInstanceTransform"):
+        return None
+    if any(
+        primitive.has_skin or primitive.instance_count
+        for primitive in primitives
+    ):
+        return None
+    if any(
+        not node.visible or node.anim_count or node.anim_channels
+        for node in nodes
+    ):
+        return None
+
+    instance_indices = [
+        index
+        for index, node in enumerate(nodes)
+        if int(node.instance_target_index) >= 0
+    ]
+    if not instance_indices:
+        return None
+
+    node_data = {index: node for index, node in enumerate(nodes)}
+    matrix_cache: dict[int, Matrix] = {}
+    flat_matrix_buffers = {}
+    for index, node in node_data.items():
+        matrix_buffer = getattr(node, "world_matrix_f32", b"")
+        flat_matrix_buffers[index] = (
+            matrix_buffer
+            if matrix_buffer
+            else _node_static_world_matrix(index, node_data, matrix_cache)
+        )
+
+    prototype_targets: dict[int, set[int]] = {}
+    grouped_indices: dict[tuple[int, int], list[int]] = {}
+    for index in instance_indices:
+        node = nodes[index]
+        owner = int(node.prototype_root_index)
+        target = int(node.instance_target_index)
+        grouped_indices.setdefault((owner, target), []).append(index)
+        prototype_targets.setdefault(owner, set()).add(target)
+
+    edges = list(grouped_indices)
+    selected_edges: set[tuple[int, int]] = set()
+    compact_mode = str(
+        os.environ.get(_COMPACT_STATIC_INSTANCES_ENV, "") or ""
+    ).strip().lower()
+    single_batch_layer = compact_mode == "shallow"
+
+    adjacency: dict[int, list[int]] = {}
+    for owner, target in edges:
+        adjacency.setdefault(owner, []).append(target)
+    reachable = {-1}
+    pending = [-1]
+    while pending:
+        owner = pending.pop()
+        for target in adjacency.get(owner, ()):
+            if target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    indegree = {node: 0 for node in reachable}
+    for owner in reachable:
+        for target in adjacency.get(owner, ()):
+            if target in indegree:
+                indegree[target] += 1
+    ready = deque(node for node, degree in indegree.items() if degree == 0)
+    topological_order: list[int] = []
+    while ready:
+        owner = ready.popleft()
+        topological_order.append(owner)
+        for target in adjacency.get(owner, ()):
+            if target not in indegree:
+                continue
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+    graph_is_acyclic = len(topological_order) == len(reachable)
+    prototype_depth = {-1: 0}
+    if graph_is_acyclic:
+        for owner in topological_order:
+            owner_depth = prototype_depth.get(owner, 0)
+            for target in adjacency.get(owner, ()):
+                prototype_depth[target] = max(
+                    prototype_depth.get(target, 0),
+                    owner_depth + 1,
+                )
+
+    def selection_is_safe() -> bool:
+        if not graph_is_acyclic:
+            return False
+        no_batch_depth = {-1: 0}
+        batch_depth: dict[int, int] = {}
+        batch_layers = {-1: 0}
+        for owner in topological_order:
+            for target in adjacency.get(owner, ()):
+                source_layers = batch_layers.get(owner)
+                if source_layers is not None:
+                    target_layers = source_layers + int(
+                        (owner, target) in selected_edges
+                    )
+                    if target_layers > batch_layers.get(target, -1):
+                        batch_layers[target] = target_layers
+                if (owner, target) in selected_edges:
+                    source = max(
+                        no_batch_depth.get(owner, -1),
+                        batch_depth.get(owner, -1),
+                    )
+                    if source >= 0 and source + 3 > batch_depth.get(target, -1):
+                        batch_depth[target] = source + 3
+                else:
+                    source = no_batch_depth.get(owner)
+                    if source is not None and source + 1 > no_batch_depth.get(target, -1):
+                        no_batch_depth[target] = source + 1
+                    source = batch_depth.get(owner)
+                    if source is not None and source + 1 > batch_depth.get(target, -1):
+                        batch_depth[target] = source + 1
+        return (
+            max(batch_depth.values(), default=0) <= 7
+            and (
+                not single_batch_layer
+                or max(batch_layers.values(), default=0) <= 1
+            )
+        )
+
+    flat_validation_mode = compact_mode == "flat"
+    candidates = (
+        []
+        if flat_validation_mode
+        else sorted(
+            (
+                (len(indices), owner, target)
+                for (owner, target), indices in grouped_indices.items()
+                if len(indices) >= 2
+            ),
+            reverse=True,
+        )
+    )
+    for _count, owner, target in candidates:
+        edge = (owner, target)
+        selected_edges.add(edge)
+        if not selection_is_safe():
+            selected_edges.remove(edge)
+
+    batches = []
+    batched_indices: set[int] = set()
+    for owner, target in selected_edges:
+        indices = grouped_indices[(owner, target)]
+        batches.append((owner, target, indices))
+        batched_indices.update(indices)
+
+    if not batches and not flat_validation_mode:
+        return None
+    required_indices: set[int] = set()
+    for index, node in enumerate(nodes):
+        if int(node.instance_target_index) >= 0:
+            continue
+        if (
+            node.camera_type
+            or node.light_type
+            or node.layers
+            or node.extra
+            or node.camera_extra
+            or node.camera_imager_extra
+            or node.light_extra
+        ):
+            _add_node_ancestors(required_indices, nodes, index)
+    plan = {
+        "matrix_buffers": flat_matrix_buffers,
+        "object_matrices": {},
+        "batches": batches,
+        "residual_indices": [
+            index for index in instance_indices if index not in batched_indices
+        ],
+        "node_groups": {},
+        "owner_layers": {
+            owner: prototype_depth.get(owner, 0)
+            for owner, _target in selected_edges
+        },
+        "collection": None,
+        "required_indices": required_indices,
+    }
+    if _profile_enabled():
+        _profile_log(
+            "compact_static_instance_plan "
+            f"nodes={len(nodes)} batches={len(batches)} "
+            f"batched={len(batched_indices)} residual={len(instance_indices) - len(batched_indices)} "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+    return plan
+
+
 def _mesh_node_parent(state: dict, node_index: int) -> tuple[bpy.types.Object | None, bool]:
+    compact_plan = state.get(_S_COMPACT_INSTANCE_PLAN)
+    if compact_plan is not None:
+        node = (state.get(_S_NODE_DATA) or {}).get(node_index)
+        prototype_root_index = int(node.prototype_root_index) if node is not None else -1
+        return (
+            None if prototype_root_index >= 0 else state[_S_COORD_ROOT],
+            False,
+        )
+
     cache = state.get(_S_NODE_PARENT_CACHE)
     if cache is not None:
         cached = cache.get(node_index)
@@ -1344,6 +1877,38 @@ def _mesh_node_parent(state: dict, node_index: int) -> tuple[bpy.types.Object | 
             return cached
 
     node_objects = state[_S_NODE_OBJECTS]
+    deferred_build = state.get(_S_DEFERRED_SCENE_NODE_BUILD)
+    if deferred_build is not None:
+        required_indices = deferred_build.get("required_indices")
+        if required_indices is None or node_index in required_indices:
+            result = (None, True)
+            if cache is not None:
+                cache[node_index] = result
+            return result
+
+        node_data = state[_S_NODE_DATA]
+        current = node_data.get(node_index)
+        parent_index = int(current.parent_index) if current is not None else -1
+        remaining = len(node_data)
+        while parent_index >= 0 and remaining > 0:
+            if parent_index in required_indices:
+                result = (None, False)
+                if cache is not None:
+                    cache[node_index] = result
+                return result
+            current = node_data.get(parent_index)
+            parent_index = int(current.parent_index) if current is not None else -1
+            remaining -= 1
+
+        prototype_root_index = int(current.prototype_root_index) if current is not None else -1
+        result = (
+            None if prototype_root_index >= 0 else state[_S_COORD_ROOT],
+            False,
+        )
+        if cache is not None:
+            cache[node_index] = result
+        return result
+
     node_parent = node_objects.get(node_index)
     if node_parent is not None:
         result = (node_parent, True)
@@ -1366,10 +1931,86 @@ def _mesh_node_parent(state: dict, node_index: int) -> tuple[bpy.types.Object | 
         parent_index = int(current.parent_index) if current is not None else -1
         remaining -= 1
 
-    result = (state[_S_COORD_ROOT], False)
+    prototype_root_index = int(current.prototype_root_index) if current is not None else -1
+    result = (
+        None if prototype_root_index >= 0 else state[_S_COORD_ROOT],
+        False,
+    )
     if cache is not None:
         cache[node_index] = result
     return result
+
+
+def _finish_deferred_scene_nodes(
+    state: dict,
+    mesh_objects: list[bpy.types.Object],
+) -> None:
+    deferred_build = state.get(_S_DEFERRED_SCENE_NODE_BUILD)
+    if deferred_build is None:
+        return
+
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+    total_started_at = time.perf_counter() if profile_detail else 0.0
+    phase_started_at = total_started_at
+    nodes = deferred_build["nodes"]
+    node_objects = _create_scene_nodes(
+        nodes,
+        deferred_build["coord_root"],
+        deferred_build["collection"],
+        deferred_build["prototype_collections"],
+        deferred_build["deferred_collection_instances"],
+        deferred_build["node_visibility"],
+        apply_animation=deferred_build["apply_animation"],
+        skip_animation_nodes=deferred_build["skip_animation_nodes"],
+        required_indices=deferred_build["required_indices"],
+        has_visibility_animation=deferred_build["has_visibility_animation"],
+    )
+    create_nodes_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
+    state[_S_NODE_OBJECTS] = node_objects
+    state[_S_ROOT_OBJECTS] = _scene_root_objects(
+        nodes,
+        state[_S_COORD_ROOT],
+        node_objects,
+    )
+    state[_S_DEFERRED_SCENE_NODE_BUILD] = None
+    parent_cache = state.get(_S_NODE_PARENT_CACHE)
+    if parent_cache is not None:
+        parent_cache.clear()
+
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
+    for obj in mesh_objects:
+        try:
+            node_index = int(obj.get("assetkit_node_index", -1))
+        except Exception:
+            continue
+        if node_index < 0:
+            continue
+        parent, _use_node_parent = _mesh_node_parent(state, node_index)
+        if parent is not None and obj.parent is not parent:
+            _set_parent(obj, parent)
+    parent_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
+    if profile_detail:
+        _profile_log(
+            "finish_deferred_scene_nodes "
+            f"mesh_objects={len(mesh_objects)} node_objects={len(node_objects)} "
+            f"create_nodes={create_nodes_ms:.3f}ms parent={parent_ms:.3f}ms "
+            f"total={(time.perf_counter() - total_started_at) * 1000.0:.3f}ms"
+        )
+
+
+def _node_import_collection(
+    state: dict,
+    node_index: int,
+    default_collection: bpy.types.Collection,
+) -> bpy.types.Collection:
+    node = (state.get(_S_NODE_DATA) or {}).get(node_index)
+    prototype_root_index = int(node.prototype_root_index) if node is not None else -1
+    if prototype_root_index < 0:
+        return default_collection
+    return (state.get(_S_PROTOTYPE_COLLECTIONS) or {}).get(
+        prototype_root_index,
+        default_collection,
+    )
 
 
 def _prebuild_material_cache(
@@ -1430,15 +2071,21 @@ def _create_import_object(
     shading_mode: str = "AUTO",
 ) -> list[bpy.types.Object]:
     node_objects = state[_S_NODE_OBJECTS]
-    parent, use_node_parent = _mesh_node_parent(state, int(primitive.node_index))
+    node_index = int(primitive.node_index)
+    active_collection = _node_import_collection(state, node_index, collection)
+    parent, use_node_parent = _mesh_node_parent(state, node_index)
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
     node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
     preserve_tangents = bool(state[_S_PRESERVE_TANGENTS])
     mesh_cache_key = _mesh_data_reuse_key(primitive, shading_mode, preserve_tangents)
     mesh_cache = state[_S_MESH_CACHE] if mesh_cache_key is not None else None
     if mesh_cache is not None:
-        cached_mesh = mesh_cache.get(mesh_cache_key)
-        if cached_mesh is not None:
+        cached_entry = mesh_cache.get(mesh_cache_key)
+        if (
+            cached_entry is not None
+            and _mesh_primitive_geometry_equal(cached_entry[1], primitive)
+        ):
+            cached_mesh = cached_entry[0]
             use_object_material_slot = _has_material_data(primitive)
             state[_S_MESH_CACHE_HITS] += 1
             return _finish_mesh_object(
@@ -1454,7 +2101,7 @@ def _create_import_object(
                 apply_animation=(not use_node_parent and not defer_animation),
                 apply_skin_animation=not bool(state[_S_SKIN_ANIMATION_DEFERRED]),
                 deferred_skin_animations=state[_S_DEFERRED_SKIN_ANIMATIONS],
-                collection=collection,
+                collection=active_collection,
                 object_material_slot=use_object_material_slot,
                 node_visibility_animation=node_visibility_animation,
             )
@@ -1474,12 +2121,12 @@ def _create_import_object(
         shading_mode=shading_mode,
         defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
         preserve_tangents=preserve_tangents,
-        collection=collection,
+        collection=active_collection,
         object_material_slot=False,
         node_visibility_animation=node_visibility_animation,
     )
     if mesh_cache is not None and len(objects) == 1 and isinstance(objects[0].data, bpy.types.Mesh):
-        mesh_cache[mesh_cache_key] = objects[0].data
+        mesh_cache.setdefault(mesh_cache_key, (objects[0].data, primitive))
     return objects
 
 
@@ -1492,8 +2139,46 @@ def _create_import_unit(
     if state[_S_DYNAMIC_SKIN_ANIMATION_SKIP]:
         _mark_skinned_node_animation_skip(state, unit if isinstance(unit, list) else [unit])
     if isinstance(unit, list):
-        return _create_grouped_mesh_object(unit, state, collection, shading_mode)
-    return _create_import_object(unit, state, collection, shading_mode)
+        objects = _create_grouped_mesh_object(unit, state, collection, shading_mode)
+        node_index = int(unit[0].node_index) if unit else -1
+    else:
+        objects = _create_import_object(unit, state, collection, shading_mode)
+        node_index = int(unit.node_index)
+    _apply_compact_node_matrix(objects, state, node_index)
+    return objects
+
+
+def _apply_compact_node_matrix(
+    objects: list[bpy.types.Object],
+    state: dict,
+    node_index: int,
+) -> None:
+    plan = state.get(_S_COMPACT_INSTANCE_PLAN)
+    if plan is None or node_index < 0:
+        return
+    matrix = _compact_object_matrix(plan, node_index)
+    if matrix is None:
+        return
+    for obj in objects:
+        obj.matrix_local = matrix
+
+
+def _compact_object_matrix(plan: dict, node_index: int) -> Matrix | None:
+    matrices = plan["object_matrices"]
+    matrix = matrices.get(node_index)
+    if matrix is not None:
+        return matrix
+
+    source = plan["matrix_buffers"].get(node_index)
+    if source is None:
+        return None
+    if isinstance(source, Matrix):
+        matrix = source
+    else:
+        matrix = _matrix_from_buffer(source)
+    if matrix is not None:
+        matrices[node_index] = matrix
+    return matrix
 
 
 class _GroupedMeshData:
@@ -1528,10 +2213,45 @@ def _create_grouped_mesh_object(
     first = surface_primitives[0]
     line_primitive = line_primitives[0] if len(line_primitives) == 1 else None
     node_objects = state[_S_NODE_OBJECTS]
-    parent, use_node_parent = _mesh_node_parent(state, int(first.node_index))
+    node_index = int(first.node_index)
+    active_collection = _node_import_collection(state, node_index, collection)
+    parent, use_node_parent = _mesh_node_parent(state, node_index)
     defer_animation = bool(state[_S_NODE_ANIMATION_DEFERRED])
     node_visibility_animation = bool(state[_S_HAS_NODE_VISIBILITY_ANIMATION])
     preserve_tangents = bool(state[_S_PRESERVE_TANGENTS])
+    mesh_cache_key = _grouped_mesh_data_reuse_key(
+        surface_primitives,
+        line_primitive,
+        shading_mode,
+        preserve_tangents,
+    )
+    mesh_cache = state[_S_MESH_CACHE] if mesh_cache_key is not None else None
+    if mesh_cache is not None:
+        cached_entry = mesh_cache.get(mesh_cache_key)
+        if (
+            cached_entry is not None
+            and _grouped_mesh_geometry_equal(
+                cached_entry[1],
+                cached_entry[2],
+                surface_primitives,
+                line_primitive,
+            )
+        ):
+            cached_mesh = cached_entry[0]
+            state[_S_MESH_CACHE_HITS] += 1
+            return _finish_cached_grouped_mesh_object(
+                cached_mesh,
+                surface_primitives,
+                line_primitive,
+                parent,
+                node_data=state[_S_NODE_DATA],
+                node_visibility=state[_S_NODE_VISIBILITY],
+                material_cache=state[_S_MATERIAL_CACHE],
+                apply_transform=not use_node_parent,
+                apply_animation=(not use_node_parent and not defer_animation),
+                collection=active_collection,
+                node_visibility_animation=node_visibility_animation,
+            )
 
     count_started_at = time.perf_counter() if profile_detail else 0.0
     surface_vertex_count = sum(int(primitive.vertex_count) for primitive in surface_primitives)
@@ -1724,10 +2444,20 @@ def _create_grouped_mesh_object(
         shading_mode=shading_mode,
         defer_custom_normals=bool(state[_S_DEFER_CUSTOM_NORMALS]),
         preserve_tangents=preserve_tangents,
-        collection=collection,
+        collection=active_collection,
         node_visibility_animation=node_visibility_animation,
         line_primitive=line_primitive,
+        object_material_slots=mesh_cache is not None,
     )
+    if (
+        mesh_cache is not None
+        and len(objects) == 1
+        and isinstance(objects[0].data, bpy.types.Mesh)
+    ):
+        mesh_cache.setdefault(
+            mesh_cache_key,
+            (objects[0].data, tuple(surface_primitives), line_primitive),
+        )
     if profile_detail:
         _profile_log(
             "create_grouped_mesh_object "
@@ -1793,8 +2523,22 @@ def _group_line_point_attrs(
         )
         if copied != len(values) * 4:
             continue
-        grouped.append(replace(attr, values_f32=merged))
+        grouped.append(_replace_loop_float_attr(attr, merged))
     return grouped
+
+
+def _replace_loop_float_attr(
+    attr: LoopFloatAttributeData,
+    values_f32: object,
+) -> LoopFloatAttributeData:
+    if isinstance(attr, LoopFloatAttributeData):
+        return replace(attr, values_f32=values_f32)
+    return LoopFloatAttributeData(
+        name=attr.name,
+        set=int(attr.set),
+        width=int(attr.width),
+        values_f32=values_f32,
+    )
 
 
 def _group_loop_float_attrs(
@@ -1825,7 +2569,7 @@ def _group_loop_float_attrs(
             byte_offset += copied
         if byte_offset != len(values):
             return []
-        grouped.append(replace(first_attr, values_f32=values))
+        grouped.append(_replace_loop_float_attr(first_attr, values))
     return grouped
 
 
@@ -1851,6 +2595,7 @@ def _create_grouped_mesh_object_bulk(
     collection: bpy.types.Collection | None = None,
     node_visibility_animation: bool = True,
     line_primitive: MeshPrimitiveData | None = None,
+    object_material_slots: bool = False,
 ) -> list[bpy.types.Object]:
     total_started_at = time.perf_counter()
     profile_detail = _PROFILE_MATERIAL_STATS is not None
@@ -1960,6 +2705,7 @@ def _create_grouped_mesh_object_bulk(
         now = time.perf_counter()
         detail_parts.append(f"bind_shape={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
+
     obj = bpy.data.objects.new(data.object_name or data.name, mesh)
     _set_parent(obj, parent)
     if node_visibility is not None and data.node_index >= 0:
@@ -1972,12 +2718,24 @@ def _create_grouped_mesh_object_bulk(
         detail_parts.append(f"object={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
 
-    if has_materials:
+    if object_material_slots:
+        for _primitive in primitives:
+            mesh.materials.append(None)
+        if line_primitive is not None:
+            mesh.materials.append(None)
+        _assign_grouped_object_materials(
+            obj,
+            primitives,
+            line_primitive,
+            material_cache,
+            int(data.edge_count),
+        )
+    elif has_materials:
         for primitive in primitives:
             material = _material_for_data(primitive, material_cache)
             if material:
                 _assign_mesh_material(obj, mesh, material)
-    if line_primitive is not None:
+    if line_primitive is not None and not object_material_slots:
         line_material = _material_for_data(line_primitive, material_cache)
         line_material_slot = -1
         if line_material:
@@ -2053,6 +2811,77 @@ def _create_grouped_mesh_object_bulk(
     return [obj]
 
 
+def _finish_cached_grouped_mesh_object(
+    mesh: bpy.types.Mesh,
+    primitives: list[MeshPrimitiveData],
+    line_primitive: MeshPrimitiveData | None,
+    parent: bpy.types.Object | None,
+    *,
+    node_data: dict[int, SceneNodeData] | None = None,
+    node_visibility: dict[int, bool] | None = None,
+    material_cache: dict[object, bpy.types.Material] | None = None,
+    apply_transform: bool = True,
+    apply_animation: bool = True,
+    collection: bpy.types.Collection | None = None,
+    node_visibility_animation: bool = True,
+) -> list[bpy.types.Object]:
+    data = primitives[0]
+    objects = _finish_mesh_object(
+        mesh,
+        data,
+        parent,
+        node_data=node_data,
+        node_visibility=node_visibility,
+        material_cache=material_cache,
+        apply_transform=apply_transform,
+        apply_animation=apply_animation,
+        collection=collection,
+        assign_material=False,
+        node_visibility_animation=node_visibility_animation,
+    )
+    if objects:
+        obj = objects[0]
+        obj["assetkit_vertex_count"] = len(mesh.vertices)
+        obj["assetkit_loop_count"] = len(mesh.loops)
+        obj["assetkit_face_count"] = len(mesh.polygons)
+        _assign_grouped_object_materials(
+            obj,
+            primitives,
+            line_primitive,
+            material_cache,
+            int(line_primitive.loop_count) // 2 if line_primitive else 0,
+        )
+    return objects
+
+
+def _assign_grouped_object_materials(
+    obj: bpy.types.Object,
+    primitives: list[MeshPrimitiveData],
+    line_primitive: MeshPrimitiveData | None,
+    material_cache: dict[object, bpy.types.Material] | None,
+    edge_count: int,
+) -> None:
+    for slot_index, primitive in enumerate(primitives):
+        slot = obj.material_slots[slot_index]
+        slot.link = "OBJECT"
+        slot.material = _material_for_data(primitive, material_cache)
+
+    if line_primitive is None:
+        return
+    line_material_slot = len(primitives)
+    slot = obj.material_slots[line_material_slot]
+    slot.link = "OBJECT"
+    slot.material = _material_for_data(line_primitive, material_cache)
+    obj["assetkit_mixed_line_material_slot"] = line_material_slot
+    obj["assetkit_mixed_line_mode"] = int(line_primitive.primitive_mode)
+    obj["assetkit_mixed_line_edge_count"] = edge_count
+    _set_assetkit_json_prop(
+        obj,
+        "assetkit_mixed_line_primitive_extra_json",
+        line_primitive.primitive_extra,
+    )
+
+
 def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiveData | list[MeshPrimitiveData]]:
     units: list[MeshPrimitiveData | list[MeshPrimitiveData]] = []
     index = 0
@@ -2079,6 +2908,31 @@ def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiv
         units.append(group if len(group) > 1 else primitive)
 
     return units
+
+
+def _blender_natural_name_key(name: str) -> str:
+    return str(name or "").casefold()
+
+
+def _mesh_import_unit_sort_key(
+    unit: MeshPrimitiveData | list[MeshPrimitiveData],
+) -> tuple:
+    first = unit[0] if isinstance(unit, list) else unit
+    mesh_name = _group_mesh_name(first) if isinstance(unit, list) else first.name
+    object_name = first.object_name or mesh_name
+    return (
+        _blender_natural_name_key(mesh_name),
+        _blender_natural_name_key(object_name),
+        int(first.node_index),
+        int(first.primitive_index),
+    )
+
+
+def _sort_mesh_import_units_for_blender(
+    units: list[MeshPrimitiveData | list[MeshPrimitiveData]],
+) -> None:
+    if len(units) > 1:
+        units.sort(key=_mesh_import_unit_sort_key)
 
 
 def _same_mesh_run(candidate: MeshPrimitiveData, first: MeshPrimitiveData) -> bool:
@@ -2155,11 +3009,15 @@ def _mesh_data_reuse_key(
     shading_mode: str,
     preserve_tangents: bool = False,
 ) -> tuple | None:
-    if int(primitive.primitive_type) != AK_PRIMITIVE_TRIANGLES:
+    primitive_type = int(primitive.primitive_type)
+    if primitive_type not in (AK_PRIMITIVE_TRIANGLES, AK_PRIMITIVE_LINES):
         return None
     if not primitive.vertices_f32 or not primitive.indices_u32:
         return None
-    if int(primitive.loop_count) != int(primitive.face_count) * 3:
+    if (
+        primitive_type == AK_PRIMITIVE_TRIANGLES
+        and int(primitive.loop_count) != int(primitive.face_count) * 3
+    ):
         return None
     if primitive.instance_count or primitive.has_gsplat:
         return None
@@ -2167,34 +3025,198 @@ def _mesh_data_reuse_key(
         return None
     if primitive.material_anim_channels or primitive.material_variants:
         return None
-    if primitive.point_attr_count:
+    if primitive_type != AK_PRIMITIVE_LINES and primitive.point_attr_count:
         return None
-
-    mesh_key = int(primitive.mesh_key or 0)
-    if mesh_key:
-        # Prefer the authored source mesh identity for Blender mesh-data reuse.
-        # Large native geometry keys may fall back to buffer addresses, which
-        # makes identical source mesh instances look unique.
-        source_key = (0, mesh_key, int(primitive.primitive_index))
+    geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
+    if geometry_key:
+        # The bridge geometry key covers the exact mesh-buffer identity and
+        # layout. DAE mesh_key identifies the per-node AkMesh wrapper, so it
+        # intentionally differs for repeated references to one geometry.
+        source_key = (0, geometry_key)
     else:
-        geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
-        if not geometry_key:
+        mesh_key = int(primitive.mesh_key or 0)
+        if not mesh_key:
             return None
-        source_key = (1, geometry_key)
+        source_key = (1, mesh_key, int(primitive.primitive_index))
 
     return (
         source_key,
+        primitive_type,
         int(primitive.primitive_mode),
         int(primitive.vertex_count),
         int(primitive.loop_count),
         int(primitive.face_count),
+        int(primitive.edge_count),
         bool(primitive.normals_f32),
         bool(primitive.vertex_normals_f32),
         bool(preserve_tangents and primitive.tangents_f32),
         bool(primitive.smooth_shading) if _uses_wavefront_smoothing(primitive) else False,
         _loop_attr_signature(primitive.uv_sets),
         _loop_attr_signature(primitive.color_sets),
+        _loop_attr_signature(primitive.point_attrs),
+        _has_material_data(primitive),
         str(shading_mode or "AUTO").upper(),
+    )
+
+
+def _line_mesh_data_reuse_key(
+    primitive: MeshPrimitiveData,
+) -> tuple | None:
+    if int(primitive.primitive_type) != AK_PRIMITIVE_LINES:
+        return None
+    if not primitive.vertices_f32 or not primitive.indices_u32:
+        return None
+    if primitive.instance_count or primitive.has_gsplat:
+        return None
+    if primitive.has_skin or primitive.morph_targets or primitive.morph_anim_channels:
+        return None
+    if primitive.material_anim_channels or primitive.material_variants:
+        return None
+    geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
+    if not geometry_key:
+        return None
+    return (
+        geometry_key,
+        int(primitive.primitive_mode),
+        int(primitive.vertex_count),
+        int(primitive.loop_count),
+        _loop_attr_signature(primitive.point_attrs),
+    )
+
+
+def _grouped_mesh_data_reuse_key(
+    surfaces: list[MeshPrimitiveData],
+    line: MeshPrimitiveData | None,
+    shading_mode: str,
+    preserve_tangents: bool = False,
+) -> tuple | None:
+    if not surfaces:
+        return None
+    surface_keys = tuple(
+        _mesh_data_reuse_key(primitive, shading_mode, preserve_tangents)
+        for primitive in surfaces
+    )
+    if any(key is None for key in surface_keys):
+        return None
+    line_key = _line_mesh_data_reuse_key(line) if line is not None else None
+    if line is not None and line_key is None:
+        return None
+    return (
+        "group",
+        surface_keys,
+        line_key,
+        tuple(_has_material_data(primitive) for primitive in surfaces),
+    )
+
+
+def _buffer_bytes_equal(
+    left: object,
+    right: object,
+    format_code: str,
+) -> bool:
+    left_view = _buffer_view(left, format_code)
+    right_view = _buffer_view(right, format_code)
+    if left_view is None or right_view is None:
+        return left_view is None and right_view is None
+    if len(left_view) != len(right_view):
+        return False
+    native_equal = native_buffers_equal(left_view, right_view)
+    if native_equal is not None:
+        return native_equal
+    return left_view.cast("B") == right_view.cast("B")
+
+
+def _mesh_primitive_geometry_equal(
+    left: MeshPrimitiveData,
+    right: MeshPrimitiveData,
+) -> bool:
+    scalar_fields = (
+        "primitive_type",
+        "primitive_mode",
+        "vertex_count",
+        "loop_count",
+        "face_count",
+        "edge_count",
+        "smooth_shading",
+    )
+    if any(getattr(left, name) != getattr(right, name) for name in scalar_fields):
+        return False
+    if (
+        _loop_attr_signature(left.uv_sets) != _loop_attr_signature(right.uv_sets)
+        or _loop_attr_signature(left.color_sets) != _loop_attr_signature(right.color_sets)
+        or _loop_attr_signature(left.point_attrs) != _loop_attr_signature(right.point_attrs)
+    ):
+        return False
+    left_buffers = _mesh_primitive_geometry_buffers(left)
+    right_buffers = _mesh_primitive_geometry_buffers(right)
+    native_equal = native_buffer_sequences_equal(left_buffers, right_buffers)
+    if native_equal is not None:
+        return native_equal
+    buffer_formats = (
+        "f",
+        "i",
+        "i",
+        "i",
+        "i",
+        "f",
+        "f",
+        "f",
+        "B",
+    )
+    attr_format_count = (
+        len(left.uv_sets or ())
+        + len(left.color_sets or ())
+        + len(left.point_attrs or ())
+    )
+    return all(
+        _buffer_bytes_equal(left_buffer, right_buffer, format_code)
+        for left_buffer, right_buffer, format_code in zip(
+            left_buffers,
+            right_buffers,
+            buffer_formats + ("f",) * attr_format_count,
+        )
+    )
+
+
+def _mesh_primitive_geometry_buffers(
+    primitive: MeshPrimitiveData,
+) -> tuple[object, ...]:
+    return (
+        primitive.vertices_f32,
+        primitive.indices_u32,
+        primitive.edges_u32,
+        primitive.loop_starts_i32,
+        primitive.loop_totals_i32,
+        primitive.normals_f32,
+        primitive.vertex_normals_f32,
+        primitive.tangents_f32,
+        primitive.sharp_faces_u8,
+        *(attr.values_f32 for attr in (primitive.uv_sets or ())),
+        *(attr.values_f32 for attr in (primitive.color_sets or ())),
+        *(attr.values_f32 for attr in (primitive.point_attrs or ())),
+    )
+
+
+def _grouped_mesh_geometry_equal(
+    cached_surfaces: tuple[MeshPrimitiveData, ...],
+    cached_line: MeshPrimitiveData | None,
+    surfaces: list[MeshPrimitiveData],
+    line: MeshPrimitiveData | None,
+) -> bool:
+    return (
+        len(cached_surfaces) == len(surfaces)
+        and all(
+            _mesh_primitive_geometry_equal(cached, current)
+            for cached, current in zip(cached_surfaces, surfaces)
+        )
+        and (
+            (cached_line is None and line is None)
+            or (
+                cached_line is not None
+                and line is not None
+                and _mesh_primitive_geometry_equal(cached_line, line)
+            )
+        )
     )
 
 
@@ -2203,15 +3225,36 @@ def _loop_attr_signature(attrs: list[LoopFloatAttributeData] | None) -> tuple:
 
 
 def _import_result_objects(mesh_objects: list[bpy.types.Object], state: dict) -> list[bpy.types.Object]:
-    if mesh_objects:
-        return mesh_objects
-
+    prototype_object_pointers = {
+        obj.as_pointer()
+        for collection in (state.get(_S_PROTOTYPE_COLLECTIONS) or {}).values()
+        for obj in collection.objects
+    }
     node_objects = state.get(_S_NODE_OBJECTS) or {}
-    return [
+    node_data = state.get(_S_NODE_DATA) or {}
+    result = [
         obj
-        for obj in node_objects.values()
-        if getattr(obj, "type", "") in {"CAMERA", "LIGHT"}
+        for obj in mesh_objects
+        if obj.as_pointer() not in prototype_object_pointers
     ]
+    result.extend(
+        obj
+        for index, obj in node_objects.items()
+        if int(getattr(node_data.get(index), "prototype_root_index", -1)) < 0
+        and int(getattr(node_data.get(index), "instance_target_index", -1)) >= 0
+    )
+    result.extend(
+        obj
+        for index, obj in node_objects.items()
+        if int(getattr(node_data.get(index), "prototype_root_index", -1)) < 0
+        and getattr(obj, "type", "") in {"CAMERA", "LIGHT"}
+    )
+    result.extend(
+        obj
+        for obj in (state.get(_S_COMPACT_INSTANCE_OBJECTS) or ())
+        if obj.as_pointer() not in prototype_object_pointers
+    )
+    return _unique_objects(result)
 
 
 def _select_imported_objects(objects: list[bpy.types.Object]) -> None:
@@ -2285,18 +3328,65 @@ def _finish_import(
     existing_actions: set[bpy.types.Action] | None,
     existing_frame_range: tuple[float, float] | None,
     scene_had_timeline_content: bool,
+    authored_bounds: tuple[Vector, Vector] | None = None,
 ) -> None:
-    _apply_import_placement(objects, placement_mode, root_objects)
+    profile_detail = _PROFILE_MATERIAL_STATS is not None
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
+    bounds = _apply_import_placement(
+        objects,
+        placement_mode,
+        root_objects,
+        authored_bounds,
+    )
+    placement_ms = (
+        (time.perf_counter() - phase_started_at) * 1000.0
+        if profile_detail
+        else 0.0
+    )
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
     if select_imported:
         _select_imported_objects(objects)
-    _focus_imported_objects(objects, focus_mode, scene_was_empty, collection, focus_camera)
+    selection_ms = (
+        (time.perf_counter() - phase_started_at) * 1000.0
+        if profile_detail
+        else 0.0
+    )
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
+    _focus_imported_objects(
+        objects,
+        focus_mode,
+        scene_was_empty,
+        collection,
+        focus_camera,
+        bounds,
+    )
+    focus_ms = (
+        (time.perf_counter() - phase_started_at) * 1000.0
+        if profile_detail
+        else 0.0
+    )
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
     if set_viewport_shading and scene_was_empty:
         _set_viewport_material_preview(clean_viewport_overlays)
+    shading_ms = (
+        (time.perf_counter() - phase_started_at) * 1000.0
+        if profile_detail
+        else 0.0
+    )
+    phase_started_at = time.perf_counter() if profile_detail else 0.0
     _fit_timeline_to_new_actions(
         existing_actions,
         existing_frame_range,
         preserve_existing_scene=(not scene_was_empty and scene_had_timeline_content),
     )
+    if profile_detail:
+        _profile_log(
+            "finish_import_detail "
+            f"precomputed_bounds={authored_bounds is not None} "
+            f"placement={placement_ms:.3f}ms selection={selection_ms:.3f}ms "
+            f"focus={focus_ms:.3f}ms shading={shading_ms:.3f}ms "
+            f"timeline={(time.perf_counter() - phase_started_at) * 1000.0:.3f}ms"
+        )
 
 
 def _clear_selection() -> None:
@@ -2560,6 +3650,7 @@ def _focus_imported_objects(
     scene_was_empty: bool,
     collection: bpy.types.Collection,
     focus_camera: bpy.types.Object | None,
+    authored_bounds: tuple[Vector, Vector] | None = None,
 ) -> None:
     if focus_mode == "NEVER":
         return
@@ -2568,12 +3659,13 @@ def _focus_imported_objects(
     if not objects:
         return
 
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
-
-    bounds = _object_bounds(objects)
+    bounds = authored_bounds
+    if bounds is None:
+        try:
+            bpy.context.view_layer.update()
+        except Exception:
+            pass
+        bounds = _object_bounds(objects)
     if bounds is None:
         return
 
@@ -2586,18 +3678,20 @@ def _apply_import_placement(
     objects: list[bpy.types.Object],
     placement_mode: str,
     root_objects: list[bpy.types.Object] | None = None,
-) -> None:
+    authored_bounds: tuple[Vector, Vector] | None = None,
+) -> tuple[Vector, Vector] | None:
     if placement_mode == "AS_AUTHORED" or not objects:
-        return
+        return authored_bounds
 
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
-
-    bounds = _object_bounds(objects)
+    bounds = authored_bounds
     if bounds is None:
-        return
+        try:
+            bpy.context.view_layer.update()
+        except Exception:
+            pass
+        bounds = _object_bounds(objects)
+    if bounds is None:
+        return None
 
     minimum, maximum = bounds
     center = (minimum + maximum) * 0.5
@@ -2607,11 +3701,11 @@ def _apply_import_placement(
     elif placement_mode == "CURSOR_GROUND":
         target = Vector((cursor.x, cursor.y, cursor.z))
     else:
-        return
+        return bounds
 
     offset = Vector((target.x - center.x, target.y - center.y, target.z - minimum.z))
     if offset.length <= 1e-9:
-        return
+        return bounds
 
     for root in _placement_roots(objects, root_objects or []):
         try:
@@ -2625,6 +3719,27 @@ def _apply_import_placement(
         bpy.context.view_layer.update()
     except Exception:
         pass
+    return minimum + offset, maximum + offset
+
+
+def _scene_bounds_from_info(
+    scene_info: dict | None,
+) -> tuple[Vector, Vector] | None:
+    value = (scene_info or {}).get("bounds")
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    try:
+        minimum_values = tuple(float(component) for component in value[0])
+        maximum_values = tuple(float(component) for component in value[1])
+    except (TypeError, ValueError):
+        return None
+    if len(minimum_values) != 3 or len(maximum_values) != 3:
+        return None
+    if not all(math.isfinite(component) for component in (*minimum_values, *maximum_values)):
+        return None
+    if any(minimum_values[axis] > maximum_values[axis] for axis in range(3)):
+        return None
+    return Vector(minimum_values), Vector(maximum_values)
 
 
 def _placement_roots(
@@ -2660,22 +3775,10 @@ def _unique_objects(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
 def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | None:
     minimum: Vector | None = None
     maximum: Vector | None = None
-    try:
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-    except Exception:
-        depsgraph = None
 
-    for obj in objects:
-        if obj.type != "MESH" or not obj.bound_box or _is_hidden_for_bounds(obj):
-            continue
-        eval_obj = obj
-        if depsgraph is not None:
-            try:
-                eval_obj = obj.evaluated_get(depsgraph)
-            except Exception:
-                eval_obj = obj
-        matrix = eval_obj.matrix_world
-        for corner in eval_obj.bound_box:
+    def extend_corners(corners, matrix) -> None:
+        nonlocal minimum, maximum
+        for corner in corners:
             point = matrix @ Vector(corner)
             if minimum is None:
                 minimum = point.copy()
@@ -2687,6 +3790,95 @@ def _object_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector] | N
                 maximum.x = max(maximum.x, point.x)
                 maximum.y = max(maximum.y, point.y)
                 maximum.z = max(maximum.z, point.z)
+
+    collection_cache: dict[int, tuple[Vector, Vector] | None] = {}
+    collection_stack: set[int] = set()
+    compact_batch_pointers = {
+        obj.as_pointer()
+        for obj in objects
+        if obj.get("assetkit_compact_instance_batch")
+    }
+
+    def collection_bounds(
+        collection: bpy.types.Collection,
+    ) -> tuple[Vector, Vector] | None:
+        key = collection.as_pointer()
+        if key in collection_cache:
+            return collection_cache[key]
+        if key in collection_stack:
+            return None
+        collection_stack.add(key)
+        local_minimum: Vector | None = None
+        local_maximum: Vector | None = None
+
+        def extend_local(corners, matrix) -> None:
+            nonlocal local_minimum, local_maximum
+            for corner in corners:
+                point = matrix @ Vector(corner)
+                if local_minimum is None:
+                    local_minimum = point.copy()
+                    local_maximum = point.copy()
+                else:
+                    local_minimum.x = min(local_minimum.x, point.x)
+                    local_minimum.y = min(local_minimum.y, point.y)
+                    local_minimum.z = min(local_minimum.z, point.z)
+                    local_maximum.x = max(local_maximum.x, point.x)
+                    local_maximum.y = max(local_maximum.y, point.y)
+                    local_maximum.z = max(local_maximum.z, point.z)
+
+        for obj in collection.objects:
+            if _is_hidden_for_bounds(obj):
+                continue
+            if obj.type == "MESH" and obj.bound_box:
+                extend_local(obj.bound_box, obj.matrix_world)
+            target = getattr(obj, "instance_collection", None)
+            if getattr(obj, "instance_type", "NONE") == "COLLECTION" and target is not None:
+                nested = collection_bounds(target)
+                if nested is not None:
+                    extend_local(_bounds_corners(nested), obj.matrix_world)
+
+        collection_stack.remove(key)
+        result = (
+            (local_minimum, local_maximum)
+            if local_minimum is not None and local_maximum is not None
+            else None
+        )
+        collection_cache[key] = result
+        return result
+
+    for obj in objects:
+        if _is_hidden_for_bounds(obj):
+            continue
+        if (
+            obj.type == "MESH"
+            and obj.bound_box
+            and not obj.get("assetkit_compact_instance_batch")
+        ):
+            extend_corners(obj.bound_box, obj.matrix_world)
+        target = getattr(obj, "instance_collection", None)
+        if getattr(obj, "instance_type", "NONE") == "COLLECTION" and target is not None:
+            nested = collection_bounds(target)
+            if nested is not None:
+                extend_corners(_bounds_corners(nested), obj.matrix_world)
+
+    if compact_batch_pointers:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        for instance in depsgraph.object_instances:
+            parent = instance.parent
+            if parent is None:
+                continue
+            original_parent = parent.original
+            if original_parent.as_pointer() not in compact_batch_pointers:
+                continue
+            evaluated = instance.object
+            if (
+                evaluated.type != "MESH"
+                or evaluated.data is None
+                or len(evaluated.data.polygons) == 0
+                or not evaluated.bound_box
+            ):
+                continue
+            extend_corners(evaluated.bound_box, instance.matrix_world)
 
     if minimum is None or maximum is None:
         return None
@@ -2722,28 +3914,20 @@ def _frame_viewports(
     bounds: tuple[Vector, Vector],
     objects: list[bpy.types.Object] | None = None,
 ) -> None:
+    del objects
     window_manager = bpy.context.window_manager
     minimum, maximum = bounds
     radius = max((maximum - minimum).length * 0.5, 1.0e-6)
-    selection = _temporary_selection(objects) if objects else None
     for window in getattr(window_manager, "windows", []):
         screen = window.screen
         for area in screen.areas:
             if area.type != "VIEW_3D":
                 continue
-            region = next((item for item in area.regions if item.type == "WINDOW"), None)
             space = next((item for item in area.spaces if item.type == "VIEW_3D"), None)
-            if region is None or space is None:
+            if space is None:
                 continue
             _set_viewport_clip(space, radius)
-            try:
-                with bpy.context.temp_override(window=window, area=area, region=region, space_data=space):
-                    bpy.ops.view3d.view_selected(use_all_regions=False)
-                    _set_view_distance(space, bounds, radius)
-            except Exception:
-                pass
-    if selection:
-        selection.restore()
+            _set_view_distance(space, bounds, radius)
 
 
 def _set_viewport_clip(space: bpy.types.SpaceView3D, radius: float) -> None:
@@ -2952,7 +4136,7 @@ def _create_mesh_object(
 
     mesh = bpy.data.meshes.new(data.name)
     mesh.from_pydata(data.vertices, [], data.faces)
-    mesh.update(calc_edges=False)
+    mesh.update(calc_edges=True)
 
     if data.uvs and len(data.uvs) >= len(mesh.loops):
         uv_layer = mesh.uv_layers.new(name="UVMap")
@@ -3131,7 +4315,7 @@ def _create_mesh_object_bulk(
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     # Blender derives polygon edges faster than feeding large edge buffers here;
     # line primitives still use their dedicated edge path.
-    mesh.update(calc_edges=True)
+    mesh.update(calc_edges=False)
     lap_detail("update")
     if not shading_done and defer_custom_normals:
         shading_done = _queue_deferred_custom_normals(mesh, normals, vertex_normals, data)
@@ -3410,7 +4594,7 @@ def _assign_mesh_material(
         _assign_object_material_slot(obj, material)
         return
     if not mesh.materials:
-        obj.active_material = material
+        mesh.materials.append(material)
         return
     mesh.materials.append(material)
 
@@ -3697,6 +4881,15 @@ def _deferred_custom_normals_timer() -> float | None:
     return None
 
 
+def _drain_deferred_staging_work() -> None:
+    while _DEFERRED_MATERIAL_NODE_TASKS:
+        _deferred_material_node_timer()
+    while _DEFERRED_TEXTURE_KEYS:
+        _deferred_texture_timer()
+    while _DEFERRED_NORMAL_TASKS:
+        _deferred_custom_normals_timer()
+
+
 def _apply_shading(
     mesh: bpy.types.Mesh,
     mode: str,
@@ -3891,10 +5084,41 @@ def _set_render_color_index(mesh: bpy.types.Mesh) -> None:
         pass
 
 
+def _create_prototype_collections(
+    nodes: list[SceneNodeData],
+) -> dict[int, bpy.types.Collection]:
+    prototype_roots = [
+        index
+        for index, node in enumerate(nodes)
+        if int(node.prototype_root_index) == index
+    ]
+    if not prototype_roots:
+        return {}
+
+    collections: dict[int, bpy.types.Collection] = {}
+    serial = len(bpy.data.collections)
+    width = max(6, len(str(serial + len(prototype_roots))))
+    for root_index in prototype_roots:
+        while True:
+            name = f"AssetKit Prototype {serial:0{width}d}"
+            serial += 1
+            if bpy.data.collections.get(name) is None:
+                break
+        prototype = bpy.data.collections.new(name)
+        prototype["assetkit_prototype_root_index"] = root_index
+        source_name = str(nodes[root_index].name or "")
+        if source_name:
+            prototype["assetkit_prototype_name"] = source_name
+        collections[root_index] = prototype
+    return collections
+
+
 def _create_scene_nodes(
     nodes: list[SceneNodeData],
     coord_root: bpy.types.Object | None,
     collection: bpy.types.Collection,
+    prototype_collections: dict[int, bpy.types.Collection],
+    deferred_collection_instances: list[tuple],
     node_visibility: dict[int, bool] | None = None,
     apply_animation: bool = True,
     skip_animation_nodes: set[int] | None = None,
@@ -3907,16 +5131,43 @@ def _create_scene_nodes(
     create_started_at = time.perf_counter() if profile_detail else 0.0
     fallback_node_count = _fallback_scene_node_count(nodes, required_indices)
 
-    for index, node in enumerate(nodes):
-        if required_indices is not None and index not in required_indices:
-            continue
+    create_indices = [
+        index
+        for index in range(len(nodes))
+        if required_indices is None or index in required_indices
+    ]
+    create_indices.sort(
+        key=lambda index: (
+            _blender_natural_name_key(
+                _scene_node_object_name(
+                    nodes[index],
+                    index,
+                    fallback_node_count,
+                )
+            ),
+            index,
+        )
+    )
+    for index in create_indices:
+        node = nodes[index]
         obj = _new_scene_node_object(
             node,
             index,
             (node_visibility or {}).get(index, node.visible),
             fallback_node_count,
         )
-        collection.objects.link(obj)
+        active_collection = prototype_collections.get(
+            int(node.prototype_root_index),
+            collection,
+        )
+        active_collection.objects.link(obj)
+        instance_target_index = int(node.instance_target_index)
+        if instance_target_index >= 0:
+            target_collection = prototype_collections.get(instance_target_index)
+            if target_collection is not None:
+                obj["assetkit_instance_node"] = True
+                obj["assetkit_instance_target_index"] = instance_target_index
+                deferred_collection_instances.append((obj, target_collection))
         objects[index] = obj
 
     create_ms = (time.perf_counter() - create_started_at) * 1000.0 if profile_detail else 0.0
@@ -3925,9 +5176,15 @@ def _create_scene_nodes(
     visibility_anim_ms = 0.0
     for index, obj in objects.items():
         node = nodes[index]
-        parent = objects.get(node.parent_index) if node.parent_index >= 0 else coord_root
+        if node.parent_index >= 0:
+            parent = objects.get(node.parent_index)
+        elif int(node.prototype_root_index) >= 0:
+            parent = None
+        else:
+            parent = coord_root
         _set_parent(obj, parent)
         _apply_matrix_buffer(obj, node.matrix_f32)
+        instance_target_index = int(node.instance_target_index)
         node_has_visibility_animation = has_visibility_animation and _node_has_effective_visibility_animation(
             index,
             nodes,
@@ -3942,7 +5199,7 @@ def _create_scene_nodes(
                 _apply_effective_node_visibility_animation(obj, index, nodes)
                 if profile_detail:
                     visibility_anim_ms += (time.perf_counter() - vis_started_at) * 1000.0
-        if obj.type == "EMPTY":
+        if obj.type == "EMPTY" and instance_target_index < 0:
             _hide_helper_object(obj)
 
     if profile_detail:
@@ -3958,6 +5215,258 @@ def _create_scene_nodes(
             f"apply_animation={apply_animation}"
         )
     return objects
+
+
+def _apply_deferred_collection_instances(state: dict | None) -> None:
+    if not state:
+        return
+    pending = state.get(_S_DEFERRED_COLLECTION_INSTANCES) or []
+    for obj, target_collection in pending:
+        obj.instance_type = "COLLECTION"
+        obj.instance_collection = target_collection
+    pending.clear()
+
+
+def _finish_compact_static_instances(state: dict | None) -> None:
+    if not state:
+        return
+    plan = state.get(_S_COMPACT_INSTANCE_PLAN)
+    if plan is None or plan.get("finished"):
+        return
+    started_at = time.perf_counter() if _profile_enabled() else 0.0
+
+    nodes = state.get(_S_NODE_DATA) or {}
+    prototype_collections = state.get(_S_PROTOTYPE_COLLECTIONS) or {}
+    default_collection = plan["collection"]
+    coord_root = state.get(_S_COORD_ROOT)
+    created = state[_S_COMPACT_INSTANCE_OBJECTS]
+
+    batch_started_at = time.perf_counter() if _profile_enabled() else 0.0
+    batches_by_owner: dict[int, list[tuple[int, list[int]]]] = {}
+    for owner, target, node_indices in plan["batches"]:
+        if prototype_collections.get(target) is not None:
+            batches_by_owner.setdefault(owner, []).append((target, node_indices))
+
+    owners_by_layer: dict[int, list[int]] = {}
+    owner_layers = plan.get("owner_layers") or {}
+    for owner in batches_by_owner:
+        owners_by_layer.setdefault(int(owner_layers.get(owner, 0)), []).append(owner)
+
+    for layer, owners in owners_by_layer.items():
+        owners.sort()
+        catalog = bpy.data.collections.new(
+            f"AssetKit Instance Catalog {layer}"
+        )
+        targets = sorted(
+            {
+                target
+                for owner in owners
+                for target, _node_indices in batches_by_owner[owner]
+            }
+        )
+        target_slots = {target: slot for slot, target in enumerate(targets)}
+        for target in targets:
+            target_collection = prototype_collections[target]
+            entry = bpy.data.objects.new(
+                f"AssetKit Instance Target {target}",
+                None,
+            )
+            entry.instance_type = "COLLECTION"
+            entry.instance_collection = target_collection
+            catalog.objects.link(entry)
+
+        node_group = _compact_instance_node_group(layer, catalog)
+        plan["node_groups"][layer] = node_group
+        for owner in owners:
+            active_collection = (
+                prototype_collections.get(owner, default_collection)
+                if owner >= 0
+                else default_collection
+            )
+            owner_batches = batches_by_owner[owner]
+            owner_batches.sort(key=lambda item: item[0])
+            node_indices = [
+                node_index
+                for _target, indices in owner_batches
+                for node_index in indices
+            ]
+            target_indices = [
+                target_slots[target]
+                for target, indices in owner_batches
+                for _node_index in indices
+            ]
+            obj = _create_compact_instance_batch_object(
+                owner,
+                node_indices,
+                target_indices,
+                plan["matrix_buffers"],
+                active_collection,
+                node_group,
+                len(target_slots),
+            )
+            if owner < 0:
+                _set_parent(obj, coord_root)
+            created.append(obj)
+    batch_ms = (
+        (time.perf_counter() - batch_started_at) * 1000.0
+        if _profile_enabled()
+        else 0.0
+    )
+
+    residual_started_at = time.perf_counter() if _profile_enabled() else 0.0
+    for node_index in plan["residual_indices"]:
+        node = nodes.get(node_index)
+        if node is None:
+            continue
+        owner = int(node.prototype_root_index)
+        target = int(node.instance_target_index)
+        target_collection = prototype_collections.get(target)
+        if target_collection is None:
+            continue
+        active_collection = (
+            prototype_collections.get(owner, default_collection)
+            if owner >= 0
+            else default_collection
+        )
+        obj = bpy.data.objects.new(
+            node.name or f"AssetKit Instance {node_index}",
+            None,
+        )
+        obj.instance_type = "COLLECTION"
+        obj.instance_collection = target_collection
+        obj["assetkit_instance_node"] = True
+        obj["assetkit_instance_target_index"] = target
+        obj["assetkit_source_node_index"] = node_index
+        active_collection.objects.link(obj)
+        if owner < 0:
+            _set_parent(obj, coord_root)
+        matrix = _compact_object_matrix(plan, node_index)
+        if matrix is not None:
+            obj.matrix_local = matrix
+        created.append(obj)
+    residual_ms = (
+        (time.perf_counter() - residual_started_at) * 1000.0
+        if _profile_enabled()
+        else 0.0
+    )
+
+    plan["finished"] = True
+    if _profile_enabled():
+        _profile_log(
+            "finish_compact_static_instances "
+            f"batches={len(plan['batches'])} "
+            f"residual={len(plan['residual_indices'])} "
+            f"created={len(created)} "
+            f"batch={batch_ms:.3f}ms residual={residual_ms:.3f}ms "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+
+
+def _create_compact_instance_batch_object(
+    owner: int,
+    node_indices: list[int],
+    target_indices: list[int],
+    node_matrices: dict[int, object],
+    active_collection: bpy.types.Collection,
+    node_group: bpy.types.GeometryNodeTree,
+    target_count: int,
+) -> bpy.types.Object:
+    count = len(node_indices)
+    mesh = bpy.data.meshes.new(f"AssetKit Instance Batch {owner}")
+    mesh.vertices.add(count)
+
+    matrix_values = bytearray(count * 16 * 4)
+    source_indices = array("i", node_indices)
+    for matrix_index, node_index in enumerate(node_indices):
+        matrix = node_matrices[node_index]
+        if isinstance(matrix, Matrix):
+            values = array(
+                "f",
+                (
+                    value
+                    for row in matrix.transposed()
+                    for value in row
+                ),
+            )
+        else:
+            values = _buffer_view(matrix, "f")
+        if values is None or len(values) != 16:
+            raise RuntimeError("AssetKit compact instance matrix is incomplete")
+        _copy_buffer_bytes(matrix_values, matrix_index * 16 * 4, values, "f")
+    matrix_attribute = mesh.attributes.new(
+        "assetkit_instance_matrix",
+        type="FLOAT4X4",
+        domain="POINT",
+    )
+    matrix_attribute.data.foreach_set("value", memoryview(matrix_values).cast("f"))
+    source_attribute = mesh.attributes.new(
+        "assetkit_source_node_index",
+        type="INT",
+        domain="POINT",
+    )
+    source_attribute.data.foreach_set("value", source_indices)
+    target_attribute = mesh.attributes.new(
+        "assetkit_instance_target_slot",
+        type="INT",
+        domain="POINT",
+    )
+    target_attribute.data.foreach_set("value", target_indices)
+    mesh.update(calc_edges=False)
+
+    obj = bpy.data.objects.new(f"AssetKit Instance Batch {owner}", mesh)
+    obj["assetkit_compact_instance_batch"] = True
+    obj["assetkit_instance_owner_index"] = owner
+    obj["assetkit_instance_target_count"] = target_count
+    obj["assetkit_instance_count"] = count
+    active_collection.objects.link(obj)
+
+    modifier = obj.modifiers.new("AssetKit Instances", "NODES")
+    modifier.node_group = node_group
+    return obj
+
+
+def _compact_instance_node_group(
+    layer: int,
+    catalog: bpy.types.Collection,
+) -> bpy.types.GeometryNodeTree:
+    group = bpy.data.node_groups.new(
+        f"AssetKit Instance Layer {layer}",
+        "GeometryNodeTree",
+    )
+    group.interface.new_socket(
+        name="Geometry",
+        in_out="INPUT",
+        socket_type="NodeSocketGeometry",
+    )
+    group.interface.new_socket(
+        name="Geometry",
+        in_out="OUTPUT",
+        socket_type="NodeSocketGeometry",
+    )
+
+    group_input = group.nodes.new("NodeGroupInput")
+    group_output = group.nodes.new("NodeGroupOutput")
+    collection_info = group.nodes.new("GeometryNodeCollectionInfo")
+    collection_info.inputs["Collection"].default_value = catalog
+    collection_info.inputs["Separate Children"].default_value = True
+    collection_info.inputs["Reset Children"].default_value = True
+    instance_on_points = group.nodes.new("GeometryNodeInstanceOnPoints")
+    instance_on_points.inputs["Pick Instance"].default_value = True
+    target_attribute = group.nodes.new("GeometryNodeInputNamedAttribute")
+    target_attribute.data_type = "INT"
+    target_attribute.inputs["Name"].default_value = "assetkit_instance_target_slot"
+    matrix_attribute = group.nodes.new("GeometryNodeInputNamedAttribute")
+    matrix_attribute.data_type = "FLOAT4X4"
+    matrix_attribute.inputs["Name"].default_value = "assetkit_instance_matrix"
+    set_transform = group.nodes.new("GeometryNodeSetInstanceTransform")
+
+    group.links.new(group_input.outputs["Geometry"], instance_on_points.inputs["Points"])
+    group.links.new(collection_info.outputs["Instances"], instance_on_points.inputs["Instance"])
+    group.links.new(target_attribute.outputs["Attribute"], instance_on_points.inputs["Instance Index"])
+    group.links.new(instance_on_points.outputs["Instances"], set_transform.inputs["Instances"])
+    group.links.new(matrix_attribute.outputs["Attribute"], set_transform.inputs["Transform"])
+    group.links.new(set_transform.outputs["Instances"], group_output.inputs["Geometry"])
+    return group
 
 
 def _required_scene_node_indices(
@@ -4059,6 +5568,7 @@ def _scene_node_requires_standalone_object(node: SceneNodeData) -> bool:
     return bool(
         node.camera_type
         or node.light_type
+        or int(node.instance_target_index) >= 0
         or node.layers
         or node.extra
         or node.camera_extra
@@ -4747,7 +6257,7 @@ def _new_scene_node_object(
     visible: bool,
     fallback_node_count: int,
 ) -> bpy.types.Object:
-    name = node.name or ("AssetKit Node" if fallback_node_count == 1 or index == 0 else f"AssetKit Node {index}")
+    name = _scene_node_object_name(node, index, fallback_node_count)
 
     if node.camera_type:
         camera = bpy.data.cameras.new(node.camera_name or name)
@@ -4774,6 +6284,18 @@ def _new_scene_node_object(
     _set_node_visibility(obj, visible)
     _set_assetkit_node_props(obj, node)
     return obj
+
+
+def _scene_node_object_name(
+    node: SceneNodeData,
+    index: int,
+    fallback_node_count: int,
+) -> str:
+    return node.name or (
+        "AssetKit Node"
+        if fallback_node_count == 1 or index == 0
+        else f"AssetKit Node {index}"
+    )
 
 
 def _set_assetkit_node_props(obj: bpy.types.Object, node: SceneNodeData) -> None:
@@ -4957,8 +6479,10 @@ def _create_curve_object(
             pass
 
     obj = bpy.data.objects.new(curve.object_name or curve.name or "AssetKit Curve", curve_data)
-    collection.objects.link(obj)
-    parent, use_node_parent = _mesh_node_parent(state, int(curve.node_index))
+    node_index = int(curve.node_index)
+    active_collection = _node_import_collection(state, node_index, collection)
+    active_collection.objects.link(obj)
+    parent, use_node_parent = _mesh_node_parent(state, node_index)
     _set_parent(obj, parent)
     if not use_node_parent:
         _apply_matrix_buffer(obj, curve.matrix_f32)

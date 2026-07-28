@@ -184,6 +184,8 @@ akb_scene_node_index_for(AkbSceneNodeList *nodes, AkNode *node) {
   for (i = 0; i < nodes->count; i++) {
     if (nodes->items[i].source == node)
       return (int32_t)i;
+    if (!nodes->items[i].source)
+      continue;
     source_id = (const char *)ak_mem_getId(nodes->items[i].source);
     if (source_id && target_id && strcmp(source_id, target_id) == 0)
       return (int32_t)i;

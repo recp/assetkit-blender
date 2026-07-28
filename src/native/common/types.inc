@@ -512,6 +512,18 @@ typedef struct AkbPrimitiveReuseCache {
   size_t                  hits;
 } AkbPrimitiveReuseCache;
 
+typedef struct AkbNodePrototypeEntry {
+  AkNode  *source;
+  int32_t  root_index;
+  uint8_t  state;
+} AkbNodePrototypeEntry;
+
+typedef struct AkbNodePrototypeMap {
+  AkbNodePrototypeEntry *items;
+  size_t                 count;
+  size_t                 capacity;
+} AkbNodePrototypeMap;
+
 typedef struct AkbSceneNode {
   struct AkbAnimation *animation;
   AkNode   *source;
@@ -523,10 +535,13 @@ typedef struct AkbSceneNode {
   const char *camera_name;
   const char *light_name;
   float    matrix[16];
+  float    world_matrix[16];
   float    camera_values[6];
   float    light_color[3];
   float    light_values[5];
   int32_t  parent_index;
+  int32_t  prototype_root_index;
+  int32_t  instance_target_index;
   uint8_t  camera_type;
   uint8_t  light_type;
   uint8_t  has_transform;
@@ -550,6 +565,7 @@ typedef struct AkbCoordContext {
   AkCoordSys *source;
   AkCoordSys *target;
   float       matrix[16];
+  float       unit_scale;
   uint8_t     convert;
   uint8_t     conversion;
 } AkbCoordContext;
@@ -682,6 +698,13 @@ typedef enum AkbPySimplePrimitiveField {
   AKB_PY_SIMPLE_BASE_COLOR,
   AKB_PY_SIMPLE_OPACITY,
   AKB_PY_SIMPLE_ALPHA_MODE,
+  AKB_PY_SIMPLE_ALPHA_CUTOFF,
+  AKB_PY_SIMPLE_TRANSPARENT_AMOUNT,
+  AKB_PY_SIMPLE_TRANSPARENT_COLOR,
+  AKB_PY_SIMPLE_SPECULAR_STRENGTH,
+  AKB_PY_SIMPLE_POINT_ATTR_COUNT,
+  AKB_PY_SIMPLE_POINT_ATTRS,
+  AKB_PY_SIMPLE_TEXTURE_INFOS,
   AKB_PY_SIMPLE_FIELD_COUNT
 } AkbPySimplePrimitiveField;
 
@@ -707,6 +730,8 @@ typedef enum AkbPySceneNodeField {
   AKB_PY_NODE_OWNER = 0,
   AKB_PY_NODE_NAME,
   AKB_PY_NODE_PARENT_INDEX,
+  AKB_PY_NODE_PROTOTYPE_ROOT_INDEX,
+  AKB_PY_NODE_INSTANCE_TARGET_INDEX,
   AKB_PY_NODE_VISIBLE,
   AKB_PY_NODE_LAYERS,
   AKB_PY_NODE_CAMERA_TYPE,
@@ -720,6 +745,7 @@ typedef enum AkbPySceneNodeField {
   AKB_PY_NODE_LIGHT_COLOR,
   AKB_PY_NODE_LIGHT_VALUES,
   AKB_PY_NODE_MATRIX_F32,
+  AKB_PY_NODE_WORLD_MATRIX_F32,
   AKB_PY_NODE_EXTRA,
   AKB_PY_NODE_ANIM_COUNT,
   AKB_PY_NODE_ANIM_CHANNELS,

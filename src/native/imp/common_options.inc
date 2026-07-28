@@ -35,21 +35,39 @@ static void
 akb_coord_matrix(AkbCoordContext *coord) {
   float in[3];
   float out[3];
+  float scale;
   int i;
 
   memset(coord->matrix, 0, sizeof(coord->matrix));
   coord->matrix[15] = 1.0f;
+  scale = coord->unit_scale;
 
   for (i = 0; i < 3; i++) {
     in[0] = 0.0f;
     in[1] = 0.0f;
     in[2] = 0.0f;
     in[i] = 1.0f;
-    ak_coordCvtVectorTo(coord->source, in, coord->target, out);
+    if (coord->conversion == AKB_COORD_TRANSFORM)
+      ak_coordCvtVectorTo(coord->source, in, coord->target, out);
+    else
+      memcpy(out, in, sizeof(out));
+    glm_vec3_scale(out, scale, out);
     coord->matrix[(size_t)i * 4]     = out[0];
     coord->matrix[(size_t)i * 4 + 1] = out[1];
     coord->matrix[(size_t)i * 4 + 2] = out[2];
   }
+}
+
+static float
+akb_blender_unit_scale(const AkDoc *doc) {
+  double scale;
+  float scale_f;
+
+  scale = doc && doc->unit ? doc->unit->dist : 1.0;
+  scale_f = (float)scale;
+  if (!isfinite(scale) || !isfinite(scale_f) || scale <= 0.0)
+    return 1.0f;
+  return scale_f;
 }
 
 static AkCoordSys *
@@ -74,11 +92,21 @@ akb_blender_source_coord(AkDoc *doc) {
 
 static void
 akb_coord_ctx_init(AkbCoordContext *coord, AkDoc *doc, const AkbLoadOptions *options) {
+  uint8_t axis_convert;
+  uint8_t unit_convert;
+
   coord->source = akb_blender_source_coord(doc);
   coord->target = options->target_coord ? options->target_coord : AK_ZUP;
-  coord->convert = coord->source != coord->target
-                   && !ak_coordOrientationIsEq(coord->source, coord->target);
   coord->conversion = options->coord_conversion;
+  coord->unit_scale = coord->conversion == AKB_COORD_RAW
+                      ? 1.0f
+                      : akb_blender_unit_scale(doc);
+  axis_convert = coord->source != coord->target
+                 && !ak_coordOrientationIsEq(coord->source, coord->target);
+  unit_convert = fabsf(coord->unit_scale - 1.0f) > 1.0e-7f;
+  coord->convert = coord->conversion == AKB_COORD_TRANSFORM
+                   ? axis_convert || unit_convert
+                   : coord->conversion == AKB_COORD_ALL && unit_convert;
   akb_coord_matrix(coord);
 }
 
@@ -809,7 +837,7 @@ akb_list_set_coord_matrix(AkbPrimitiveList *list, const AkbCoordContext *coord, 
 
   (void)include_skin_primitives;
 
-  if (!list || !coord || !coord->convert || coord->conversion != AKB_COORD_TRANSFORM)
+  if (!list || !coord || !coord->convert)
     return;
 
   for (i = 0; i < list->count; i++)
@@ -820,7 +848,7 @@ static void
 akb_curve_list_set_coord_matrix(AkbCurveList *list, const AkbCoordContext *coord) {
   size_t i;
 
-  if (!list || !coord || !coord->convert || coord->conversion != AKB_COORD_TRANSFORM)
+  if (!list || !coord || !coord->convert)
     return;
 
   for (i = 0; i < list->count; i++)

@@ -1124,6 +1124,105 @@ akb_offset_i32(PyObject *self, PyObject *args) {
 }
 
 static PyObject *
+akb_buffers_equal(PyObject *self, PyObject *args) {
+  PyObject *left_obj;
+  PyObject *right_obj;
+  Py_buffer left_view;
+  Py_buffer right_view;
+  int equal;
+
+  (void)self;
+
+  memset(&left_view, 0, sizeof(left_view));
+  memset(&right_view, 0, sizeof(right_view));
+  if (!PyArg_ParseTuple(args, "OO", &left_obj, &right_obj))
+    return NULL;
+  if (PyObject_GetBuffer(left_obj, &left_view, PyBUF_SIMPLE) < 0)
+    return NULL;
+  if (PyObject_GetBuffer(right_obj, &right_view, PyBUF_SIMPLE) < 0) {
+    PyBuffer_Release(&left_view);
+    return NULL;
+  }
+
+  equal = left_view.len == right_view.len
+          && (!left_view.len
+              || memcmp(left_view.buf, right_view.buf, (size_t)left_view.len) == 0);
+  PyBuffer_Release(&right_view);
+  PyBuffer_Release(&left_view);
+  if (equal)
+    Py_RETURN_TRUE;
+  Py_RETURN_FALSE;
+}
+
+static PyObject *
+akb_buffer_sequences_equal(PyObject *self, PyObject *args) {
+  PyObject *left_obj;
+  PyObject *right_obj;
+  PyObject *left_seq;
+  PyObject *right_seq;
+  Py_ssize_t count;
+  Py_ssize_t i;
+  int equal = 1;
+
+  (void)self;
+
+  if (!PyArg_ParseTuple(args, "OO", &left_obj, &right_obj))
+    return NULL;
+  left_seq = PySequence_Fast(left_obj, "left buffers must be a sequence");
+  if (!left_seq)
+    return NULL;
+  right_seq = PySequence_Fast(right_obj, "right buffers must be a sequence");
+  if (!right_seq) {
+    Py_DECREF(left_seq);
+    return NULL;
+  }
+
+  count = PySequence_Fast_GET_SIZE(left_seq);
+  if (count != PySequence_Fast_GET_SIZE(right_seq)) {
+    equal = 0;
+  } else {
+    for (i = 0; i < count; i++) {
+      Py_buffer left_view;
+      Py_buffer right_view;
+
+      memset(&left_view, 0, sizeof(left_view));
+      memset(&right_view, 0, sizeof(right_view));
+      if (PyObject_GetBuffer(PySequence_Fast_GET_ITEM(left_seq, i),
+                             &left_view,
+                             PyBUF_SIMPLE) < 0) {
+        equal = -1;
+        break;
+      }
+      if (PyObject_GetBuffer(PySequence_Fast_GET_ITEM(right_seq, i),
+                             &right_view,
+                             PyBUF_SIMPLE) < 0) {
+        PyBuffer_Release(&left_view);
+        equal = -1;
+        break;
+      }
+      if (left_view.len != right_view.len
+          || (left_view.len
+              && memcmp(left_view.buf,
+                        right_view.buf,
+                        (size_t)left_view.len) != 0))
+        equal = 0;
+      PyBuffer_Release(&right_view);
+      PyBuffer_Release(&left_view);
+      if (!equal)
+        break;
+    }
+  }
+
+  Py_DECREF(right_seq);
+  Py_DECREF(left_seq);
+  if (equal < 0)
+    return NULL;
+  if (equal)
+    Py_RETURN_TRUE;
+  Py_RETURN_FALSE;
+}
+
+static PyObject *
 akb_write_offset_i32(PyObject *self, PyObject *args) {
   PyObject *dst_obj;
   PyObject *src_obj;

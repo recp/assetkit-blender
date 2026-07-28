@@ -314,6 +314,40 @@ akb_scene_names_to_py(AkDoc *doc) {
   return list;
 }
 
+static PyObject *
+akb_scene_bounds_to_py(AkDoc *doc, const AkbLoadOptions *options) {
+  AkbCoordContext coord;
+  AkScene *scene;
+  vec3 bounds[2];
+  vec3 transformed[2];
+
+  scene = akb_selected_scene(doc, options);
+  if (!scene)
+    Py_RETURN_NONE;
+
+  ak_bbox_scene(scene);
+  if (!scene->bbox || !scene->bbox->isvalid)
+    Py_RETURN_NONE;
+
+  glm_vec3_copy(scene->bbox->min, bounds[0]);
+  glm_vec3_copy(scene->bbox->max, bounds[1]);
+  akb_prepare_blender_coords(doc, &coord, options);
+  if (coord.convert) {
+    glm_aabb_transform(bounds, AKB_MAT4(coord.matrix), transformed);
+  } else {
+    glm_vec3_copy(bounds[0], transformed[0]);
+    glm_vec3_copy(bounds[1], transformed[1]);
+  }
+
+  return Py_BuildValue("((fff)(fff))",
+                       transformed[0][0],
+                       transformed[0][1],
+                       transformed[0][2],
+                       transformed[1][0],
+                       transformed[1][1],
+                       transformed[1][2]);
+}
+
 static int
 akb_set_scene_info(PyObject *out, AkDoc *doc, const AkbLoadOptions *options) {
   AkScene *scene;
@@ -332,6 +366,9 @@ akb_set_scene_info(PyObject *out, AkDoc *doc, const AkbLoadOptions *options) {
          && akb_py_dict_set_owned(out,
                                   "scene_names",
                                   akb_scene_names_to_py(doc))
+         && akb_py_dict_set_owned(out,
+                                  "scene_bounds",
+                                  akb_scene_bounds_to_py(doc, options))
          && akb_py_dict_set_owned(out,
                                   "scene_extra",
                                   akb_tree_to_py(scene ? ak_extra(scene) : NULL));
@@ -482,6 +519,52 @@ akb_loop_float_attrs_to_py(AkbLoopFloatAttribute *attrs, uint32_t count, uint32_
 }
 
 static PyObject *
+akb_loop_float_attrs_to_compact_py(AkbLoopFloatAttribute *attrs,
+                                   uint32_t               count,
+                                   uint32_t               value_count) {
+  PyObject *list;
+  PyObject *tuple;
+  PyObject *value;
+  uint32_t i;
+
+  if (!attrs || !count)
+    return PyTuple_New(0);
+
+  list = PyTuple_New((Py_ssize_t)count);
+  if (!list)
+    return NULL;
+
+#define AKB_COMPACT_ATTR_SET(INDEX, OBJ) do {             \
+    value = (OBJ);                                        \
+    if (!value) { Py_DECREF(tuple); Py_DECREF(list); return NULL; } \
+    PyTuple_SET_ITEM(tuple, (INDEX), value);              \
+  } while (0)
+
+  for (i = 0; i < count; i++) {
+    tuple = PyTuple_New(4);
+    if (!tuple) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    AKB_COMPACT_ATTR_SET(0, akb_unicode_from_cstr(attrs[i].name));
+    AKB_COMPACT_ATTR_SET(1, PyLong_FromUnsignedLong(attrs[i].set));
+    AKB_COMPACT_ATTR_SET(2, PyLong_FromUnsignedLong(attrs[i].width));
+    AKB_COMPACT_ATTR_SET(
+      3,
+      akb_memoryview_or_empty(
+        attrs[i].values,
+        attrs[i].values
+        ? (size_t)value_count * attrs[i].width * sizeof(float)
+        : 0));
+    PyTuple_SET_ITEM(list, (Py_ssize_t)i, tuple);
+  }
+
+#undef AKB_COMPACT_ATTR_SET
+
+  return list;
+}
+
+static PyObject *
 akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
   PyObject *dict;
   PyObject *item;
@@ -581,19 +664,15 @@ akb_vec4_eq(const float v[4], float x, float y, float z, float w) {
 static int
 akb_primitive_has_simple_material_values(const AkbPrimitive *prim) {
   return prim
-         && akb_vec4_eq(prim->transparent_color, 1.0f, 1.0f, 1.0f, 1.0f)
          && akb_vec3_eq(prim->emissive_color, 0.0f, 0.0f, 0.0f)
          && akb_vec3_eq(prim->specular_color, 1.0f, 1.0f, 1.0f)
          && akb_vec3_eq(prim->sheen_color, 0.0f, 0.0f, 0.0f)
          && akb_vec3_eq(prim->volume_attenuation_color, 1.0f, 1.0f, 1.0f)
          && akb_vec3_eq(prim->volume_scatter_color, 0.0f, 0.0f, 0.0f)
          && akb_vec3_eq(prim->diffuse_transmission_color, 1.0f, 1.0f, 1.0f)
-         && akb_float_eq(prim->alpha_cutoff, 0.5f)
-         && akb_float_eq(prim->transparent_amount, 1.0f)
          && akb_float_eq(prim->normal_scale, 1.0f)
          && akb_float_eq(prim->occlusion_strength, 1.0f)
          && akb_float_eq(prim->emissive_strength, 1.0f)
-         && akb_float_eq(prim->specular_strength, 1.0f)
          && akb_float_eq(prim->ior, 1.5f)
          && akb_float_eq(prim->clearcoat, 0.0f)
          && akb_float_eq(prim->clearcoat_roughness, 0.0f)
@@ -659,7 +738,6 @@ akb_primitive_is_simple_py(const AkbPrimitive *prim) {
          && akb_primitive_simple_uvs_ok(prim)
          && akb_primitive_simple_base_color_texture_ok(prim)
          && !prim->color_set_count
-         && !prim->point_attr_count
          && !prim->has_skin
          && !prim->has_gsplat
          && !prim->has_sheen
@@ -808,6 +886,23 @@ akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
                  prim->alpha_mode
                  ? PyLong_FromUnsignedLong(prim->alpha_mode)
                  : akb_none());
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_ALPHA_CUTOFF,
+                 akb_float_or_none(prim->alpha_cutoff, 0.5f));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_TRANSPARENT_AMOUNT,
+                 akb_float_or_none(prim->transparent_amount, 1.0f));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_TRANSPARENT_COLOR,
+                 akb_vec4_or_none(prim->transparent_color, 1.0f, 1.0f, 1.0f, 1.0f));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_SPECULAR_STRENGTH,
+                 akb_float_or_none(prim->specular_strength, 1.0f));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_POINT_ATTR_COUNT,
+                 PyLong_FromUnsignedLong(prim->point_attr_count));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_POINT_ATTRS,
+                 akb_loop_float_attrs_to_compact_py(prim->point_attrs,
+                                                    prim->point_attr_count,
+                                                    prim->vertex_count));
+  AKB_SIMPLE_SET(AKB_PY_SIMPLE_TEXTURE_INFOS,
+                 akb_texture_infos_to_py(prim->texture_infos,
+                                         prim->texture_info_count));
 
 #undef AKB_SIMPLE_SET
 
@@ -1392,6 +1487,10 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
   AKB_NODE_SET_OBJ(AKB_PY_NODE_NAME,
                    node->name ? akb_unicode_from_cstr(node->name) : akb_none());
   AKB_NODE_SET_OBJ(AKB_PY_NODE_PARENT_INDEX, PyLong_FromLong(node->parent_index));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_PROTOTYPE_ROOT_INDEX,
+                   PyLong_FromLong(node->prototype_root_index));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_INSTANCE_TARGET_INDEX,
+                   PyLong_FromLong(node->instance_target_index));
   AKB_NODE_SET_OBJ(AKB_PY_NODE_VISIBLE, PyBool_FromLong(node->visible));
   AKB_NODE_SET_OBJ(AKB_PY_NODE_LAYERS,
                    node->layers && node->layers->count
@@ -1448,6 +1547,9 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
   AKB_NODE_SET_OBJ(AKB_PY_NODE_MATRIX_F32,
                    akb_memoryview_or_empty(node->matrix,
                                            node->has_transform ? 16 * sizeof(float) : 0));
+  AKB_NODE_SET_OBJ(AKB_PY_NODE_WORLD_MATRIX_F32,
+                   akb_memoryview_or_empty(node->world_matrix,
+                                           node->has_transform ? 16 * sizeof(float) : 0));
   AKB_NODE_SET_OBJ(AKB_PY_NODE_EXTRA, akb_tree_to_py(node->source ? ak_extra(node->source) : NULL));
   AKB_NODE_SET_OBJ(AKB_PY_NODE_ANIM_COUNT,
                    PyLong_FromUnsignedLong(node->animation
@@ -1478,7 +1580,8 @@ akb_load_lock_ensure(void) {
 static int
 akb_scene_node_requires_object(const AkbSceneNode *node) {
   return node
-         && (node->camera_type
+         && (node->instance_target_index >= 0
+             || node->camera_type
              || node->light_type
              || node->camera_extra
              || node->camera_imager_extra

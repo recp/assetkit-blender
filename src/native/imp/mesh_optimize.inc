@@ -56,6 +56,44 @@ akb_fnv1a64_mix_cstr(uint64_t hash, const char *str, size_t capacity) {
 }
 
 static uint64_t
+akb_geometry_hash_rotl64(uint64_t value, unsigned int shift) {
+  return (value << shift) | (value >> (64u - shift));
+}
+
+static uint64_t
+akb_geometry_hash_update(uint64_t hash, const void *data, size_t length) {
+  static const uint64_t prime1 = UINT64_C(11400714785074694791);
+  static const uint64_t prime2 = UINT64_C(14029467366897019727);
+  static const uint64_t prime3 = UINT64_C(1609587929392839161);
+  const unsigned char *bytes;
+
+  if (!data || !length)
+    return hash;
+
+  bytes = (const unsigned char *)data;
+  while (length >= sizeof(uint64_t)) {
+    uint64_t lane;
+
+    memcpy(&lane, bytes, sizeof(lane));
+    lane *= prime2;
+    lane = akb_geometry_hash_rotl64(lane, 31u);
+    lane *= prime1;
+    hash ^= lane;
+    hash = akb_geometry_hash_rotl64(hash, 27u) * prime1 + prime3;
+    bytes += sizeof(uint64_t);
+    length -= sizeof(uint64_t);
+  }
+  if (length) {
+    uint64_t tail = 0;
+
+    memcpy(&tail, bytes, length);
+    hash ^= tail * prime2;
+    hash = akb_geometry_hash_rotl64(hash, 27u) * prime1 + prime3;
+  }
+  return hash;
+}
+
+static uint64_t
 akb_geometry_key_mix_buffer(uint64_t hash,
                             const void *data,
                             size_t length,
@@ -64,7 +102,7 @@ akb_geometry_key_mix_buffer(uint64_t hash,
   if (!data || !length)
     return hash;
   if (content_key)
-    return akb_fnv1a64_update(hash, data, length);
+    return akb_geometry_hash_update(hash, data, length);
   return akb_fnv1a64_mix_u64(hash, (uintptr_t)data);
 }
 
@@ -132,7 +170,13 @@ akb_geometry_key_content_allowed(const AkbPrimitive *prim) {
                                     * sizeof(float)))
       return 0;
   }
-
+  for (i = 0; i < prim->point_attr_count; i++) {
+    if (!akb_geometry_key_add_bytes(&total,
+                                    (size_t)prim->vertex_count
+                                    * prim->point_attrs[i].width
+                                    * sizeof(float)))
+      return 0;
+  }
   return 1;
 }
 
@@ -161,17 +205,22 @@ static uint64_t
 akb_primitive_geometry_key(const AkbPrimitive *prim, int content_key) {
   uint64_t hash;
   size_t length;
+  int surface;
+  int lines;
 
-  if (!prim
-      || (prim->primitive_type != AKB_PRIMITIVE_TRIANGLES
-          && prim->primitive_type != AKB_PRIMITIVE_POLYGONS)
+  if (!prim)
+    return 0;
+
+  surface = prim->primitive_type == AKB_PRIMITIVE_TRIANGLES
+            || prim->primitive_type == AKB_PRIMITIVE_POLYGONS;
+  lines = prim->primitive_type == AKB_PRIMITIVE_LINES;
+  if ((!surface && !lines)
       || !prim->vertices
       || !prim->indices
-      || prim->loop_count != prim->face_count * 3
+      || (surface && prim->loop_count != prim->face_count * 3)
       || prim->has_skin
       || prim->has_gsplat
       || prim->instance_count
-      || prim->point_attr_count
       || prim->morph_target_count
       || prim->morph_preset_count
       || prim->material_variant_count
@@ -210,7 +259,11 @@ akb_primitive_geometry_key(const AkbPrimitive *prim, int content_key) {
                                      prim->color_set_count,
                                      prim->loop_count,
                                      content_key);
-
+  hash = akb_geometry_key_loop_attrs(hash,
+                                     prim->point_attrs,
+                                     prim->point_attr_count,
+                                     prim->vertex_count,
+                                     content_key);
   return hash ? hash : UINT64_C(1);
 }
 
@@ -928,4 +981,3 @@ akb_finalize_primitive_buffers(AkbArena *arena,
                                                    ? options->geometry_content_keys
                                                    : 0);
 }
-

@@ -25,6 +25,7 @@
 #include "mem.h"
 
 #include "ak/assetkit.h"
+#include "ak/bbox.h"
 #include "ak/options.h"
 #include "ak/path.h"
 #include "ak/version.h"
@@ -94,6 +95,8 @@ static PyMethodDef akb_methods[] = {
   {"anim_quat_slerp_coords", akb_anim_quat_slerp_coords, METH_VARARGS, "Build sampled quaternion slerp FCurve coordinates."},
   {"anim_component_constant", akb_anim_component_constant, METH_VARARGS, "Return true when an animation channel component is constant."},
   {"offset_i32", akb_offset_i32, METH_VARARGS, "Build an int32 buffer with a constant offset added to each element."},
+  {"buffers_equal", akb_buffers_equal, METH_VARARGS, "Return true when two contiguous buffers have identical bytes."},
+  {"buffer_sequences_equal", akb_buffer_sequences_equal, METH_VARARGS, "Return true when two sequences contain byte-identical contiguous buffers."},
   {"write_offset_i32", akb_write_offset_i32, METH_VARARGS, "Write an int32 buffer with a constant offset into a writable destination buffer."},
   {"fill_i32", akb_fill_i32, METH_VARARGS, "Fill a writable destination buffer with one int32 value."},
   {"fill_triangle_loop_offsets_ptr", akb_fill_triangle_loop_offsets_ptr, METH_VARARGS, "Fill Blender Mesh face offsets for a triangle-only mesh from a raw int32 pointer."},

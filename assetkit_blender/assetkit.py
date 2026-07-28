@@ -486,7 +486,10 @@ class CurveData:
 class SceneNodeData:
     name: str
     parent_index: int = -1
+    prototype_root_index: int = -1
+    instance_target_index: int = -1
     matrix_f32: object = b""
+    world_matrix_f32: object = b""
     anim_channels: list[object] | None = None
     anim_count: int = 0
     visible: bool = True
@@ -517,6 +520,7 @@ class AssetKitSceneData:
     scene_count: int = 0
     scene_name: str = ""
     scene_names: list[str] | None = None
+    scene_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
 
 
 class AssetKitError(RuntimeError):
@@ -908,6 +912,7 @@ def native_load_meshes(
         scene_count=_native_result_int(result, "scene_count", 0),
         scene_name=str(result.get("scene_name") or "") if isinstance(result, dict) else "",
         scene_names=list(result.get("scene_names") or []) if isinstance(result, dict) else None,
+        scene_bounds=result.get("scene_bounds") if isinstance(result, dict) else None,
     )
     if profile:
         _profile_log(
@@ -958,6 +963,7 @@ def native_open_scene_stream(
         _native_result_int(result, "scene_count", 0),
         str(result.get("scene_name") or ""),
         list(result.get("scene_names") or []),
+        result.get("scene_bounds"),
     )
     if profile:
         _profile_log(
@@ -1036,6 +1042,28 @@ def native_offset_i32(buffer: object, offset: int) -> memoryview | None:
     if not shifted:
         return None
     return memoryview(shifted).cast("i")
+
+
+def native_buffers_equal(left: object, right: object) -> bool | None:
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        return bool(_assetkit_blender.buffers_equal(left, right))
+    except Exception:
+        return None
+
+
+def native_buffer_sequences_equal(left: object, right: object) -> bool | None:
+    _assetkit_blender = _native_module()
+    if _assetkit_blender is None:
+        return None
+
+    try:
+        return bool(_assetkit_blender.buffer_sequences_equal(left, right))
+    except Exception:
+        return None
 
 
 def native_write_offset_i32(dst: object, byte_offset: int, buffer: object, offset: int) -> int | None:
@@ -1140,6 +1168,7 @@ class NativeSceneStream:
         scene_count: int = 0,
         scene_name: str = "",
         scene_names: list[str] | None = None,
+        scene_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None,
     ) -> None:
         self._module = module
         self._owner = owner
@@ -1154,6 +1183,7 @@ class NativeSceneStream:
         self.scene_count = scene_count
         self.scene_name = scene_name
         self.scene_names = scene_names or []
+        self.scene_bounds = scene_bounds
 
     def read_mesh_batch(self, start: int, count: int) -> list[MeshPrimitiveData]:
         profile = _profile_enabled()
@@ -1191,6 +1221,8 @@ def _native_result_int(result: object, key: str, default: int) -> int:
     _N_OWNER,
     _N_NAME,
     _N_PARENT_INDEX,
+    _N_PROTOTYPE_ROOT_INDEX,
+    _N_INSTANCE_TARGET_INDEX,
     _N_VISIBLE,
     _N_LAYERS,
     _N_CAMERA_TYPE,
@@ -1204,18 +1236,20 @@ def _native_result_int(result: object, key: str, default: int) -> int:
     _N_LIGHT_COLOR,
     _N_LIGHT_VALUES,
     _N_MATRIX_F32,
+    _N_WORLD_MATRIX_F32,
     _N_EXTRA,
     _N_ANIM_COUNT,
     _N_ANIM_CHANNELS,
-) = range(19)
+) = range(22)
 
 
 class NativeSceneNodeData:
-    __slots__ = ("_raw", "_visible")
+    __slots__ = ("_raw", "_visible", "_has_world_matrix")
 
     def __init__(self, raw: tuple):
         self._raw = raw
-        extra = raw[_N_EXTRA]
+        self._has_world_matrix = len(raw) >= 22
+        extra = raw[_N_EXTRA if self._has_world_matrix else _N_WORLD_MATRIX_F32]
         visible = _extra_bool(extra, ("extensions", "KHR_node_visibility", "visible")) if extra else None
         self._visible = bool(raw[_N_VISIBLE]) if visible is None else visible
 
@@ -1229,16 +1263,34 @@ class NativeSceneNodeData:
         return int(value if value is not None else -1)
 
     @property
+    def prototype_root_index(self):
+        value = self._raw[_N_PROTOTYPE_ROOT_INDEX]
+        return int(value if value is not None else -1)
+
+    @property
+    def instance_target_index(self):
+        value = self._raw[_N_INSTANCE_TARGET_INDEX]
+        return int(value if value is not None else -1)
+
+    @property
     def matrix_f32(self):
         return self._raw[_N_MATRIX_F32] or b""
 
     @property
+    def world_matrix_f32(self):
+        if not self._has_world_matrix:
+            return b""
+        return self._raw[_N_WORLD_MATRIX_F32] or b""
+
+    @property
     def anim_channels(self):
-        return self._raw[_N_ANIM_CHANNELS] or _EMPTY_SEQUENCE
+        index = _N_ANIM_CHANNELS if self._has_world_matrix else _N_ANIM_COUNT
+        return self._raw[index] or _EMPTY_SEQUENCE
 
     @property
     def anim_count(self):
-        return int(self._raw[_N_ANIM_COUNT] or 0)
+        index = _N_ANIM_COUNT if self._has_world_matrix else _N_EXTRA
+        return int(self._raw[index] or 0)
 
     @property
     def visible(self):
@@ -1290,7 +1342,7 @@ class NativeSceneNodeData:
 
     @property
     def extra(self):
-        return self._raw[_N_EXTRA]
+        return self._raw[_N_EXTRA if self._has_world_matrix else _N_WORLD_MATRIX_F32]
 
     @property
     def _native_owner(self):
@@ -1300,7 +1352,9 @@ class NativeSceneNodeData:
 def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
     nodes = []
     for item in raw_nodes:
-        if isinstance(item, tuple) and len(item) >= 19:
+        if isinstance(item, tuple) and len(item) == 19:
+            item = item[:3] + (-1, -1) + item[3:]
+        if isinstance(item, tuple) and len(item) >= 21:
             nodes.append(NativeSceneNodeData(item))
             continue
 
@@ -1312,7 +1366,18 @@ def _native_nodes_from_raw(raw_nodes: Iterable[dict]) -> list[SceneNodeData]:
             SceneNodeData(
                 name=item.get("name") or "",
                 parent_index=int(item.get("parent_index") if item.get("parent_index") is not None else -1),
+                prototype_root_index=int(
+                    item.get("prototype_root_index")
+                    if item.get("prototype_root_index") is not None
+                    else -1
+                ),
+                instance_target_index=int(
+                    item.get("instance_target_index")
+                    if item.get("instance_target_index") is not None
+                    else -1
+                ),
                 matrix_f32=item.get("matrix_f32") or b"",
+                world_matrix_f32=item.get("world_matrix_f32") or b"",
                 anim_channels=item.get("anim_channels") or [],
                 anim_count=int(item.get("anim_count") or 0),
                 visible=visible,
@@ -1446,13 +1511,43 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     _S_BASE_COLOR,
     _S_OPACITY,
     _S_ALPHA_MODE,
-) = range(40)
+    _S_ALPHA_CUTOFF,
+    _S_TRANSPARENT_AMOUNT,
+    _S_TRANSPARENT_COLOR,
+    _S_SPECULAR_STRENGTH,
+    _S_POINT_ATTR_COUNT,
+    _S_POINT_ATTRS,
+    _S_TEXTURE_INFOS,
+) = range(47)
 _S_LEGACY_FIELD_COUNT = _S_GEOMETRY_KEY + 1
-_S_FIELD_COUNT = _S_ALPHA_MODE + 1
+_S_FIELD_COUNT = _S_TEXTURE_INFOS + 1
+
+
+class NativeLoopFloatAttributeData:
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: tuple):
+        self._raw = raw
+
+    @property
+    def name(self):
+        return self._raw[0] or ""
+
+    @property
+    def set(self):
+        return int(self._raw[1] or 0)
+
+    @property
+    def width(self):
+        return int(self._raw[2] or 0)
+
+    @property
+    def values_f32(self):
+        return self._raw[3] or b""
 
 
 class NativeSimpleMeshData:
-    __slots__ = ("_raw", "_count")
+    __slots__ = ("_raw", "_count", "_point_attrs", "_texture_infos", "_uv_sets")
 
     vertices = _EMPTY_SEQUENCE
     faces = _EMPTY_SEQUENCE
@@ -1563,6 +1658,9 @@ class NativeSimpleMeshData:
     def __init__(self, raw: tuple):
         self._raw = raw
         self._count = len(raw)
+        self._point_attrs = None
+        self._texture_infos = None
+        self._uv_sets = None
 
     def _get(self, index: int, default=None):
         return self._raw[index] if index < self._count and self._raw[index] is not None else default
@@ -1684,6 +1782,24 @@ class NativeSimpleMeshData:
         return self._get(_S_UVS_F32, b"") or b""
 
     @property
+    def uv_set_count(self):
+        return 1 if self.uvs_f32 else 0
+
+    @property
+    def uv_sets(self):
+        cached = self._uv_sets
+        if cached is not None:
+            return cached
+        values = self.uvs_f32
+        cached = (
+            (NativeLoopFloatAttributeData(("UVMap", 0, 2, values)),)
+            if values
+            else ()
+        )
+        self._uv_sets = cached
+        return cached
+
+    @property
     def base_color_texture(self):
         return self._get(_S_BASE_COLOR_TEXTURE, "") or ""
 
@@ -1710,6 +1826,52 @@ class NativeSimpleMeshData:
     @property
     def alpha_mode(self):
         return self._get(_S_ALPHA_MODE, 0) or 0
+
+    @property
+    def alpha_cutoff(self):
+        return self._get(_S_ALPHA_CUTOFF, 0.5)
+
+    @property
+    def transparent_amount(self):
+        return self._get(_S_TRANSPARENT_AMOUNT, 1.0)
+
+    @property
+    def transparent_color(self):
+        return self._get(
+            _S_TRANSPARENT_COLOR,
+            (1.0, 1.0, 1.0, 1.0),
+        ) or (1.0, 1.0, 1.0, 1.0)
+
+    @property
+    def specular_strength(self):
+        return self._get(_S_SPECULAR_STRENGTH, 1.0)
+
+    @property
+    def point_attr_count(self):
+        return self._get(_S_POINT_ATTR_COUNT, 0) or 0
+
+    @property
+    def point_attrs(self):
+        cached = self._point_attrs
+        if cached is not None:
+            return cached
+        cached = tuple(
+            NativeLoopFloatAttributeData(item)
+            for item in (self._get(_S_POINT_ATTRS, ()) or ())
+        )
+        self._point_attrs = cached
+        return cached
+
+    @property
+    def texture_infos(self):
+        cached = self._texture_infos
+        if cached is not None:
+            return cached
+        cached = _native_texture_infos_from_raw(
+            self._get(_S_TEXTURE_INFOS, {}) or {}
+        )
+        self._texture_infos = cached
+        return cached
 
     @property
     def metallic(self):
@@ -2000,7 +2162,6 @@ _M_FIELD_NAMES = (
     "smooth_shading",
 )
 
-
 def _native_mesh_field_getter(item):
     if isinstance(item, tuple):
         if len(item) >= len(_M_FIELD_NAMES):
@@ -2084,13 +2245,54 @@ def _native_simple_mesh_from_raw(item: dict | tuple) -> MeshPrimitiveData:
     return data
 
 
+def _native_texture_infos_from_raw(
+    raw_infos: dict[str, dict],
+) -> dict[str, TextureRefData]:
+    texture_infos = {}
+    for role, info in raw_infos.items():
+        texture_infos[str(role)] = TextureRefData(
+            role=str(role),
+            path=info.get("path") or "",
+            image_name=info.get("image_name") or "",
+            sampler_name=info.get("sampler_name") or "",
+            color_space=info.get("color_space") or "",
+            channels=info.get("channels") or "",
+            texcoord=info.get("texcoord") or "",
+            coord_input_name=info.get("coord_input_name") or "",
+            slot=int(info.get("slot") or 0),
+            wrap_s=int(info.get("wrap_s") or 1),
+            wrap_t=int(info.get("wrap_t") or 1),
+            wrap_p=int(info.get("wrap_p") or 1),
+            min_filter=int(info.get("min_filter") or 0),
+            mag_filter=int(info.get("mag_filter") or 0),
+            mip_filter=int(info.get("mip_filter") or 0),
+            has_transform=bool(info.get("has_transform")),
+            transform_offset=tuple(info.get("transform_offset") or (0.0, 0.0)),
+            transform_scale=tuple(info.get("transform_scale") or (1.0, 1.0)),
+            transform_rotation=float(
+                info.get("transform_rotation")
+                if info.get("transform_rotation") is not None
+                else 0.0
+            ),
+            transform_slot=int(
+                info.get("transform_slot")
+                if info.get("transform_slot") is not None
+                else -1
+            ),
+            texture_extra=info.get("texture_extra"),
+            texref_extra=info.get("texref_extra"),
+            image_extra=info.get("image_extra"),
+            sampler_extra=info.get("sampler_extra"),
+        )
+    return texture_infos
+
+
 def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveData]:
     meshes = []
     for item in raw_meshes:
         if _native_mesh_is_simple(item):
             meshes.append(_native_simple_mesh_from_raw(item))
             continue
-
         get = _native_mesh_field_getter(item)
         uv_sets = []
         for attr in get(_M_UV_SETS) or []:
@@ -2125,38 +2327,9 @@ def _native_meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveDat
                 )
             )
 
-        texture_infos = {}
-        for role, info in (get(_M_TEXTURE_INFOS) or {}).items():
-            texture_infos[str(role)] = TextureRefData(
-                role=str(role),
-                path=info.get("path") or "",
-                image_name=info.get("image_name") or "",
-                sampler_name=info.get("sampler_name") or "",
-                color_space=info.get("color_space") or "",
-                channels=info.get("channels") or "",
-                texcoord=info.get("texcoord") or "",
-                coord_input_name=info.get("coord_input_name") or "",
-                slot=int(info.get("slot") or 0),
-                wrap_s=int(info.get("wrap_s") or 1),
-                wrap_t=int(info.get("wrap_t") or 1),
-                wrap_p=int(info.get("wrap_p") or 1),
-                min_filter=int(info.get("min_filter") or 0),
-                mag_filter=int(info.get("mag_filter") or 0),
-                mip_filter=int(info.get("mip_filter") or 0),
-                has_transform=bool(info.get("has_transform")),
-                transform_offset=tuple(info.get("transform_offset") or (0.0, 0.0)),
-                transform_scale=tuple(info.get("transform_scale") or (1.0, 1.0)),
-                transform_rotation=float(
-                    info.get("transform_rotation")
-                    if info.get("transform_rotation") is not None
-                    else 0.0
-                ),
-                transform_slot=int(info.get("transform_slot") if info.get("transform_slot") is not None else -1),
-                texture_extra=info.get("texture_extra"),
-                texref_extra=info.get("texref_extra"),
-                image_extra=info.get("image_extra"),
-                sampler_extra=info.get("sampler_extra"),
-            )
+        texture_infos = _native_texture_infos_from_raw(
+            get(_M_TEXTURE_INFOS) or {}
+        )
 
         morph_targets = []
         for target in get(_M_MORPH_TARGETS) or []:

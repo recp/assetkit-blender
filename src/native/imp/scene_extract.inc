@@ -114,6 +114,7 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
                        const AkbAnimationIndex *anim_index,
                        const AkbCoordContext *coord,
                        int32_t parent_index,
+                       int32_t prototype_root_index,
                        int32_t *node_index) {
   AkbSceneNode out = {0};
   int ok;
@@ -125,9 +126,18 @@ akb_extract_scene_node(AkbSceneNodeList *nodes,
   out.source = node;
   out.name = node->name;
   out.parent_index = parent_index;
+  out.prototype_root_index = prototype_root_index;
+  out.instance_target_index = -1;
   out.visible = node->visible ? 1 : 0;
   out.layers = node->layer;
   ak_transformCombine(node->transform, out.matrix);
+  if (parent_index >= 0 && (size_t)parent_index < nodes->count) {
+    glm_mat4_mul(AKB_MAT4(nodes->items[parent_index].world_matrix),
+                 AKB_MAT4(out.matrix),
+                 AKB_MAT4(out.world_matrix));
+  } else {
+    glm_mat4_copy(AKB_MAT4(out.matrix), AKB_MAT4(out.world_matrix));
+  }
   out.has_transform = 1;
   akb_extract_node_camera(&out, node);
   akb_extract_node_light(&out, doc, node);
@@ -405,7 +415,10 @@ akb_extract_simple_mesh_group(AkbArena *arena,
     out.has_node = 1;
   }
 
-  base_name = akb_name(mesh->name, akb_name(geom->name, "AssetKitMesh"));
+  base_name = akb_name(mesh->name,
+                       akb_name(geom->name,
+                                akb_name((const char *)ak_getId(geom),
+                                         "AssetKitMesh")));
   out.name = base_name;
 
   out.vertices = (float *)akb_owned_alloc(arena,
@@ -892,7 +905,10 @@ akb_extract_primitive(AkbArena *arena,
     }
   }
 
-  base_name = akb_name(mesh->name, akb_name(geom->name, "AssetKitMesh"));
+  base_name = akb_name(mesh->name,
+                       akb_name(geom->name,
+                                akb_name((const char *)ak_getId(geom),
+                                         "AssetKitMesh")));
   if (mesh->primitiveCount > 1) {
     out.name = akb_arena_format_name_u32(arena, base_name, prim_index);
     if (!out.name) {
@@ -1076,6 +1092,119 @@ akb_primitive_reuse_cache_add(AkbPrimitiveReuseCache *cache,
   akb_primitive_reuse_cache_insert_entry(cache->items, cache->capacity, entry);
   cache->count++;
   return 1;
+}
+
+#define AKB_PROTOTYPE_BUILDING 1
+#define AKB_PROTOTYPE_READY 2
+
+static size_t
+akb_node_prototype_hash(const AkNode *source) {
+  uintptr_t value = (uintptr_t)source;
+
+  value ^= value >> 33;
+  value *= (uintptr_t)UINT64_C(0xff51afd7ed558ccd);
+  value ^= value >> 33;
+  return (size_t)value;
+}
+
+static void
+akb_node_prototype_map_free(AkbNodePrototypeMap *map) {
+  if (!map)
+    return;
+  free(map->items);
+  memset(map, 0, sizeof(*map));
+}
+
+static void
+akb_node_prototype_map_insert_entry(AkbNodePrototypeEntry *items,
+                                    size_t capacity,
+                                    AkbNodePrototypeEntry entry) {
+  size_t mask;
+  size_t index;
+
+  mask = capacity - 1;
+  index = akb_node_prototype_hash(entry.source) & mask;
+  while (items[index].source)
+    index = (index + 1) & mask;
+  items[index] = entry;
+}
+
+static int
+akb_node_prototype_map_resize(AkbNodePrototypeMap *map, size_t capacity) {
+  AkbNodePrototypeEntry *items;
+  AkbNodePrototypeEntry *old_items;
+  size_t old_capacity;
+  size_t i;
+
+  if (!map)
+    return 0;
+
+  if (capacity < 64)
+    capacity = 64;
+  if (capacity & (capacity - 1)) {
+    size_t pow2 = 64;
+    while (pow2 < capacity)
+      pow2 <<= 1;
+    capacity = pow2;
+  }
+
+  items = (AkbNodePrototypeEntry *)calloc(capacity, sizeof(*items));
+  if (!items)
+    return 0;
+
+  old_items = map->items;
+  old_capacity = map->capacity;
+  for (i = 0; i < old_capacity; i++) {
+    if (old_items[i].source)
+      akb_node_prototype_map_insert_entry(items, capacity, old_items[i]);
+  }
+
+  free(old_items);
+  map->items = items;
+  map->capacity = capacity;
+  return 1;
+}
+
+static AkbNodePrototypeEntry *
+akb_node_prototype_map_find(AkbNodePrototypeMap *map, AkNode *source) {
+  size_t mask;
+  size_t index;
+
+  if (!map || !source || !map->items || !map->capacity)
+    return NULL;
+
+  mask = map->capacity - 1;
+  index = akb_node_prototype_hash(source) & mask;
+  for (;;) {
+    if (!map->items[index].source)
+      return NULL;
+    if (map->items[index].source == source)
+      return &map->items[index];
+    index = (index + 1) & mask;
+  }
+}
+
+static AkbNodePrototypeEntry *
+akb_node_prototype_map_add(AkbNodePrototypeMap *map,
+                           AkNode *source,
+                           int32_t root_index,
+                           uint8_t state) {
+  AkbNodePrototypeEntry entry = {0};
+
+  if (!map || !source)
+    return NULL;
+  if (!map->capacity || (map->count + 1) * 10 >= map->capacity * 7) {
+    if (!akb_node_prototype_map_resize(map,
+                                       map->capacity ? map->capacity * 2 : 64))
+      return NULL;
+  }
+
+  entry.source = source;
+  entry.root_index = root_index;
+  entry.state = state;
+  akb_node_prototype_map_insert_entry(map->items, map->capacity, entry);
+  map->count++;
+  return akb_node_prototype_map_find(map, source);
 }
 
 static int
@@ -1590,11 +1719,143 @@ akb_extract_node(AkbArena *arena,
                  AkNode *node,
                  const AkbAnimationIndex *anim_index,
                  AkbPrimitiveReuseCache *reuse_cache,
+                 AkbNodePrototypeMap *prototype_map,
                  const AkbCoordContext *coord,
                  const AkbLoadOptions *options,
-                 int32_t parent_index) {
+                 int32_t parent_index,
+                 int32_t prototype_root_index);
+
+static int
+akb_extract_node_prototype(AkbArena *arena,
+                           AkbPrimitiveList *list,
+                           AkbCurveList *curves,
+                           AkbSceneNodeList *nodes,
+                           AkDoc *doc,
+                           AkbSharedDoc *doc_owner,
+                           AkNode *target,
+                           const AkbAnimationIndex *anim_index,
+                           AkbPrimitiveReuseCache *reuse_cache,
+                           AkbNodePrototypeMap *prototype_map,
+                           const AkbCoordContext *coord,
+                           const AkbLoadOptions *options,
+                           int32_t *root_index,
+                           int *cycle) {
+  AkbNodePrototypeEntry *entry;
+  int32_t root;
+
+  *cycle = 0;
+  entry = akb_node_prototype_map_find(prototype_map, target);
+  if (entry) {
+    *root_index = entry->root_index;
+    if (entry->state == AKB_PROTOTYPE_BUILDING)
+      *cycle = 1;
+    return 1;
+  }
+
+  root = (int32_t)nodes->count;
+  if (!akb_node_prototype_map_add(prototype_map,
+                                  target,
+                                  root,
+                                  AKB_PROTOTYPE_BUILDING))
+    return 0;
+
+  if (!akb_extract_node(arena,
+                        list,
+                        curves,
+                        nodes,
+                        doc,
+                        doc_owner,
+                        target,
+                        anim_index,
+                        reuse_cache,
+                        prototype_map,
+                        coord,
+                        options,
+                        -1,
+                        root))
+    return 0;
+
+  entry = akb_node_prototype_map_find(prototype_map, target);
+  if (!entry)
+    return 0;
+  entry->state = AKB_PROTOTYPE_READY;
+  *root_index = root;
+  return 1;
+}
+
+static int
+akb_extract_node_instance(AkbArena *arena,
+                          AkbPrimitiveList *list,
+                          AkbCurveList *curves,
+                          AkbSceneNodeList *nodes,
+                          AkDoc *doc,
+                          AkbSharedDoc *doc_owner,
+                          AkInstanceNode *node_ref,
+                          const AkbAnimationIndex *anim_index,
+                          AkbPrimitiveReuseCache *reuse_cache,
+                          AkbNodePrototypeMap *prototype_map,
+                          const AkbCoordContext *coord,
+                          const AkbLoadOptions *options,
+                          int32_t parent_index,
+                          int32_t prototype_root_index) {
+  AkbSceneNode out = {0};
+  AkNode *target;
+  int32_t target_index;
+  int cycle;
+
+  target = ak_instanceNodeTarget(node_ref);
+  if (!target)
+    return 1;
+  if (!akb_extract_node_prototype(arena,
+                                  list,
+                                  curves,
+                                  nodes,
+                                  doc,
+                                  doc_owner,
+                                  target,
+                                  anim_index,
+                                  reuse_cache,
+                                  prototype_map,
+                                  coord,
+                                  options,
+                                  &target_index,
+                                  &cycle))
+    return 0;
+  if (cycle)
+    return 1;
+
+  out.name = node_ref->name ? node_ref->name : target->name;
+  out.parent_index = parent_index;
+  out.prototype_root_index = prototype_root_index;
+  out.instance_target_index = target_index;
+  out.visible = 1;
+  out.has_transform = 1;
+  glm_mat4_identity(AKB_MAT4(out.matrix));
+  if (parent_index >= 0 && (size_t)parent_index < nodes->count) {
+    glm_mat4_copy(AKB_MAT4(nodes->items[parent_index].world_matrix),
+                  AKB_MAT4(out.world_matrix));
+  } else {
+    glm_mat4_identity(AKB_MAT4(out.world_matrix));
+  }
+  return akb_node_list_push(nodes, &out);
+}
+
+static int
+akb_extract_node(AkbArena *arena,
+                 AkbPrimitiveList *list,
+                 AkbCurveList *curves,
+                 AkbSceneNodeList *nodes,
+                 AkDoc *doc,
+                 AkbSharedDoc *doc_owner,
+                 AkNode *node,
+                 const AkbAnimationIndex *anim_index,
+                 AkbPrimitiveReuseCache *reuse_cache,
+                 AkbNodePrototypeMap *prototype_map,
+                 const AkbCoordContext *coord,
+                 const AkbLoadOptions *options,
+                 int32_t parent_index,
+                 int32_t prototype_root_index) {
   AkNode *child;
-  AkNode *inst_node;
   AkGeometry *geom;
   AkInstanceGeometry *geometry_inst;
   AkInstanceGeometry *next_geometry;
@@ -1615,6 +1876,7 @@ akb_extract_node(AkbArena *arena,
                               anim_index,
                               coord,
                               parent_index,
+                              prototype_root_index,
                               &node_index))
     return 0;
 
@@ -1680,15 +1942,38 @@ akb_extract_node(AkbArena *arena,
   }
 
   for (child = node->chld; child; child = child->next) {
-    if (!akb_extract_node(arena, list, curves, nodes, doc, doc_owner, child, anim_index, reuse_cache, coord, options, node_index))
+    if (!akb_extract_node(arena,
+                          list,
+                          curves,
+                          nodes,
+                          doc,
+                          doc_owner,
+                          child,
+                          anim_index,
+                          reuse_cache,
+                          prototype_map,
+                          coord,
+                          options,
+                          node_index,
+                          prototype_root_index))
       return 0;
   }
 
   for (node_ref = node->node; node_ref; node_ref = node_ref->next) {
-    inst_node = ak_instanceNodeTarget(node_ref);
-    if (!inst_node || inst_node == node)
-      continue;
-    if (!akb_extract_node(arena, list, curves, nodes, doc, doc_owner, inst_node, anim_index, reuse_cache, coord, options, node_index))
+    if (!akb_extract_node_instance(arena,
+                                   list,
+                                   curves,
+                                   nodes,
+                                   doc,
+                                   doc_owner,
+                                   node_ref,
+                                   anim_index,
+                                   reuse_cache,
+                                   prototype_map,
+                                   coord,
+                                   options,
+                                   node_index,
+                                   prototype_root_index))
       return 0;
   }
 
@@ -1796,7 +2081,10 @@ akb_count_geometry_curves(AkGeometry *geom) {
 }
 
 static void
-akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate *estimate) {
+akb_estimate_node(AkNode *node,
+                  const AkbLoadOptions *options,
+                  AkbSceneEstimate *estimate,
+                  AkbNodePrototypeMap *prototype_map) {
   AkNode *child;
   AkNode *inst_node;
   AkInstanceNode *node_ref;
@@ -1818,26 +2106,36 @@ akb_estimate_node(AkNode *node, const AkbLoadOptions *options, AkbSceneEstimate 
   }
 
   for (child = node->chld; child; child = child->next)
-    akb_estimate_node(child, options, estimate);
+    akb_estimate_node(child, options, estimate, prototype_map);
 
   for (node_ref = node->node; node_ref; node_ref = node_ref->next) {
     inst_node = ak_instanceNodeTarget(node_ref);
     if (!inst_node || inst_node == node)
       continue;
-    akb_estimate_node(inst_node, options, estimate);
+    estimate->nodes++;
+    if (akb_node_prototype_map_find(prototype_map, inst_node))
+      continue;
+    if (!akb_node_prototype_map_add(prototype_map,
+                                    inst_node,
+                                    -1,
+                                    AKB_PROTOTYPE_BUILDING))
+      continue;
+    akb_estimate_node(inst_node, options, estimate, prototype_map);
   }
 }
 
 static AkbSceneEstimate
 akb_estimate_scene(AkDoc *doc, const AkbLoadOptions *options) {
   AkbSceneEstimate estimate = {0};
+  AkbNodePrototypeMap prototype_map = {0};
   AkScene *scene;
 
   scene = akb_selected_scene(doc, options);
   if (!scene || !scene->node)
     return estimate;
 
-  akb_estimate_node(scene->node, options, &estimate);
+  akb_estimate_node(scene->node, options, &estimate, &prototype_map);
+  akb_node_prototype_map_free(&prototype_map);
 
   return estimate;
 }
@@ -1882,6 +2180,7 @@ akb_extract_scene(AkDoc *doc,
                   const AkbLoadOptions *options,
                   size_t *reuse_hits) {
   AkbPrimitiveReuseCache reuse_cache = {0};
+  AkbNodePrototypeMap prototype_map = {0};
   AkScene *scene;
   int ok = 1;
 
@@ -1892,11 +2191,25 @@ akb_extract_scene(AkDoc *doc,
   if (!scene || !scene->node)
     return 1;
 
-  if (!akb_extract_node(arena, list, curves, nodes, doc, doc_owner, scene->node, anim_index, &reuse_cache, coord, options, -1))
+  if (!akb_extract_node(arena,
+                        list,
+                        curves,
+                        nodes,
+                        doc,
+                        doc_owner,
+                        scene->node,
+                        anim_index,
+                        &reuse_cache,
+                        &prototype_map,
+                        coord,
+                        options,
+                        -1,
+                        -1))
     ok = 0;
 
   if (reuse_hits)
     *reuse_hits = reuse_cache.hits;
+  akb_node_prototype_map_free(&prototype_map);
   akb_primitive_reuse_cache_free(&reuse_cache);
   return ok;
 }
