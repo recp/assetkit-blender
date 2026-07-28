@@ -59,6 +59,12 @@ class InteractiveProfile:
         self.path = Path(args.path).expanduser().resolve()
         self.started_at = 0.0
         self.imported_at = 0.0
+        self.deferred_started_at = 0.0
+        self.deferred_pending_at_import = {
+            "materials": 0,
+            "textures": 0,
+            "normals": 0,
+        }
         self.objects = []
         self.finished = False
 
@@ -141,6 +147,13 @@ class InteractiveProfile:
         pending_textures = len(assetkit_importer._DEFERRED_TEXTURE_KEYS)
         pending_normals = len(assetkit_importer._DEFERRED_NORMAL_TASKS)
         if pending_materials or pending_textures or pending_normals:
+            if not self.deferred_started_at:
+                self.deferred_started_at = now
+                self.deferred_pending_at_import = {
+                    "materials": pending_materials,
+                    "textures": pending_textures,
+                    "normals": pending_normals,
+                }
             return 0.020
 
         redraw_started_at = time.perf_counter()
@@ -196,6 +209,12 @@ class InteractiveProfile:
                     "import_complete_ms": (self.imported_at - self.started_at) * 1000.0,
                     "viewport_ready_ms": (ready_at - self.started_at) * 1000.0,
                     "forced_redraw_ms": (ready_at - redraw_started_at) * 1000.0,
+                    "deferred_drain_ms": (
+                        (redraw_started_at - self.deferred_started_at) * 1000.0
+                        if self.deferred_started_at
+                        else 0.0
+                    ),
+                    "deferred_pending_at_import": self.deferred_pending_at_import,
                 },
                 sort_keys=True,
             ),
