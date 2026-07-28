@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_DIR = ROOT / "assetkit_blender"
+PACKAGE_DIR = ROOT / "src" / "assetkit_blender"
 MANIFEST = ROOT / "blender_manifest.toml"
 DEFAULT_STAGE_DIR = ROOT / "build" / "extension-stage"
 DEFAULT_OUTPUT_DIR = ROOT / "dist"
@@ -48,6 +48,7 @@ NATIVE_ARTIFACT_PATTERNS = (
     "ds*.dll",
     "libds*.dll",
 )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

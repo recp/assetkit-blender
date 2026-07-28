@@ -6,7 +6,7 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(ASSETKIT_ROOT "" CACHE PATH "AssetKit source or install root")
-set(ASSETKIT_BLENDER_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assetkit_blender" CACHE PATH "Output directory for the native Python module")
+set(ASSETKIT_BLENDER_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/assetkit_blender" CACHE PATH "Output directory for the native Python module")
 set(ASSETKIT_BLENDER_PYTHON_SOABI "" CACHE STRING "Override Python extension ABI tag, for example cpython-313-darwin")
 option(ASSETKIT_STRICT_ROOT "Only resolve AssetKit headers and libraries from ASSETKIT_ROOT" ON)
 option(ASSETKIT_BLENDER_STATIC_ASSETKIT "Link AssetKit core statically into the Python bridge" OFF)

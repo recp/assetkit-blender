@@ -21,7 +21,8 @@ import bpy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = Path(__file__).resolve().parent
-for search_path in (REPO_ROOT, TOOLS_DIR):
+PYTHON_ROOT = REPO_ROOT / "src"
+for search_path in (PYTHON_ROOT, TOOLS_DIR):
     if str(search_path) not in sys.path:
         sys.path.insert(0, str(search_path))
 

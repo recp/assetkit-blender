@@ -15,8 +15,9 @@ import bpy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+PYTHON_ROOT = ROOT / "src"
+if str(PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(PYTHON_ROOT))
 
 from assetkit_blender import importer  # noqa: E402
 

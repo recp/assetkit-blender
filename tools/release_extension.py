@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_DIR = ROOT / "assetkit_blender"
+PACKAGE_DIR = ROOT / "src" / "assetkit_blender"
 
 
 def parse_args() -> argparse.Namespace:

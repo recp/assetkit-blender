@@ -21,8 +21,9 @@ import bpy
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+PYTHON_ROOT = REPO_ROOT / "src"
+if str(PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(PYTHON_ROOT))
 
 from assetkit_blender.enums import AK_FILE_TYPE_PLY  # noqa: E402
 from assetkit_blender.exp.exporter import export_scene  # noqa: E402

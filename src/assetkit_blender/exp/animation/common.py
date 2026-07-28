@@ -39,3 +39,30 @@ def animation_channels_with_clip(channels: tuple | list, action: bpy.types.Actio
         for channel in channels
         if (wrapped := animation_channel_with_clip(channel, action)) is not None
     )
+
+
+def _iter_action_fcurves(action: bpy.types.Action, slot=None):
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is not None and len(fcurves) > 0:
+        yield from fcurves
+        return
+
+    action_slots = tuple(getattr(action, "slots", []) or ())
+    if slot is not None:
+        slots = (slot,)
+    elif len(action_slots) == 1:
+        slots = action_slots
+    else:
+        return
+    if not slots:
+        return
+
+    for layer in getattr(action, "layers", []) or []:
+        for strip in getattr(layer, "strips", []) or []:
+            for current_slot in slots:
+                try:
+                    channelbag = strip.channelbag(current_slot)
+                except Exception:
+                    channelbag = None
+                if channelbag is not None:
+                    yield from getattr(channelbag, "fcurves", []) or []

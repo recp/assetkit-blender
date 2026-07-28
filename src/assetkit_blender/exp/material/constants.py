@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+_AK_WRAP_REPEAT = 1
+_AK_WRAP_MIRROR = 2
+_AK_WRAP_CLAMP = 3
+_AK_MINFILTER_LINEAR_MIPMAP_LINEAR = 3
+_AK_MINFILTER_NEAREST_MIPMAP_NEAREST = 4
+_AK_MAGFILTER_LINEAR = 0
+_AK_MAGFILTER_NEAREST = 1
+
+_FEATURE_CLEARCOAT = 1
+_FEATURE_SPECULAR = 2
+_FEATURE_SPECULAR_GLOSSINESS = 3
+_FEATURE_TRANSMISSION = 4
+_FEATURE_SHEEN = 5
+_FEATURE_IRIDESCENCE = 6
+_FEATURE_VOLUME = 7
+_FEATURE_ANISOTROPY = 8
+_FEATURE_DISPERSION = 9
+_FEATURE_DIFFUSE_TRANSMISSION = 10
+_FEATURE_SUBSURFACE = 11
+_FEATURE_IOR = 100
+
+_MATERIAL_TYPE_UNLIT = 4
+_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS = 6
+_ANIM_TEXTURE_TRANSFORM_BASE = 1000
+_ANIM_TEXTURE_TRANSFORM_STRIDE = 4
+_ANIM_TEXTURE_TRANSFORM_OFFSET = 0
+_ANIM_TEXTURE_TRANSFORM_SCALE = 1
+_ANIM_TEXTURE_TRANSFORM_ROTATION = 2
+_ANIM_TEXTURE_TRANSFORM_ROLES = (
+    "base_color",
+    "metallic_roughness",
+    "occlusion",
+    "normal",
+    "emissive",
+    "transparent",
+    "specular",
+    "specular_color",
+    "clearcoat",
+    "clearcoat_roughness",
+    "clearcoat_normal",
+    "transmission",
+    "sheen_color",
+    "sheen_roughness",
+    "iridescence",
+    "iridescence_thickness",
+    "volume_thickness",
+    "anisotropy",
+    "diffuse_transmission",
+    "diffuse_transmission_color",
+)
