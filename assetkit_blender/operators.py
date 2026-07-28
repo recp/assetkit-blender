@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from array import array
 
 import bpy
 from bpy_extras.io_utils import ImportHelper
 
-from .assetkit import AssetKitError
+from .assetkit import AssetKitError, probe_file_type
+from .enums import AK_FILE_TYPE_COLLADA
 from .load_options import LoadOptions, make_load_options
 from .importer import import_assetkit_file, import_assetkit_file_progressive
 
@@ -189,10 +189,14 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         focus_camera = context.scene.camera if scene_was_empty else None
 
         if not bpy.app.background:
-            extension = os.path.splitext(self.filepath)[1].lower()
+            auto_file_type = (
+                probe_file_type(self.filepath)
+                if self.build_mode == "AUTO"
+                else 0
+            )
             use_blocking = self.build_mode == "BLOCKING" or (
                 self.build_mode == "AUTO"
-                and extension in {".dae", ".zae", ".kmz"}
+                and auto_file_type == AK_FILE_TYPE_COLLADA
             )
             if use_blocking:
                 _schedule_blocking_import(

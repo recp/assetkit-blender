@@ -38,6 +38,32 @@
 #include "imp/import.inc"
 #include "exp/export.inc"
 
+static PyObject *
+akb_probe_file_type(PyObject *self, PyObject *args) {
+  const char *filepath;
+  AkFileType  file_type;
+  AkResult    result;
+
+  (void)self;
+
+  if (!PyArg_ParseTuple(args, "s", &filepath))
+    return NULL;
+
+  file_type = AK_FILE_TYPE_AUTO;
+  Py_BEGIN_ALLOW_THREADS
+  result = ak_probeFileType(filepath, &file_type);
+  Py_END_ALLOW_THREADS
+
+  if (result != AK_OK) {
+    PyErr_Format(PyExc_RuntimeError,
+                 "AssetKit could not identify the package root format: result=%d",
+                 result);
+    return NULL;
+  }
+
+  return PyLong_FromLong((long)file_type);
+}
+
 #if ASSETKIT_BLENDER_STATIC_ASSETKIT
 void ak__init(void);
 void ak__cleanup(void);
@@ -51,6 +77,7 @@ akb_assetkit_cleanup(void) {
 #endif
 
 static PyMethodDef akb_methods[] = {
+  {"probe_file_type", akb_probe_file_type, METH_VARARGS, "Identify an asset or package root format without loading it."},
   {"load_meshes", akb_load_meshes, METH_VARARGS, "Load mesh buffers through AssetKit."},
   {"open_scene", akb_open_scene, METH_VARARGS, "Open an AssetKit scene for batched mesh reads."},
   {"read_mesh_batch", akb_read_mesh_batch, METH_VARARGS, "Read a batch of mesh buffers from an open AssetKit scene."},

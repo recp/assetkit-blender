@@ -26,6 +26,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from assetkit_blender import importer as assetkit_importer  # noqa: E402
+from assetkit_blender.assetkit import probe_file_type  # noqa: E402
+from assetkit_blender.enums import AK_FILE_TYPE_COLLADA  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 
@@ -70,7 +72,8 @@ class InteractiveProfile:
         options = make_load_options(texture_loading=self.args.texture_loading)
         self.started_at = time.perf_counter()
         use_blocking = self.args.build_mode == "BLOCKING" or (
-            self.args.build_mode == "AUTO" and self.path.suffix.lower() == ".dae"
+            self.args.build_mode == "AUTO"
+            and probe_file_type(self.path) == AK_FILE_TYPE_COLLADA
         )
         if use_blocking:
             try:

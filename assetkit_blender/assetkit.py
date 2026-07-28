@@ -549,6 +549,28 @@ def warmup_native_module() -> None:
     _native_module()
 
 
+def probe_file_type(filepath: str | os.PathLike[str]) -> int:
+    native = _native_module()
+    if native is not None and hasattr(native, "probe_file_type"):
+        try:
+            return int(native.probe_file_type(os.fspath(filepath)))
+        except RuntimeError:
+            pass
+
+    suffix = Path(filepath).suffix.lower()
+    return {
+        ".dae": AK_FILE_TYPE_COLLADA,
+        ".zae": AK_FILE_TYPE_COLLADA,
+        ".kmz": AK_FILE_TYPE_COLLADA,
+        ".gltf": AK_FILE_TYPE_GLTF,
+        ".glb": AK_FILE_TYPE_GLB,
+        ".obj": AK_FILE_TYPE_WAVEFRONT,
+        ".stl": AK_FILE_TYPE_STL,
+        ".ply": AK_FILE_TYPE_PLY,
+        ".3mf": AK_FILE_TYPE_3MF,
+    }.get(suffix, AK_FILE_TYPE_AUTO)
+
+
 class AssetKit:
     def __init__(self, library_path: str | os.PathLike[str] | None = None):
         self.library_path = resolve_library_path(library_path)
