@@ -7,10 +7,9 @@ from array import array
 import bpy
 from bpy_extras.io_utils import ImportHelper
 
-from .assetkit import AssetKitError, probe_file_type
+from .bridge.runtime import AssetKitError, probe_file_type
 from .enums import AK_FILE_TYPE_COLLADA
 from .load_options import LoadOptions, make_load_options
-from .importer import import_assetkit_file, import_assetkit_file_progressive
 
 
 _INTERACTIVE_IMPORT_TIMER_DELAY = 0.001
@@ -180,6 +179,8 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     )
 
     def execute(self, context):
+        from .importer import import_assetkit_file
+
         addon = context.preferences.addons.get(__package__)
         assetkit_library = addon.preferences.assetkit_library if addon else ""
         load_options = self._load_options()
@@ -362,6 +363,8 @@ def _schedule_progressive_import(
         _show_import_error(exc)
 
     def _run() -> None:
+        from .importer import import_assetkit_file_progressive
+
         _set_status("AssetKit importing...")
         import_assetkit_file_progressive(
             filepath,
@@ -405,6 +408,8 @@ def _schedule_blocking_import(
     _set_status("AssetKit import scheduled")
 
     def _run() -> None:
+        from .importer import import_assetkit_file
+
         _set_status("AssetKit importing...")
         try:
             objects = import_assetkit_file(

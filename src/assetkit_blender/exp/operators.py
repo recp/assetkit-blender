@@ -5,7 +5,7 @@ import os
 import bpy
 from bpy_extras.io_utils import ExportHelper
 
-from ..assetkit import AssetKitError
+from ..bridge.runtime import AssetKitError
 from ..enums import (
     AK_DAE_EXPORT_INDEX_AUTO,
     AK_DAE_EXPORT_INDEX_MULTI,
@@ -17,7 +17,7 @@ from ..enums import (
     AK_GLTF_EXPORT_VERSION_AUTO,
 )
 from ..load_options import _coord_conversion_id, _coord_system_id
-from .exporter import EXPORT_FORMATS, export_scene, file_type_from_format, suffix_from_format
+from .common import EXPORT_FORMATS, file_type_from_format, suffix_from_format
 
 _DAE_VERSION_VALUES = {
     "AUTO": AK_DAE_EXPORT_VERSION_AUTO,
@@ -672,6 +672,8 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         return changed
 
     def execute(self, context):
+        from .core import export_scene
+
         file_type = file_type_from_format(self.export_format)
         coord_conversion = self.coordinate_conversion
         coord_system = self.coordinate_system
