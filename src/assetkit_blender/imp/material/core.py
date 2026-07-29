@@ -999,6 +999,7 @@ def _can_defer_base_color_texture_material(
 ) -> bool:
     return (
         _textures.ACTIVE_LOAD_MODE == "DEFERRED"
+        and abs(float(data.ior) - 1.5) <= 1.0e-6
         and _can_use_base_color_texture_fast_material(data, color_attr, base_color)
     )
 
@@ -1057,6 +1058,7 @@ def _configure_base_color_texture_fast_material(
         socket = bsdf_inputs.get("Roughness")
         if socket:
             socket.default_value = data.roughness
+    _apply_material_ior(mat, bsdf, data)
 
     colorspace = _texture_color_space(tex_info, "sRGB")
     path = data.base_color_texture
@@ -1108,6 +1110,7 @@ def _configure_plain_base_color_texture_fast_material(
         socket = bsdf_inputs.get("Roughness")
         if socket:
             socket.default_value = data.roughness
+    _apply_material_ior(mat, bsdf, data)
 
     path = data.base_color_texture
     image = _cached_texture_image(path, "sRGB") if _should_defer_texture_image(path) else _load_texture_image(path, "sRGB")
@@ -1174,6 +1177,7 @@ def _copy_base_color_texture_template_material(
         _set_input(bsdf, "Metallic", data.metallic)
         _set_input(bsdf, "Roughness", data.roughness)
         _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _pbr_specular_level(data))
+        _apply_material_ior(mat, bsdf, data)
     else:
         _set_material_scalar(mat, "metallic", data.metallic)
         _set_material_scalar(mat, "roughness", data.roughness)
@@ -1234,6 +1238,7 @@ def _copy_base_color_texture_empty_template_material(
     specular_level = _pbr_specular_level(data)
     if abs(float(specular_level) - 0.5) > 1e-6:
         _set_first_input(bsdf, ("Specular IOR Level", "Specular"), specular_level)
+    _apply_material_ior(mat, bsdf, data)
 
     tex_info = _texture_info(data, "base_color")
     tex = _new_fast_image_texture_node(
@@ -1814,6 +1819,9 @@ def _configure_simple_material(
     if _has_nondefault_assetkit_material_props(data):
         _set_assetkit_material_props(mat, data)
     _set_assetkit_json_prop(mat, "assetkit_material_extra_json", _material_extra_for_custom_prop(data))
+    nondefault_ior = abs(float(data.ior) - 1.5) > 1.0e-6
+    if nondefault_ior:
+        mat.use_nodes = True
     if not getattr(mat, "use_nodes", False):
         _set_material_scalar(mat, "metallic", data.metallic)
         _set_material_scalar(mat, "roughness", data.roughness)
@@ -1830,6 +1838,7 @@ def _configure_simple_material(
     specular_level = _pbr_specular_level(data)
     if abs(float(specular_level) - 0.5) > 1e-6:
         _set_first_input(bsdf, ("Specular IOR Level", "Specular"), specular_level)
+    _apply_material_ior(mat, bsdf, data)
     alpha_socket = bsdf.inputs.get("Alpha") if abs(float(data.opacity) - 1.0) > 1e-6 else None
     if alpha_socket is not None:
         try:
@@ -1861,6 +1870,7 @@ def _has_nondefault_assetkit_material_props(data: MeshPrimitiveData) -> bool:
     return (
         float(data.volume_thickness) > 0.0
         or float(data.dispersion) != 0.0
+        or abs(float(data.ior) - 1.5) > 1.0e-6
         or bool(data.transparent_inverted)
         or abs(float(data.opacity) - 1.0) > 1.0e-6
         or not _tuple_close(data.transparent_color, (1.0, 1.0, 1.0, 1.0))
@@ -1992,6 +2002,19 @@ def _material_ior(data: MeshPrimitiveData) -> float:
     if _is_specular_glossiness_material(data):
         return 1000.0
     return data.ior
+
+
+def _apply_material_ior(
+    mat: bpy.types.Material,
+    bsdf,
+    data: MeshPrimitiveData,
+) -> None:
+    ior = float(_material_ior(data))
+    _set_first_input(bsdf, ("IOR",), ior)
+    if abs(ior - 1.5) > 1.0e-6:
+        mat["assetkit_ior"] = ior
+    elif "assetkit_ior" in mat:
+        del mat["assetkit_ior"]
 
 
 def _is_double_sided_material(data: MeshPrimitiveData) -> bool:

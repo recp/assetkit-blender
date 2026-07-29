@@ -24,6 +24,8 @@ if str(PYTHON_ROOT) not in sys.path:
 
 from assetkit_blender.enums import AK_FILE_TYPE_GLTF  # noqa: E402
 from assetkit_blender.exp.exporter import export_scene  # noqa: E402
+from assetkit_blender.importer import import_assetkit_file  # noqa: E402
+from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 
 def reset_scene() -> None:
@@ -40,6 +42,7 @@ def make_material() -> bpy.types.Material:
 
     bsdf.inputs["Metallic"].default_value = 0.25
     bsdf.inputs["Roughness"].default_value = 0.55
+    bsdf.inputs["IOR"].default_value = 1.0
 
     image = bpy.data.images.new("TinyBaseColor", width=2, height=2)
     image.pixels.foreach_set(
@@ -148,6 +151,39 @@ def assert_no_light_payload(data: dict) -> None:
             raise AssertionError("light node payload was exported while export_lights=False")
 
 
+def assert_ior_roundtrip(path: Path, texture_loading: str) -> None:
+    reset_scene()
+    imported = import_assetkit_file(
+        str(path),
+        load_options=make_load_options(texture_loading=texture_loading),
+        collection=bpy.context.collection,
+        focus_mode="NEVER",
+        placement_mode="AS_AUTHORED",
+        scene_was_empty=True,
+        select_imported=False,
+        set_viewport_shading=False,
+        clean_viewport_overlays=False,
+    )
+    if not imported:
+        raise AssertionError(f"IOR round-trip import returned no objects in {texture_loading} mode")
+
+    materials = [
+        material
+        for material in bpy.data.materials
+        if not bool(material.get("assetkit_internal_template", False))
+    ]
+    if len(materials) != 1:
+        raise AssertionError(f"IOR round-trip produced {len(materials)} materials in {texture_loading} mode")
+
+    material = materials[0]
+    bsdf = material.node_tree.nodes.get("Principled BSDF") if material.node_tree else None
+    socket = bsdf.inputs.get("IOR") if bsdf else None
+    if socket is None or abs(float(socket.default_value) - 1.0) > 1.0e-6:
+        raise AssertionError(f"IOR socket changed in {texture_loading} mode")
+    if abs(float(material.get("assetkit_ior", 1.5)) - 1.0) > 1.0e-6:
+        raise AssertionError(f"assetkit_ior changed in {texture_loading} mode")
+
+
 def run_checks(out_root: Path) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -161,6 +197,11 @@ def run_checks(out_root: Path) -> None:
         raise AssertionError("default export did not write image textures")
     if not data.get("animations"):
         raise AssertionError("default export did not write transform animations")
+    ior = data["materials"][0].get("extensions", {}).get("KHR_materials_ior", {}).get("ior")
+    if ior != 1.0:
+        raise AssertionError(f"default export changed IOR: {ior!r}")
+    for texture_loading in ("IMMEDIATE", "DEFERRED"):
+        assert_ior_roundtrip(out_root / "default.gltf", texture_loading)
 
     data = export_case(out_root, "no_scene_payloads", export_cameras=False, export_lights=False)
     if data.get("cameras"):

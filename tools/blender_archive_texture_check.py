@@ -25,6 +25,8 @@ if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
 from assetkit_blender import importer  # noqa: E402
+from assetkit_blender.imp import textures  # noqa: E402
+from assetkit_blender.imp.material import core as materials  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 
@@ -213,17 +215,17 @@ def _clear_scene_data() -> None:
 def _finish_deferred_textures() -> None:
     deadline = time.monotonic() + 5.0
     while (
-        importer._DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
-        or importer._DEFERRED_TEXTURE_TIMER_ACTIVE
+        materials._DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
+        or textures._DEFERRED_TEXTURE_TIMER_ACTIVE
     ) and time.monotonic() < deadline:
-        if importer._DEFERRED_MATERIAL_NODE_TIMER_ACTIVE:
-            importer._deferred_material_node_timer()
-        if importer._DEFERRED_TEXTURE_TIMER_ACTIVE:
-            importer._deferred_texture_timer()
+        if materials._DEFERRED_MATERIAL_NODE_TIMER_ACTIVE:
+            materials._deferred_material_node_timer()
+        if textures._DEFERRED_TEXTURE_TIMER_ACTIVE:
+            textures._deferred_texture_timer()
         time.sleep(0.001)
     if (
-        importer._DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
-        or importer._DEFERRED_TEXTURE_TIMER_ACTIVE
+        materials._DEFERRED_MATERIAL_NODE_TIMER_ACTIVE
+        or textures._DEFERRED_TEXTURE_TIMER_ACTIVE
     ):
         raise AssertionError("deferred archive texture load did not settle")
 

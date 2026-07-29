@@ -820,7 +820,10 @@ def _assign_grouped_object_materials(
     line_material_slot = len(primitives)
     slot = obj.material_slots[line_material_slot]
     slot.link = "OBJECT"
-    slot.material = _material_for_data(line_primitive, material_cache)
+    line_material = _material_for_data(line_primitive, material_cache)
+    slot.material = line_material
+    if line_material is None:
+        line_material_slot = -1
     obj["assetkit_mixed_line_material_slot"] = line_material_slot
     obj["assetkit_mixed_line_mode"] = int(line_primitive.primitive_mode)
     obj["assetkit_mixed_line_edge_count"] = edge_count

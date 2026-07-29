@@ -19,23 +19,23 @@ PYTHON_ROOT = ROOT / "src"
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
-from assetkit_blender import importer  # noqa: E402
+from assetkit_blender.imp import textures  # noqa: E402
 
 
 def main() -> None:
     dds = bpy.data.images.new("AssetKit DDS alpha check", width=1, height=1, alpha=True)
     dds.alpha_mode = "STRAIGHT"
-    importer._register_texture_image(dds, "/tmp/assetkit-alpha-check.dds", "sRGB")
+    textures._register_texture_image(dds, "/tmp/assetkit-alpha-check.dds", "sRGB")
     if dds.alpha_mode != "CHANNEL_PACKED":
         raise AssertionError(f"DDS alpha mode is {dds.alpha_mode!r}, expected 'CHANNEL_PACKED'")
 
     png = bpy.data.images.new("AssetKit PNG alpha check", width=1, height=1, alpha=True)
     png.alpha_mode = "STRAIGHT"
-    importer._register_texture_image(png, "/tmp/assetkit-alpha-check.png", "sRGB")
+    textures._register_texture_image(png, "/tmp/assetkit-alpha-check.png", "sRGB")
     if png.alpha_mode != "STRAIGHT":
         raise AssertionError(f"non-DDS alpha mode changed to {png.alpha_mode!r}")
 
-    cached = importer._cached_texture_image("/tmp/assetkit-alpha-check.dds", "sRGB")
+    cached = textures._cached_texture_image("/tmp/assetkit-alpha-check.dds", "sRGB")
     if cached is not dds or cached.alpha_mode != "CHANNEL_PACKED":
         raise AssertionError("cached DDS image did not preserve channel-packed alpha")
 
