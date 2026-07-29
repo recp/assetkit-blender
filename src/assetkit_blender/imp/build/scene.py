@@ -26,13 +26,14 @@ from ..objects import (
 from ..skin import (
     _SKIN_CACHE_DEFER_BIND_SKINS,
     _apply_bone_animations,
-    _match_object_space,
+    _match_skin_armature_space,
     _parent_skinned_mesh_to_armature,
     _set_bone_from_rest_matrix,
-    _skin_armature_source,
     _skin_bone_length,
     _skin_bone_node_indices,
     _skin_rest_matrices_from_assetkit_nodes,
+    _remove_temporary_view_layer_link,
+    _temporary_view_layer_link,
 )
 from .common import (
     _blender_natural_name_key,
@@ -722,19 +723,19 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
         armature_data = bpy.data.armatures.new(f"{first_obj.name}_Armature")
         armature = bpy.data.objects.new(f"{first_obj.name}_Armature", armature_data)
         collection.objects.link(armature)
-        armature_source = _skin_armature_source(
+        _match_skin_armature_space(
+            armature,
             first_data,
             first_joint_nodes,
             first_node_objects,
             first_node_data,
-        ) or first_obj
-        _match_object_space(armature, armature_source)
+            first_obj,
+        )
         bone_node_indices = _bind_pose_group_bone_node_indices(items)
         records.append({
             "items": items,
             "armature": armature,
             "armature_data": armature_data,
-            "armature_source": armature_source,
             "node_data": first_node_data,
             "bone_node_indices": bone_node_indices,
             "bone_names_by_node": _bind_pose_group_bone_names(items),
@@ -743,6 +744,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
                 first_node_data,
                 bone_node_indices,
             ),
+            "temporary_view_collection": _temporary_view_layer_link(armature),
         })
     create_ms = lap_ms()
 
@@ -829,7 +831,23 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
 
     for record in records:
         armature = record["armature"]
-        _match_object_space(armature, record["armature_source"])
+        (
+            first_obj,
+            first_data,
+            _first_joint_names,
+            first_joint_nodes,
+            first_node_objects,
+            first_node_data,
+            *_first_rest,
+        ) = record["items"][0]
+        _match_skin_armature_space(
+            armature,
+            first_data,
+            first_joint_nodes,
+            first_node_objects,
+            first_node_data,
+            first_obj,
+        )
         _keep_helper_object_visible(armature)
         _hide_bind_pose_skin_helpers(record["items"])
     hide_ms = lap_ms()
@@ -844,7 +862,12 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
     bind_ms = lap_ms()
 
     for record in records:
-        record["armature"].select_set(False)
+        armature = record["armature"]
+        armature.select_set(False)
+        _remove_temporary_view_layer_link(
+            armature,
+            record["temporary_view_collection"],
+        )
     for obj in previous_selection:
         obj.select_set(True)
     bpy.context.view_layer.objects.active = previous_active

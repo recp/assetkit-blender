@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -28,7 +29,10 @@ for search_path in (PYTHON_ROOT, TOOLS_DIR):
 
 from assetkit_blender.enums import AK_FILE_TYPE_DAE  # noqa: E402
 from assetkit_blender.exp.exporter import export_scene  # noqa: E402
-from assetkit_blender.importer import import_assetkit_file  # noqa: E402
+from assetkit_blender.importer import (  # noqa: E402
+    import_assetkit_file,
+    import_assetkit_file_progressive,
+)
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 
@@ -138,6 +142,43 @@ def import_asset(path: Path, *, scene_was_empty: bool) -> list[bpy.types.Object]
     )
 
 
+def import_asset_progressive(path: Path) -> list[bpy.types.Object]:
+    completed: list[list[bpy.types.Object]] = []
+    errors: list[Exception]                 = []
+
+    job = import_assetkit_file_progressive(
+        os.fspath(path),
+        "",
+        make_load_options(texture_loading="IMMEDIATE"),
+        collection=bpy.context.collection,
+        focus_mode="NEVER",
+        scene_was_empty=True,
+        set_viewport_shading=False,
+        fit_timeline=True,
+        on_complete=completed.append,
+        on_error=errors.append,
+    )
+
+    try:
+        if bpy.app.timers.is_registered(job._timer):
+            bpy.app.timers.unregister(job._timer)
+    except ValueError:
+        pass
+
+    deadline = time.monotonic() + 30.0
+    while not job.done and time.monotonic() < deadline:
+        job._timer()
+        time.sleep(0.001)
+
+    if not job.done:
+        raise AssertionError(f"{path.stem}: progressive import timed out")
+    if errors:
+        raise errors[0]
+    if not completed:
+        raise AssertionError(f"{path.stem}: progressive import did not complete")
+    return completed[0]
+
+
 def export_dae(path: Path, *, animation_timing: str = "CLIP") -> None:
     result = export_scene(
         bpy.context,
@@ -245,6 +286,7 @@ def assert_export_normalized_clip_start(summary: dict, source_offset: float) -> 
 
 
 def scene_animation_summary(label: str) -> dict:
+    bpy.context.view_layer.update()
     actions = [action for action in bpy.data.actions if any(True for _ in iter_action_fcurves(action))]
     linked = linked_actions()
     action_rows = [action_summary(action) for action in actions]
@@ -271,7 +313,68 @@ def scene_animation_summary(label: str) -> dict:
         "fcurve_count": sum(row["fcurves"] for row in action_rows),
         "channel_count": sum(row["channels"] for row in action_rows),
         "unlinked_actions": unlinked,
+        "skin_transforms": skinned_object_transforms(),
     }
+
+
+def skinned_object_transforms() -> list[dict]:
+    objects = [
+        obj
+        for obj in bpy.context.scene.objects
+        if getattr(obj, "type", None) == "ARMATURE"
+        or (
+            getattr(obj, "type", None) == "MESH"
+            and any(
+                getattr(mod, "type", None) == "ARMATURE"
+                and getattr(mod, "object", None) is not None
+                for mod in getattr(obj, "modifiers", []) or []
+            )
+        )
+    ]
+    objects.sort(key=lambda obj: (obj.type, obj.name))
+    return [
+        {
+            "type": obj.type,
+            "name": obj.name,
+            "matrix_world": [
+                float(value)
+                for row in obj.matrix_world
+                for value in row
+            ],
+        }
+        for obj in objects
+    ]
+
+
+def assert_skin_transforms_match(
+    progressive: dict,
+    blocking: dict,
+    *,
+    epsilon: float = 1.0e-6,
+) -> None:
+    progressive_rows = progressive["skin_transforms"]
+    blocking_rows = blocking["skin_transforms"]
+    progressive_keys = [(row["type"], row["name"]) for row in progressive_rows]
+    blocking_keys = [(row["type"], row["name"]) for row in blocking_rows]
+    if progressive_keys != blocking_keys:
+        raise AssertionError(
+            "progressive and blocking skin objects differ: "
+            f"progressive={progressive_keys}, blocking={blocking_keys}"
+        )
+
+    for progressive_row, blocking_row in zip(progressive_rows, blocking_rows):
+        delta = max(
+            abs(progressive_value - blocking_value)
+            for progressive_value, blocking_value in zip(
+                progressive_row["matrix_world"],
+                blocking_row["matrix_world"],
+            )
+        )
+        if delta > epsilon:
+            raise AssertionError(
+                f"{progressive_row['name']}: progressive/blocking transform "
+                f"delta {delta:.9g} exceeds {epsilon:.9g}"
+            )
 
 
 def assert_animation_summary(summary: dict, *, require_skin: bool = False) -> None:
@@ -297,10 +400,19 @@ def roundtrip_asset(source_path: Path, out_dir: Path) -> dict:
     dae_path = out_dir / f"{stem}.dae"
     require_skin = stem in SKINNED_ASSETS
 
+    progressive_summary = None
+    if require_skin:
+        reset_scene()
+        import_asset_progressive(source_path)
+        progressive_summary = scene_animation_summary(f"{stem}:gltf-progressive")
+        assert_animation_summary(progressive_summary, require_skin=True)
+
     reset_scene()
     import_asset(source_path, scene_was_empty=True)
     imported_summary = scene_animation_summary(f"{stem}:gltf")
     assert_animation_summary(imported_summary, require_skin=require_skin)
+    if progressive_summary is not None:
+        assert_skin_transforms_match(progressive_summary, imported_summary)
     offset_linked_action_keyframes(120.0)
     export_dae(dae_path)
 
@@ -314,6 +426,7 @@ def roundtrip_asset(source_path: Path, out_dir: Path) -> dict:
         "asset": stem,
         "source": os.fspath(source_path),
         "dae": os.fspath(dae_path),
+        "progressive": progressive_summary,
         "imported": imported_summary,
         "reimported": reimported_summary,
     }

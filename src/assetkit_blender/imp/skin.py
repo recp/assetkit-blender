@@ -54,6 +54,31 @@ from .objects import _hide_empty_helper_object, _keep_helper_object_visible
 _SKIN_CACHE_DEFER_BIND_SKINS = object()
 
 
+def _temporary_view_layer_link(
+    obj: bpy.types.Object,
+) -> bpy.types.Collection | None:
+    if obj.name in bpy.context.view_layer.objects:
+        return None
+
+    layer_collection = bpy.context.view_layer.active_layer_collection
+    collection       = bpy.context.collection
+    if layer_collection is not None:
+        collection = layer_collection.collection
+    if collection.objects.get(obj.name) is not None:
+        return None
+
+    collection.objects.link(obj)
+    return collection
+
+
+def _remove_temporary_view_layer_link(
+    obj: bpy.types.Object,
+    collection: bpy.types.Collection | None,
+) -> None:
+    if collection is not None and collection.objects.get(obj.name) is not None:
+        collection.objects.unlink(obj)
+
+
 def _apply_skin(
     obj: bpy.types.Object,
     data: MeshPrimitiveData,
@@ -382,9 +407,20 @@ def _create_skin_armature(
     armature_data = bpy.data.armatures.new(f"{obj.name}_Armature")
     armature = bpy.data.objects.new(f"{obj.name}_Armature", armature_data)
     collection.objects.link(armature)
-    armature_source = _skin_armature_source(data, joint_nodes, node_objects, node_data) or obj
-    _match_object_space(armature, armature_source)
+    _match_skin_armature_space(
+        armature,
+        data,
+        joint_nodes,
+        node_objects,
+        node_data,
+        obj,
+    )
     create_ms = lap_ms()
+
+    # Progressive imports build in an unpublished staging collection. Blender
+    # requires an armature in the active ViewLayer before entering Edit Mode,
+    # so expose only this object until bone creation is complete.
+    temporary_view_collection = _temporary_view_layer_link(armature)
 
     previous_active = bpy.context.view_layer.objects.active
     previous_selection = list(bpy.context.selected_objects)
@@ -460,15 +496,20 @@ def _create_skin_armature(
             elif deferred_skin_animations is not None:
                 deferred_skin_animations.append((armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, False))
     animation_ms = lap_ms()
-    if _skin_uses_bind_pose_armature(data):
-        _match_object_space(armature, armature_source)
-    else:
-        _match_object_space(armature, armature_source)
+    _match_skin_armature_space(
+        armature,
+        data,
+        joint_nodes,
+        node_objects,
+        node_data,
+        obj,
+    )
     _keep_helper_object_visible(armature)
 
     if armature not in previous_selection:
         armature.select_set(False)
     bpy.context.view_layer.objects.active = previous_active
+    _remove_temporary_view_layer_link(armature, temporary_view_collection)
     cleanup_ms = lap_ms()
     if profile_detail:
         _profile_log(
@@ -499,25 +540,44 @@ def _skin_uses_bind_pose_armature(data: MeshPrimitiveData) -> bool:
     return bool(data.skin_mesh_in_bind_pose)
 
 
-def _skin_armature_source(
+def _skin_armature_source_index(
     data: MeshPrimitiveData,
     joint_nodes: memoryview,
-    node_objects: dict[int, bpy.types.Object],
     node_data: dict[int, SceneNodeData],
-) -> bpy.types.Object | None:
+) -> int:
     root_index = int(data.skin_root_node_index)
-    if root_index >= 0 and root_index in node_objects:
-        return node_objects[root_index]
+    if root_index >= 0:
+        return root_index
 
     if len(joint_nodes) == 0:
-        return None
+        return -1
 
     first_index = int(joint_nodes[0])
     first_node = node_data.get(first_index)
     parent_index = first_node.parent_index if first_node else -1
-    if parent_index >= 0 and parent_index in node_objects:
-        return node_objects[parent_index]
-    return node_objects.get(first_index)
+    return parent_index if parent_index >= 0 else first_index
+
+
+def _match_skin_armature_space(
+    target: bpy.types.Object,
+    data: MeshPrimitiveData,
+    joint_nodes: memoryview,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+    fallback: bpy.types.Object,
+) -> None:
+    source_index = _skin_armature_source_index(data, joint_nodes, node_data)
+    source = node_objects.get(source_index) or fallback
+    source_data = node_data.get(source_index)
+    local_matrix = _matrix_from_buffer(source_data.matrix_f32) if source_data else None
+
+    target.parent = source.parent
+    target.matrix_parent_inverse.identity()
+    if local_matrix is not None:
+        target.matrix_local = local_matrix
+        return
+
+    _match_object_space(target, source)
 
 
 def _parent_skinned_mesh_to_armature(
