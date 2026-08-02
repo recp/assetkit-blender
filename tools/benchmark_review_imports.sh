@@ -135,7 +135,7 @@ def fmt_ms(value: float | None) -> str:
     return "" if value is None else f"{value:.1f} ms"
 
 lines = [
-    "| File | AssetKit native | AssetKit Blender | Blender | Blender / AssetKit Blender |",
+    "| File | AssetKit + native bridge | AssetKit Blender | Blender | Blender / AssetKit Blender |",
     "| --- | ---: | ---: | ---: | ---: |",
 ]
 for name in order:
@@ -147,7 +147,7 @@ for name in order:
 
 notes = [
     "Benchmarked locally on macOS with AssetKit shading mode set to AS_IS and texture loading set to IMMEDIATE.",
-    "AssetKit native measures backend loading/parsing only; AssetKit Blender measures blocking end-to-end import into Blender objects/materials.",
+    "AssetKit + native bridge measures backend loading/parsing and native bridge extraction; AssetKit Blender measures blocking end-to-end import into Blender objects/materials.",
     "DAE Blender builtin results are measured with Blender 4.5 LTS because Blender 5.x no longer includes the COLLADA importer.",
     "",
 ]

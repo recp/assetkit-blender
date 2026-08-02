@@ -37,7 +37,7 @@ Here are local benchmark results from an M1 Max MacBook Pro, measured with `tool
 DAE Blender builtin results are measured with Blender 4.5.10 LTS because Blender 5.x no longer includes the COLLADA importer. Other Blender builtin results are measured with Blender 5.2.0 LTS.
 
 
-| File | AssetKit native | AssetKit Blender | Blender | Blender / AssetKit Blender |
+| File | AssetKit + native bridge | AssetKit Blender | Blender | Blender / AssetKit Blender |
 | --- | ---: | ---: | ---: | ---: |
 | BrainStem.dae | 27.9 ms | 52.2 ms | 6294.3 ms | 120.50x |
 | Duck.dae | 0.7 ms | 1.6 ms | 5.8 ms | 3.58x |

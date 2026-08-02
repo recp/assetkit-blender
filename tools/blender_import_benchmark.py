@@ -506,7 +506,7 @@ def print_markdown(summaries: list[dict]) -> None:
         return
     has_native = any("native_median_ms" in row for row in comparisons)
     if has_native:
-        print("\n| File | AssetKit native | AssetKit Blender | Blender | Blender / AssetKit Blender |")
+        print("\n| File | AssetKit + native bridge | AssetKit Blender | Blender | Blender / AssetKit Blender |")
         print("| --- | ---: | ---: | ---: | ---: |")
     else:
         print("\n| File | AssetKit Blender | Blender | Blender / AssetKit Blender |")
