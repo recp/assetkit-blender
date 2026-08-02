@@ -18,6 +18,7 @@ from ...assetkit import (
     native_write_offset_i32,
 )
 from ...enums import (
+    AK_FILE_TYPE_COLLADA,
     AK_FILE_TYPE_WAVEFRONT,
     AK_PRIMITIVE_LINES,
     AK_PRIMITIVE_POINTS,
@@ -975,17 +976,21 @@ def _mesh_data_reuse_key(
         return None
     if primitive_type != AK_PRIMITIVE_LINES and primitive.point_attr_count:
         return None
+    file_type = int(getattr(primitive, "file_type", 0) or 0)
     geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
-    if geometry_key:
+    mesh_key = int(primitive.mesh_key or 0)
+    if file_type == AK_FILE_TYPE_COLLADA and geometry_key:
         # The bridge geometry key covers the exact mesh-buffer identity and
         # layout. DAE mesh_key identifies the per-node AkMesh wrapper, so it
         # intentionally differs for repeated references to one geometry.
         source_key = (0, geometry_key)
     else:
-        mesh_key = int(primitive.mesh_key or 0)
         if not mesh_key:
-            return None
-        source_key = (1, mesh_key, int(primitive.primitive_index))
+            if not geometry_key:
+                return None
+            source_key = (0, geometry_key)
+        else:
+            source_key = (1, mesh_key, int(primitive.primitive_index))
 
     return (
         source_key,

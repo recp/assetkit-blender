@@ -106,6 +106,22 @@ _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
 _S_LEGACY_FIELD_COUNT = _S_GEOMETRY_KEY + 1
 _S_FIELD_COUNT = _S_TEXTURE_INFOS + 1
 
+(
+    _ST_IMAGE_NAME,
+    _ST_SAMPLER_NAME,
+    _ST_COLOR_SPACE,
+    _ST_CHANNELS,
+    _ST_TEXCOORD,
+    _ST_COORD_INPUT_NAME,
+    _ST_WRAP_S,
+    _ST_WRAP_T,
+    _ST_WRAP_P,
+    _ST_MIN_FILTER,
+    _ST_MAG_FILTER,
+    _ST_MIP_FILTER,
+    _ST_TRANSFORM_SLOT,
+) = range(13)
+
 
 class NativeLoopFloatAttributeData:
     __slots__ = ("_raw",)
@@ -451,9 +467,14 @@ class NativeSimpleMeshData:
         cached = self._texture_infos
         if cached is not None:
             return cached
-        cached = _native_texture_infos_from_raw(
-            self._get(_S_TEXTURE_INFOS, {}) or {}
-        )
+        raw_infos = self._get(_S_TEXTURE_INFOS, {}) or {}
+        if isinstance(raw_infos, tuple):
+            cached = _native_simple_texture_info_from_raw(
+                self.base_color_texture,
+                raw_infos,
+            )
+        else:
+            cached = _native_texture_infos_from_raw(raw_infos)
         self._texture_infos = cached
         return cached
 
@@ -870,6 +891,44 @@ def _native_texture_infos_from_raw(
             sampler_extra=info.get("sampler_extra"),
         )
     return texture_infos
+
+
+def _native_simple_texture_info_from_raw(
+    path: str,
+    raw_info: tuple,
+) -> dict[str, TextureRefData]:
+    if not raw_info:
+        return {}
+    info = TextureRefData(
+        role="base_color",
+        path=path or "",
+        image_name=raw_info[_ST_IMAGE_NAME] or "",
+        sampler_name=raw_info[_ST_SAMPLER_NAME] or "",
+        color_space=raw_info[_ST_COLOR_SPACE] or "",
+        channels=raw_info[_ST_CHANNELS] or "",
+        texcoord=raw_info[_ST_TEXCOORD] or "",
+        coord_input_name=raw_info[_ST_COORD_INPUT_NAME] or "",
+        slot=0,
+        wrap_s=int(
+            raw_info[_ST_WRAP_S] if raw_info[_ST_WRAP_S] is not None else 1
+        ),
+        wrap_t=int(
+            raw_info[_ST_WRAP_T] if raw_info[_ST_WRAP_T] is not None else 1
+        ),
+        wrap_p=int(
+            raw_info[_ST_WRAP_P] if raw_info[_ST_WRAP_P] is not None else 1
+        ),
+        min_filter=int(raw_info[_ST_MIN_FILTER] or 0),
+        mag_filter=int(raw_info[_ST_MAG_FILTER] or 0),
+        mip_filter=int(raw_info[_ST_MIP_FILTER] or 0),
+        has_transform=False,
+        transform_slot=int(
+            raw_info[_ST_TRANSFORM_SLOT]
+            if raw_info[_ST_TRANSFORM_SLOT] is not None
+            else -1
+        ),
+    )
+    return {"base_color": info}
 
 
 def meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveData]:

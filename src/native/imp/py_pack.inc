@@ -349,7 +349,25 @@ akb_scene_bounds_to_py(AkDoc *doc, const AkbLoadOptions *options) {
 }
 
 static int
-akb_set_scene_info(PyObject *out, AkDoc *doc, const AkbLoadOptions *options) {
+akb_scene_nodes_have_instances(const AkbSceneNodeList *nodes) {
+  size_t i;
+
+  if (!nodes)
+    return 0;
+
+  for (i = 0; i < nodes->count; i++) {
+    if (nodes->items[i].instance_target_index >= 0)
+      return 1;
+  }
+
+  return 0;
+}
+
+static int
+akb_set_scene_info(PyObject *out,
+                   AkDoc *doc,
+                   const AkbLoadOptions *options,
+                   const AkbSceneNodeList *nodes) {
   AkScene *scene;
 
   scene = akb_selected_scene(doc, options);
@@ -368,7 +386,9 @@ akb_set_scene_info(PyObject *out, AkDoc *doc, const AkbLoadOptions *options) {
                                   akb_scene_names_to_py(doc))
          && akb_py_dict_set_owned(out,
                                   "scene_bounds",
-                                  akb_scene_bounds_to_py(doc, options))
+                                  akb_scene_nodes_have_instances(nodes)
+                                    ? akb_scene_bounds_to_py(doc, options)
+                                    : akb_none())
          && akb_py_dict_set_owned(out,
                                   "scene_extra",
                                   akb_tree_to_py(scene ? ak_extra(scene) : NULL));
@@ -637,6 +657,71 @@ akb_texture_infos_to_py(AkbTextureInfo *infos, uint32_t count) {
 }
 
 static PyObject *
+akb_simple_base_color_texture_info_to_py(const AkbPrimitive *prim) {
+  enum {
+    AKB_SIMPLE_TEX_IMAGE_NAME = 0,
+    AKB_SIMPLE_TEX_SAMPLER_NAME,
+    AKB_SIMPLE_TEX_COLOR_SPACE,
+    AKB_SIMPLE_TEX_CHANNELS,
+    AKB_SIMPLE_TEX_TEXCOORD,
+    AKB_SIMPLE_TEX_COORD_INPUT_NAME,
+    AKB_SIMPLE_TEX_WRAP_S,
+    AKB_SIMPLE_TEX_WRAP_T,
+    AKB_SIMPLE_TEX_WRAP_P,
+    AKB_SIMPLE_TEX_MIN_FILTER,
+    AKB_SIMPLE_TEX_MAG_FILTER,
+    AKB_SIMPLE_TEX_MIP_FILTER,
+    AKB_SIMPLE_TEX_TRANSFORM_SLOT,
+    AKB_SIMPLE_TEX_FIELD_COUNT,
+  };
+  const AkbTextureInfo *info;
+  PyObject *tuple;
+  PyObject *value;
+
+  if (!prim || prim->texture_info_count == 0 || !prim->texture_infos)
+    return PyTuple_New(0);
+
+  info = &prim->texture_infos[0];
+  tuple = PyTuple_New(AKB_SIMPLE_TEX_FIELD_COUNT);
+  if (!tuple)
+    return NULL;
+
+#define AKB_SIMPLE_TEX_SET(INDEX, OBJ) do {               \
+    value = (OBJ);                                        \
+    if (!value) { Py_DECREF(tuple); return NULL; }        \
+    PyTuple_SET_ITEM(tuple, (INDEX), value);              \
+  } while (0)
+
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_IMAGE_NAME,
+                     akb_unicode_from_cstr(info->image_name));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_SAMPLER_NAME,
+                     akb_unicode_from_cstr(info->sampler_name));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_COLOR_SPACE,
+                     akb_unicode_from_cstr(info->color_space));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_CHANNELS,
+                     akb_unicode_from_cstr(info->channels));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_TEXCOORD,
+                     akb_unicode_from_cstr(info->texcoord));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_COORD_INPUT_NAME,
+                     akb_unicode_from_cstr(info->coord_input_name));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_WRAP_S, PyLong_FromLong(info->wrap_s));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_WRAP_T, PyLong_FromLong(info->wrap_t));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_WRAP_P, PyLong_FromLong(info->wrap_p));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_MIN_FILTER,
+                     PyLong_FromLong(info->min_filter));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_MAG_FILTER,
+                     PyLong_FromLong(info->mag_filter));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_MIP_FILTER,
+                     PyLong_FromLong(info->mip_filter));
+  AKB_SIMPLE_TEX_SET(AKB_SIMPLE_TEX_TRANSFORM_SLOT,
+                     PyLong_FromLong(info->transform_slot));
+
+#undef AKB_SIMPLE_TEX_SET
+
+  return tuple;
+}
+
+static PyObject *
 akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner);
 
 static int
@@ -901,8 +986,7 @@ akb_primitive_simple_to_py(AkbPrimitive *prim, PyObject *owner) {
                                                     prim->point_attr_count,
                                                     prim->vertex_count));
   AKB_SIMPLE_SET(AKB_PY_SIMPLE_TEXTURE_INFOS,
-                 akb_texture_infos_to_py(prim->texture_infos,
-                                         prim->texture_info_count));
+                 akb_simple_base_color_texture_info_to_py(prim));
 
 #undef AKB_SIMPLE_SET
 

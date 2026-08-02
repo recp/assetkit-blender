@@ -34,24 +34,24 @@ the generated platform zip files to the *GitHub Release* for that tag automatica
 
 Here are local benchmark results from an M1 Max MacBook Pro, measured with `tools/benchmark_review_imports.sh`.
 
-DAE Blender builtin results are measured with Blender 4.5.10 LTS because Blender 5.x no longer includes the COLLADA importer. Other Blender builtin results are measured with Blender 5.1.2.
+DAE Blender builtin results are measured with Blender 4.5.10 LTS because Blender 5.x no longer includes the COLLADA importer. Other Blender builtin results are measured with Blender 5.2.0 LTS.
 
 
-| File | AssetKit | AssetKit Blender Addon (+AssetKit) | Blender | Blender / AssetKit Blender |
+| File | AssetKit native | AssetKit Blender | Blender | Blender / AssetKit Blender |
 | --- | ---: | ---: | ---: | ---: |
-| BrainStem.dae | 33.0 ms | 60.7 ms | 6309.8 ms | 104.01x |
-| Duck.dae | 0.8 ms | 1.7 ms | 5.5 ms | 3.25x |
-| GearboxAssy.dae | 30.0 ms | 53.9 ms | 216.0 ms | 4.01x |
-| NodePerformanceTest.glb | 103.6 ms | 8912.2 ms | 185195.6 ms | 20.78x |
-| BoomBox.glb | 0.3 ms | 1.8 ms | 12.5 ms | 6.94x |
-| DamagedHelmet.glb | 0.3 ms | 2.5 ms | 29.6 ms | 11.79x |
-| WaterBottle.glb | 0.3 ms | 1.7 ms | 10.1 ms | 6.09x |
-| ABeautifulGame.glb | 11.4 ms | 63.8 ms | 773.9 ms | 12.12x |
-| AntiqueCamera.glb | 0.4 ms | 2.6 ms | 42.0 ms | 16.26x |
-| MosquitoInAmber.glb | 0.4 ms | 2.9 ms | 40.6 ms | 13.92x |
-| xyzrgb_dragon.obj | 17.3 ms | 22.6 ms | 55.6 ms | 2.46x |
-| dragon_vrip.ply | 26.1 ms | 46.9 ms | 166.9 ms | 3.56x |
-| 3DBenchy.stl | 3.5 ms | 7.4 ms | 28.7 ms | 3.86x |
+| BrainStem.dae | 27.9 ms | 52.2 ms | 6294.3 ms | 120.50x |
+| Duck.dae | 0.7 ms | 1.6 ms | 5.8 ms | 3.58x |
+| GearboxAssy.dae | 21.9 ms | 44.4 ms | 230.2 ms | 5.19x |
+| NodePerformanceTest.glb | 119.6 ms | 12080.7 ms | 216220.8 ms | 17.90x |
+| BoomBox.glb | 0.3 ms | 2.0 ms | 13.0 ms | 6.48x |
+| DamagedHelmet.glb | 0.3 ms | 2.3 ms | 29.9 ms | 13.05x |
+| WaterBottle.glb | 0.3 ms | 1.9 ms | 10.6 ms | 5.70x |
+| ABeautifulGame.glb | 12.0 ms | 46.3 ms | 828.7 ms | 17.89x |
+| AntiqueCamera.glb | 0.4 ms | 3.0 ms | 45.6 ms | 15.41x |
+| MosquitoInAmber.glb | 0.5 ms | 3.4 ms | 44.8 ms | 13.09x |
+| xyzrgb_dragon.obj | 17.8 ms | 23.6 ms | 61.1 ms | 2.59x |
+| dragon_vrip.ply | 26.3 ms | 47.5 ms | 122.3 ms | 2.58x |
+| 3DBenchy.stl | 3.5 ms | 8.6 ms | 31.5 ms | 3.67x |
 ...
 
 The script uses AssetKit shading mode `AS_IS` and texture loading `IMMEDIATE`.
@@ -67,7 +67,7 @@ The script downloads the benchmark assets into the ignored `benchmark-assets/` c
 
 By default it uses:
 
-- Blender 5.1.2 for glTF, OBJ, PLY, and STL comparisons
+- Blender 5.2.0 LTS for glTF, OBJ, PLY, and STL comparisons
 - Blender 4.5.10 LTS for DAE builtin COLLADA comparisons
 - AssetKit shading mode `AS_IS`
 - AssetKit texture loading `IMMEDIATE`

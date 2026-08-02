@@ -197,7 +197,7 @@ akb_load_meshes(PyObject *self, PyObject *args) {
   }
   Py_DECREF(item);
 
-  if (!akb_set_scene_info(out, doc, &options)) {
+  if (!akb_set_scene_info(out, doc, &options, &owner_import->nodes)) {
     Py_DECREF(node_list);
     Py_DECREF(mesh_list);
     Py_DECREF(out);
@@ -413,7 +413,7 @@ akb_open_scene(PyObject *self, PyObject *args) {
   }
   Py_DECREF(item);
 
-  if (!akb_set_scene_info(out, doc, &options)) {
+  if (!akb_set_scene_info(out, doc, &options, &owner_import->nodes)) {
     Py_DECREF(node_list);
     Py_DECREF(out);
     Py_DECREF(owner);
