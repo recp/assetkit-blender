@@ -25,7 +25,10 @@ _AK_ACTION_CLIP_NAME_PROP = "assetkit_animation_clip_name"
 _AK_ACTION_CLIP_EXPORT_NAME_PROP = "assetkit_animation_clip_export_name"
 _ACTION_CHANNELBAGS: dict[tuple[int, int], tuple[object, object]] = {}
 _ACTION_CHANNEL_GROUPS: dict[tuple[int, str], object] = {}
+_ACTION_FCURVES: dict[tuple[int, int, str, int], object] = {}
+_IMPORT_ACTION_POINTERS: set[int] = set()
 _IMPORT_SHARED_ACTIONS: dict[tuple[int, str, str], bpy.types.Action] = {}
+_CHANNEL_ACTION_CLIPS: dict[int, tuple[int, str]] = {}
 ACTION_FRAME_RANGES: dict[tuple[int, int], tuple[float, float]] = {}
 _KEYFRAME_ENUM_VALUES: dict[tuple[str, str], int] = {}
 _KEYFRAME_ENUM_ARRAYS: dict[tuple[int, int], array] = {}
@@ -164,7 +167,10 @@ def _channelbag_group(channelbag, group_name: str):
 def _reset_action_cache() -> None:
     _ACTION_CHANNELBAGS.clear()
     _ACTION_CHANNEL_GROUPS.clear()
+    _ACTION_FCURVES.clear()
+    _IMPORT_ACTION_POINTERS.clear()
     _IMPORT_SHARED_ACTIONS.clear()
+    _CHANNEL_ACTION_CLIPS.clear()
     ACTION_FRAME_RANGES.clear()
 
 
@@ -276,6 +282,7 @@ def _shared_animation_action(suffix: str, channel: dict | None) -> bpy.types.Act
 
 def _new_animation_action(name: str) -> bpy.types.Action:
     action = bpy.data.actions.new(name)
+    _IMPORT_ACTION_POINTERS.add(action.as_pointer())
     _ensure_action_layer_strip(action)
     return action
 
@@ -359,8 +366,7 @@ def _tag_animation_action_clip(action: bpy.types.Action | None, channel: dict | 
     if action is None or channel is None:
         return
 
-    clip_index = _channel_clip_index(channel)
-    clip_name = _safe_action_name(_channel_clip_name(channel))
+    clip_index, clip_name = _channel_action_clip(channel)
     display_name = clip_name or f"Animation_{clip_index}"
     scope = ACTIVE_SCOPE
     export_name = f"{scope}_{display_name}" if scope else display_name
@@ -391,9 +397,15 @@ def _shared_animation_action_name(suffix: str, channel: dict | None) -> str:
 
 
 def _channel_action_clip(channel: dict | None) -> tuple[int, str]:
+    cache_key = id(channel)
+    cached = _CHANNEL_ACTION_CLIPS.get(cache_key)
+    if cached is not None:
+        return cached
     clip_index = _channel_clip_index(channel)
     clip_name = _safe_action_name(_channel_clip_name(channel))
-    return clip_index, clip_name
+    result = (clip_index, clip_name)
+    _CHANNEL_ACTION_CLIPS[cache_key] = result
+    return result
 
 
 def _fcurve_write_key(
@@ -494,21 +506,43 @@ def _ensure_fcurve(
     index: int | None,
     group_name: str = "Transform",
 ):
+    action_pointer = action.as_pointer()
+    cache_key = (
+        action_pointer,
+        obj.as_pointer(),
+        data_path,
+        -1 if index is None else int(index),
+    )
+    import_owned = action_pointer in _IMPORT_ACTION_POINTERS
+    if import_owned:
+        cached = _ACTION_FCURVES.get(cache_key)
+        if cached is not None:
+            return cached
+
     slot, channelbag = _ensure_action_channelbag(action, obj)
     if channelbag is not None:
-        existing = _find_fcurve(channelbag.fcurves, data_path, index)
-        if existing is not None:
-            return existing
-        return _new_channelbag_fcurve(channelbag, data_path, index, group_name)
+        if not import_owned:
+            existing = _find_fcurve(channelbag.fcurves, data_path, index)
+            if existing is not None:
+                return existing
+        fcurve = _new_channelbag_fcurve(channelbag, data_path, index, group_name)
+        if import_owned:
+            _ACTION_FCURVES[cache_key] = fcurve
+        return fcurve
 
     fcurves = getattr(action, "fcurves", None)
     if fcurves is not None:
-        existing = _find_fcurve(fcurves, data_path, index)
-        if existing is not None:
-            return existing
+        if not import_owned:
+            existing = _find_fcurve(fcurves, data_path, index)
+            if existing is not None:
+                return existing
         if index is None:
-            return fcurves.new(data_path=data_path, action_group=group_name)
-        return fcurves.new(data_path=data_path, index=index, action_group=group_name)
+            fcurve = fcurves.new(data_path=data_path, action_group=group_name)
+        else:
+            fcurve = fcurves.new(data_path=data_path, index=index, action_group=group_name)
+        if import_owned:
+            _ACTION_FCURVES[cache_key] = fcurve
+        return fcurve
 
     ensure = getattr(action, "fcurve_ensure_for_datablock", None)
     if not ensure:
@@ -526,10 +560,14 @@ def _ensure_fcurve(
     else:
         fcurve = ensure(obj, data_path, index=index, group_name=group_name)
     if len(fcurve.keyframe_points) == 0:
+        if import_owned:
+            _ACTION_FCURVES[cache_key] = fcurve
         return fcurve
 
     channelbag = _channelbag_for_fcurve(action, fcurve)
     if not channelbag:
+        if import_owned:
+            _ACTION_FCURVES[cache_key] = fcurve
         return fcurve
     if index is None:
         existing = _find_fcurve(channelbag.fcurves, data_path, index)
@@ -541,6 +579,8 @@ def _ensure_fcurve(
         if existing is not None:
             return existing
         fcurve = _new_channelbag_fcurve(channelbag, data_path, index, group_name)
+    if import_owned:
+        _ACTION_FCURVES[cache_key] = fcurve
     return fcurve
 
 

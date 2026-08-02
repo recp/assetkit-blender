@@ -147,7 +147,14 @@ class NativeLoopFloatAttributeData:
 
 
 class NativeSimpleMeshData:
-    __slots__ = ("_raw", "_count", "_point_attrs", "_texture_infos", "_uv_sets")
+    __slots__ = (
+        "_raw",
+        "_count",
+        "_geometry_buffers",
+        "_point_attrs",
+        "_texture_infos",
+        "_uv_sets",
+    )
 
     vertices = _EMPTY_SEQUENCE
     faces = _EMPTY_SEQUENCE
@@ -460,6 +467,27 @@ class NativeSimpleMeshData:
             for item in (self._get(_S_POINT_ATTRS, ()) or ())
         )
         self._point_attrs = cached
+        return cached
+
+    def _geometry_buffer_tuple(self) -> tuple[object, ...]:
+        try:
+            return self._geometry_buffers
+        except AttributeError:
+            pass
+        cached = (
+            self.vertices_f32,
+            self.indices_u32,
+            self.edges_u32,
+            self.loop_starts_i32,
+            self.loop_totals_i32,
+            self.normals_f32,
+            self.vertex_normals_f32,
+            self.tangents_f32,
+            self.sharp_faces_u8,
+            *(attr.values_f32 for attr in (self.uv_sets or ())),
+            *(attr.values_f32 for attr in (self.point_attrs or ())),
+        )
+        self._geometry_buffers = cached
         return cached
 
     @property

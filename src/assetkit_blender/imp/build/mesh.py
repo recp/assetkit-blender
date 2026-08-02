@@ -9,6 +9,7 @@ import bpy
 from ...assetkit import (
     LoopFloatAttributeData,
     MeshPrimitiveData,
+    NativeSimpleMeshData,
     SceneNodeData,
     _profile_log,
     native_buffer_sequences_equal,
@@ -921,7 +922,8 @@ def _line_primitive_can_join_surface_group(
 def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
     if int(primitive.primitive_type) not in (AK_PRIMITIVE_TRIANGLES, AK_PRIMITIVE_POLYGONS):
         return None
-    if not primitive.mesh_key or not primitive.vertices_f32 or not primitive.indices_u32:
+    mesh_key = int(primitive.mesh_key or 0)
+    if not mesh_key or not primitive.vertices_f32 or not primitive.indices_u32:
         return None
     if primitive.instance_count or primitive.has_gsplat:
         return None
@@ -934,7 +936,8 @@ def _mesh_group_key(primitive: MeshPrimitiveData) -> tuple | None:
 
     uv_sig = _loop_attr_signature(primitive.uv_sets)
     color_sig = _loop_attr_signature(primitive.color_sets)
-    mesh_key = 0 if int(getattr(primitive, "file_type", 0) or 0) == AK_FILE_TYPE_WAVEFRONT else int(primitive.mesh_key)
+    if int(primitive.file_type or 0) == AK_FILE_TYPE_WAVEFRONT:
+        mesh_key = 0
 
     return (
         int(primitive.node_index),
@@ -976,16 +979,24 @@ def _mesh_data_reuse_key(
         return None
     if primitive_type != AK_PRIMITIVE_LINES and primitive.point_attr_count:
         return None
-    file_type = int(getattr(primitive, "file_type", 0) or 0)
-    geometry_key = int(getattr(primitive, "geometry_key", 0) or 0)
-    mesh_key = int(primitive.mesh_key or 0)
-    if file_type == AK_FILE_TYPE_COLLADA and geometry_key:
-        # The bridge geometry key covers the exact mesh-buffer identity and
-        # layout. DAE mesh_key identifies the per-node AkMesh wrapper, so it
-        # intentionally differs for repeated references to one geometry.
-        source_key = (0, geometry_key)
+    file_type = int(primitive.file_type or 0)
+    if file_type == AK_FILE_TYPE_COLLADA:
+        geometry_key = int(primitive.geometry_key or 0)
+        if geometry_key:
+            # The bridge geometry key covers the exact mesh-buffer identity
+            # and layout. DAE mesh_key identifies the per-node AkMesh wrapper,
+            # so it intentionally differs for repeated references to one
+            # geometry.
+            source_key = (0, geometry_key)
+        else:
+            mesh_key = int(primitive.mesh_key or 0)
+            if not mesh_key:
+                return None
+            source_key = (1, mesh_key, int(primitive.primitive_index))
     else:
+        mesh_key = int(primitive.mesh_key or 0)
         if not mesh_key:
+            geometry_key = int(primitive.geometry_key or 0)
             if not geometry_key:
                 return None
             source_key = (0, geometry_key)
@@ -1008,7 +1019,7 @@ def _mesh_data_reuse_key(
         _loop_attr_signature(primitive.color_sets),
         _loop_attr_signature(primitive.point_attrs),
         _has_material_data(primitive),
-        str(shading_mode or "AUTO").upper(),
+        shading_mode,
     )
 
 
@@ -1058,7 +1069,6 @@ def _grouped_mesh_data_reuse_key(
         "group",
         surface_keys,
         line_key,
-        tuple(_has_material_data(primitive) for primitive in surfaces),
     )
 
 
@@ -1083,23 +1093,10 @@ def _mesh_primitive_geometry_equal(
     left: MeshPrimitiveData,
     right: MeshPrimitiveData,
 ) -> bool:
-    scalar_fields = (
-        "primitive_type",
-        "primitive_mode",
-        "vertex_count",
-        "loop_count",
-        "face_count",
-        "edge_count",
-        "smooth_shading",
-    )
-    if any(getattr(left, name) != getattr(right, name) for name in scalar_fields):
-        return False
-    if (
-        _loop_attr_signature(left.uv_sets) != _loop_attr_signature(right.uv_sets)
-        or _loop_attr_signature(left.color_sets) != _loop_attr_signature(right.color_sets)
-        or _loop_attr_signature(left.point_attrs) != _loop_attr_signature(right.point_attrs)
-    ):
-        return False
+    # Callers only reach this check after an exact reuse-key lookup. Scalar
+    # fields and attribute layouts are already part of that key; compare the
+    # backing bytes here solely to defend against a 64-bit geometry-key hash
+    # collision without repeating thousands of Python property reads.
     left_buffers = _mesh_primitive_geometry_buffers(left)
     right_buffers = _mesh_primitive_geometry_buffers(right)
     native_equal = native_buffer_sequences_equal(left_buffers, right_buffers)
@@ -1134,6 +1131,8 @@ def _mesh_primitive_geometry_equal(
 def _mesh_primitive_geometry_buffers(
     primitive: MeshPrimitiveData,
 ) -> tuple[object, ...]:
+    if isinstance(primitive, NativeSimpleMeshData):
+        return primitive._geometry_buffer_tuple()
     return (
         primitive.vertices_f32,
         primitive.indices_u32,

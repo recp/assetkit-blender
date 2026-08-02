@@ -122,6 +122,7 @@ typedef enum AkbLoadOptionField {
   AKB_LOAD_OPT_TEXTURE_LOADING,
   AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
   AKB_LOAD_OPT_PRESERVE_TANGENTS,
+  AKB_LOAD_OPT_SCENE_BOUNDS,
   AKB_LOAD_OPT_COUNT
 } AkbLoadOptionField;
 
@@ -548,10 +549,18 @@ typedef struct AkbSceneNode {
   uint8_t  visible;
 } AkbSceneNode;
 
+typedef struct AkbSceneNodeIndexEntry {
+  AkNode  *source;
+  int32_t  index;
+} AkbSceneNodeIndexEntry;
+
 typedef struct AkbSceneNodeList {
-  AkbSceneNode *items;
-  size_t        count;
-  size_t        capacity;
+  AkbSceneNode           *items;
+  AkbSceneNodeIndexEntry *index_entries;
+  size_t                  count;
+  size_t                  capacity;
+  size_t                  index_capacity;
+  size_t                  indexed_count;
 } AkbSceneNodeList;
 
 typedef struct AkbImport {
@@ -586,6 +595,7 @@ typedef struct AkbLoadOptions {
   uint8_t     build_triangle_edges;
   uint8_t     geometry_keys;
   uint8_t     geometry_content_keys;
+  uint8_t     scene_bounds;
 } AkbLoadOptions;
 
 typedef struct AkbSavedOptions {
@@ -616,8 +626,16 @@ typedef struct AkbDecoderPaths {
 static AkbDecoderPaths AKB_DECODER_PATHS;
 
 typedef struct AkbSharedDoc {
-  AkDoc *doc;
-  size_t refcount;
+  AkDoc   *doc;
+  AkImage **image_index_keys;
+  size_t  *image_index_values;
+  size_t   image_index_capacity;
+  size_t   refcount;
+  uint64_t embedded_source_size;
+  uint64_t embedded_source_mtime;
+  uint8_t  image_index_state;
+  uint8_t  embedded_source_stat_state;
+  uint8_t  embedded_texture_dir_ready;
 } AkbSharedDoc;
 
 typedef struct AkbAnimChannel {
@@ -909,11 +927,14 @@ typedef struct AkbResolvedAnimChannel {
   AkChannel        *channel;
   AkResolvedTarget resolved;
   const char      *clip_name;
+  size_t           next_target;
   uint32_t         clip_index;
 } AkbResolvedAnimChannel;
 
 typedef struct AkbAnimationIndex {
   AkbResolvedAnimChannel *items;
+  size_t                 *target_buckets;
   size_t                  count;
   size_t                  capacity;
+  size_t                  target_bucket_count;
 } AkbAnimationIndex;

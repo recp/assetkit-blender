@@ -448,6 +448,7 @@ def _create_skin_armature(
         armature,
         bone_node_indices,
     )
+    bone_children_by_parent = _skin_bone_children_by_parent(bone_node_indices, node_data)
 
     for node_index in bone_node_indices:
         name = bone_names_by_node.get(node_index)
@@ -460,7 +461,7 @@ def _create_skin_armature(
         _set_bone_from_rest_matrix(
             bone,
             matrix,
-            _skin_bone_length(node_index, bone_node_indices, node_data, rest_matrices_by_node),
+            _skin_bone_length(node_index, bone_children_by_parent, rest_matrices_by_node),
         )
     create_bones_ms = lap_ms()
 
@@ -687,23 +688,32 @@ def _node_rest_matrix(
 
 def _skin_bone_length(
     node_index: int,
-    bone_node_indices: list[int],
-    node_data: dict[int, SceneNodeData],
+    bone_children_by_parent: dict[int, list[int]],
     rest_matrices_by_node: dict[int, Matrix],
 ) -> float:
     matrix = rest_matrices_by_node.get(node_index)
     if matrix is None:
         return 0.05
     head = matrix.to_translation()
+    for child_index in bone_children_by_parent.get(node_index, ()):
+        child_matrix = rest_matrices_by_node.get(child_index)
+        if child_matrix:
+            length = (child_matrix.to_translation() - head).length
+            if length > 1.0e-5:
+                return length
+    return 0.05
+
+
+def _skin_bone_children_by_parent(
+    bone_node_indices: list[int],
+    node_data: dict[int, SceneNodeData],
+) -> dict[int, list[int]]:
+    children_by_parent: dict[int, list[int]] = {}
     for child_index in bone_node_indices:
         child = node_data.get(child_index)
-        if child and child.parent_index == node_index:
-            child_matrix = rest_matrices_by_node.get(child_index)
-            if child_matrix:
-                length = (child_matrix.to_translation() - head).length
-                if length > 1.0e-5:
-                    return length
-    return 0.05
+        if child:
+            children_by_parent.setdefault(child.parent_index, []).append(child_index)
+    return children_by_parent
 
 
 def _set_bone_from_rest_matrix(

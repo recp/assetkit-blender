@@ -197,7 +197,7 @@ akb_image_to_py(AkDoc *doc, AkImage *image, size_t index) {
 
   source = image ? image->source : NULL;
   base = image ? image->image : NULL;
-  akb_copy_image_path(doc, image, path, sizeof(path));
+  akb_copy_image_path(NULL, doc, image, path, sizeof(path));
 
 #define AKB_IMAGE_SET_OBJ(KEY, VALUE) do {        \
     if (!akb_py_dict_set_owned(dict, (KEY), (VALUE))) { \
@@ -386,7 +386,8 @@ akb_set_scene_info(PyObject *out,
                                   akb_scene_names_to_py(doc))
          && akb_py_dict_set_owned(out,
                                   "scene_bounds",
-                                  akb_scene_nodes_have_instances(nodes)
+                                  options->scene_bounds
+                                    && akb_scene_nodes_have_instances(nodes)
                                     ? akb_scene_bounds_to_py(doc, options)
                                     : akb_none())
          && akb_py_dict_set_owned(out,
@@ -1106,7 +1107,8 @@ akb_material_variants_to_py(AkbPrimitive *prim, PyObject *owner) {
       memset(&material_data, 0, sizeof(material_data));
       material_prim.material = prim->material_variants[i].material;
       material_data.file_type = prim->file_type;
-      akb_extract_material(prim->doc_owner ? prim->doc_owner->doc : NULL,
+      akb_extract_material(prim->doc_owner,
+                           prim->doc_owner ? prim->doc_owner->doc : NULL,
                            NULL,
                            &material_prim,
                            &material_data);

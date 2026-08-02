@@ -15,6 +15,7 @@ from .metadata import _set_assetkit_json_prop, _set_prop_if_nondefault
 ACTIVE_LOAD_MODE = "IMMEDIATE"
 ACTIVE_NODE_CACHE: dict[object, object] | None = None
 ACTIVE_SEPARATE_COLOR_CACHE: dict[int, object] | None = None
+ACTIVE_VALIDATED_IMAGE_KEYS: set[tuple[str, str]] | None = None
 
 _TEXTURE_IMAGE_CACHE: dict[tuple[str, str], object] = {}
 _TEXTURE_PATH_CACHE: dict[str, str] = {}
@@ -364,10 +365,14 @@ def _cached_texture_image(path: str, colorspace: str):
 def _cached_texture_image_by_key(key: tuple[str, str]):
     cached = _TEXTURE_IMAGE_CACHE.get(key)
     if cached is not None:
+        if ACTIVE_VALIDATED_IMAGE_KEYS is not None and key in ACTIVE_VALIDATED_IMAGE_KEYS:
+            return cached
         try:
             if bpy.data.images.get(cached.name) == cached:
                 if _image_colorspace(cached) == key[1]:
                     _set_image_alpha_mode(cached, key[0])
+                    if ACTIVE_VALIDATED_IMAGE_KEYS is not None:
+                        ACTIVE_VALIDATED_IMAGE_KEYS.add(key)
                     return cached
         except ReferenceError:
             pass
@@ -382,6 +387,8 @@ def _register_texture_image(image, path: str, colorspace: str) -> None:
     _set_image_colorspace(image, colorspace)
     _set_image_alpha_mode(image, source_path)
     _TEXTURE_IMAGE_CACHE[(source_path, normalized_colorspace)] = image
+    if ACTIVE_VALIDATED_IMAGE_KEYS is not None:
+        ACTIVE_VALIDATED_IMAGE_KEYS.add((source_path, normalized_colorspace))
 
 
 def _texture_image_cache_key(path: str, colorspace: str) -> tuple[str, str]:

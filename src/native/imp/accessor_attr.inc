@@ -445,19 +445,22 @@ akb_loop_attribute_indices_are_identity(AkMeshPrimitive *prim,
   if (!stride || offset >= stride)
     return 0;
 
-  for (i = 0; i < loop_count; i++) {
-    uint32_t index;
+  if (index_view) {
+    for (i = 0; i < loop_count; i++) {
+      uint32_t index;
 
-    src_index = (size_t)i * stride + offset;
-    if (index_view) {
+      src_index = (size_t)i * stride + offset;
       if (src_index >= index_view->count)
         return 0;
       index = akb_index_view_get(index_view, src_index);
-    } else {
-      index = vertex_indices[i];
+      if (index != i)
+        return 0;
     }
-    if (index != i)
-      return 0;
+  } else {
+    for (i = 0; i < loop_count; i++) {
+      if (vertex_indices[i] != i)
+        return 0;
+    }
   }
 
   return 1;
@@ -480,17 +483,23 @@ akb_loop_attribute_indices_match_vertices(AkMeshPrimitive *prim,
   if (!stride || offset >= stride)
     return 0;
 
+  /*
+   * A single interleaved index stream has no independent attribute index to
+   * validate: positions and normals necessarily use the same index.  Avoid
+   * walking every loop for glTF and the other shared-index formats.  COLLADA
+   * and similar separate-index inputs still provide index_view and retain the
+   * exact comparison below.
+   */
+  if (!index_view)
+    return 1;
+
   for (i = 0; i < loop_count; i++) {
     uint32_t index;
 
     src_index = (size_t)i * stride + offset;
-    if (index_view) {
-      if (src_index >= index_view->count)
-        return 0;
-      index = akb_index_view_get(index_view, src_index);
-    } else {
-      index = vertex_indices[i];
-    }
+    if (src_index >= index_view->count)
+      return 0;
+    index = akb_index_view_get(index_view, src_index);
     if (index != vertex_indices[i])
       return 0;
   }

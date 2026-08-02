@@ -557,7 +557,11 @@ akb_extract_primitive(AkbArena *arena,
       out.gsplat.sorting_method = (uint32_t)prim->gsplat->sortingMethod;
       out.gsplat.decoded_count = prim->gsplat->decodedCount;
     }
-    akb_extract_material(doc, akb_node_geometry_instance(node), prim, &out);
+    akb_extract_material(doc_owner,
+                         doc,
+                         akb_node_geometry_instance(node),
+                         prim,
+                         &out);
     if (anim_index && anim_index->count) {
       out.material_animation = akb_material_animation_new(doc,
                                                           doc_owner,

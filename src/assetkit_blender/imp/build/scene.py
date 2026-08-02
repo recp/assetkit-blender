@@ -29,6 +29,7 @@ from ..skin import (
     _match_skin_armature_space,
     _parent_skinned_mesh_to_armature,
     _set_bone_from_rest_matrix,
+    _skin_bone_children_by_parent,
     _skin_bone_length,
     _skin_bone_node_indices,
     _skin_rest_matrices_from_assetkit_nodes,
@@ -442,6 +443,7 @@ def _required_scene_node_indices(
 
     required: set[int] = set()
     child_counts = _scene_node_child_counts(nodes)
+    standalone_nodes = tuple(_scene_node_requires_standalone_object(node) for node in nodes)
     primitive_node_indices = {
         int(primitive.node_index)
         for primitive in primitives
@@ -456,7 +458,7 @@ def _required_scene_node_indices(
     skipped_animation_indices = skipped_animation_indices or set()
     for primitive in primitives:
         node_index = int(primitive.node_index)
-        if _primitive_node_needs_helper(node_index, nodes, child_counts):
+        if _primitive_node_needs_helper(node_index, nodes, child_counts, standalone_nodes):
             _add_node_ancestors(required, nodes, node_index)
         else:
             _add_node_parent_ancestors(required, nodes, node_index)
@@ -472,15 +474,20 @@ def _required_scene_node_indices(
 
     for curve in curves or ():
         node_index = int(curve.node_index)
-        if _primitive_node_needs_helper(node_index, nodes, child_counts):
+        if _primitive_node_needs_helper(node_index, nodes, child_counts, standalone_nodes):
             _add_node_ancestors(required, nodes, node_index)
         else:
             _add_node_parent_ancestors(required, nodes, node_index)
 
     for index, node in enumerate(nodes):
-        if _scene_node_payload_can_inline(index, node, primitive_node_indices, child_counts):
+        if _scene_node_payload_can_inline(
+            index,
+            primitive_node_indices,
+            child_counts,
+            standalone_nodes,
+        ):
             continue
-        if _scene_node_requires_standalone_object(node):
+        if standalone_nodes[index]:
             _add_node_ancestors(required, nodes, index)
         elif index not in skipped_animation_indices and (node.anim_count or node.anim_channels):
             _add_node_ancestors(required, nodes, index)
@@ -495,6 +502,8 @@ def _add_node_ancestors(required: set[int], nodes: list[SceneNodeData], node_ind
     seen: set[int] = set()
     current = node_index
     while 0 <= current < count and current not in seen:
+        if current in required:
+            break
         seen.add(current)
         required.add(current)
         current = nodes[current].parent_index
@@ -518,12 +527,13 @@ def _primitive_node_needs_helper(
     node_index: int,
     nodes: list[SceneNodeData],
     child_counts: dict[int, int],
+    standalone_nodes: tuple[bool, ...],
 ) -> bool:
     if node_index < 0 or node_index >= len(nodes):
         return False
     if child_counts.get(node_index, 0) > 0:
         return True
-    return _scene_node_requires_standalone_object(nodes[node_index])
+    return standalone_nodes[node_index]
 
 
 def _scene_node_requires_standalone_object(node: SceneNodeData) -> bool:
@@ -541,15 +551,15 @@ def _scene_node_requires_standalone_object(node: SceneNodeData) -> bool:
 
 def _scene_node_payload_can_inline(
     node_index: int,
-    node: SceneNodeData,
     primitive_node_indices: set[int],
     child_counts: dict[int, int],
+    standalone_nodes: tuple[bool, ...],
 ) -> bool:
     if node_index not in primitive_node_indices:
         return False
     if child_counts.get(node_index, 0) > 0:
         return False
-    return not _scene_node_requires_standalone_object(node)
+    return not standalone_nodes[node_index]
 
 
 def _scene_node_has_required_payload(node: SceneNodeData) -> bool:
@@ -768,6 +778,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
         bone_names_by_node = record["bone_names_by_node"]
         rest_matrices_by_node = record["rest_matrices_by_node"]
         node_data = record["node_data"]
+        bone_children_by_parent = _skin_bone_children_by_parent(bone_node_indices, node_data)
         for node_index in bone_node_indices:
             name = bone_names_by_node.get(node_index)
             if not name:
@@ -777,7 +788,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
             _set_bone_from_rest_matrix(
                 bone,
                 matrix,
-                _skin_bone_length(node_index, bone_node_indices, node_data, rest_matrices_by_node),
+                _skin_bone_length(node_index, bone_children_by_parent, rest_matrices_by_node),
             )
             total_bones += 1
     create_bones_ms = lap_ms()

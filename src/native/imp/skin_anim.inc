@@ -171,19 +171,120 @@ akb_extract_morph_targets(AkbPrimitive *out,
   return 1;
 }
 
+static size_t
+akb_scene_node_hash(const AkNode *source) {
+  uintptr_t value = (uintptr_t)source;
+
+  value ^= value >> 33;
+  value *= (uintptr_t)UINT64_C(0xff51afd7ed558ccd);
+  value ^= value >> 33;
+  return (size_t)value;
+}
+
+static void
+akb_scene_node_index_insert(AkbSceneNodeIndexEntry *entries,
+                            size_t capacity,
+                            AkNode *source,
+                            int32_t node_index) {
+  size_t index;
+  size_t mask;
+
+  if (!entries || !capacity || !source)
+    return;
+
+  mask = capacity - 1;
+  index = akb_scene_node_hash(source) & mask;
+  while (entries[index].source) {
+    /* Preserve the first occurrence, matching the former linear lookup. */
+    if (entries[index].source == source)
+      return;
+    index = (index + 1) & mask;
+  }
+  entries[index].source = source;
+  entries[index].index = node_index;
+}
+
+static int
+akb_scene_node_index_update(AkbSceneNodeList *nodes) {
+  AkbSceneNodeIndexEntry *entries;
+  size_t capacity;
+  size_t i;
+
+  if (!nodes || nodes->indexed_count == nodes->count)
+    return nodes && nodes->index_entries;
+  if (nodes->count > (size_t)INT32_MAX)
+    return 0;
+
+  capacity = nodes->index_capacity;
+  if (!capacity || nodes->count > capacity / 2) {
+    capacity = 64;
+    if (nodes->count > SIZE_MAX / 2)
+      return 0;
+    while (capacity < nodes->count * 2) {
+      if (capacity > SIZE_MAX / 2)
+        return 0;
+      capacity *= 2;
+    }
+
+    entries = (AkbSceneNodeIndexEntry *)calloc(capacity, sizeof(*entries));
+    if (!entries)
+      return 0;
+    for (i = 0; i < nodes->count; i++)
+      akb_scene_node_index_insert(entries,
+                                  capacity,
+                                  nodes->items[i].source,
+                                  (int32_t)i);
+    free(nodes->index_entries);
+    nodes->index_entries = entries;
+    nodes->index_capacity = capacity;
+    nodes->indexed_count = nodes->count;
+    return 1;
+  }
+
+  for (i = nodes->indexed_count; i < nodes->count; i++)
+    akb_scene_node_index_insert(nodes->index_entries,
+                                capacity,
+                                nodes->items[i].source,
+                                (int32_t)i);
+  nodes->indexed_count = nodes->count;
+  return 1;
+}
+
+static int32_t
+akb_scene_node_pointer_index_for(AkbSceneNodeList *nodes, AkNode *node) {
+  size_t index;
+  size_t mask;
+
+  if (!nodes || !node || !akb_scene_node_index_update(nodes))
+    return -1;
+
+  mask = nodes->index_capacity - 1;
+  index = akb_scene_node_hash(node) & mask;
+  while (nodes->index_entries[index].source) {
+    if (nodes->index_entries[index].source == node)
+      return nodes->index_entries[index].index;
+    index = (index + 1) & mask;
+  }
+  return -1;
+}
+
 static int32_t
 akb_scene_node_index_for(AkbSceneNodeList *nodes, AkNode *node) {
   const char *target_id;
   const char *source_id;
+  int32_t pointer_index;
   size_t i;
 
   if (!nodes || !node)
     return -1;
 
+  pointer_index = akb_scene_node_pointer_index_for(nodes, node);
+  if (pointer_index >= 0)
+    return pointer_index;
+
+  /* Retain the ID fallback for loaders that reconstruct equivalent nodes. */
   target_id = (const char *)ak_mem_getId(node);
   for (i = 0; i < nodes->count; i++) {
-    if (nodes->items[i].source == node)
-      return (int32_t)i;
     if (!nodes->items[i].source)
       continue;
     source_id = (const char *)ak_mem_getId(nodes->items[i].source);
@@ -1678,6 +1779,7 @@ akb_animation_index_free(AkbAnimationIndex *index) {
   if (!index)
     return;
   free(index->items);
+  free(index->target_buckets);
   memset(index, 0, sizeof(*index));
 }
 
@@ -1706,9 +1808,77 @@ akb_animation_index_push(AkbAnimationIndex *index,
   index->items[index->count].channel = channel;
   index->items[index->count].resolved = *resolved;
   index->items[index->count].clip_name = clip_name;
+  index->items[index->count].next_target = SIZE_MAX;
   index->items[index->count].clip_index = clip_index;
   index->count++;
   return 1;
+}
+
+static size_t
+akb_animation_target_hash(const void *target) {
+  uintptr_t value = (uintptr_t)target;
+
+  value ^= value >> 33;
+  value *= (uintptr_t)UINT64_C(0xff51afd7ed558ccd);
+  value ^= value >> 33;
+  return (size_t)value;
+}
+
+static void
+akb_animation_index_build_target_table(AkbAnimationIndex *index) {
+  size_t bucket_count;
+  size_t bucket_index;
+  size_t i;
+
+  if (!index || !index->count)
+    return;
+  if (index->count > SIZE_MAX / 2)
+    return;
+
+  bucket_count = 64;
+  while (bucket_count < index->count * 2) {
+    if (bucket_count > SIZE_MAX / 2)
+      return;
+    bucket_count *= 2;
+  }
+
+  index->target_buckets = (size_t *)malloc(bucket_count * sizeof(*index->target_buckets));
+  if (!index->target_buckets)
+    return;
+  index->target_bucket_count = bucket_count;
+  for (i = 0; i < bucket_count; i++)
+    index->target_buckets[i] = SIZE_MAX;
+
+  /* Reverse insertion keeps each target chain in original channel order. */
+  for (i = index->count; i > 0; i--) {
+    AkbResolvedAnimChannel *item = &index->items[i - 1];
+    bucket_index = akb_animation_target_hash(item->resolved.target) & (bucket_count - 1);
+    item->next_target = index->target_buckets[bucket_index];
+    index->target_buckets[bucket_index] = i - 1;
+  }
+}
+
+static size_t
+akb_animation_index_target_item(const AkbAnimationIndex *index,
+                                const void *target,
+                                size_t item_index) {
+  if (!index || !target || !index->target_buckets || !index->target_bucket_count)
+    return SIZE_MAX;
+
+  if (item_index == SIZE_MAX) {
+    size_t bucket_index = akb_animation_target_hash(target)
+                          & (index->target_bucket_count - 1);
+    item_index = index->target_buckets[bucket_index];
+  } else if (item_index < index->count) {
+    item_index = index->items[item_index].next_target;
+  }
+
+  while (item_index < index->count) {
+    if (index->items[item_index].resolved.target == target)
+      return item_index;
+    item_index = index->items[item_index].next_target;
+  }
+  return SIZE_MAX;
 }
 
 static int
@@ -1805,6 +1975,7 @@ akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
       akb_animation_index_free(index);
       return 0;
     }
+    akb_animation_index_build_target_table(index);
     return 1;
   }
 
@@ -1820,6 +1991,7 @@ akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
     }
   }
 
+  akb_animation_index_build_target_table(index);
   return 1;
 }
 
@@ -1829,11 +2001,62 @@ akb_animation_collect_index(AkbAnimation *animation,
                             const AkbAnimBinding *bindings,
                             int binding_count,
                             const AkbCoordContext *coord) {
+  size_t heads[64];
+  size_t selected;
   size_t j;
   int i;
+  int selected_binding;
 
   if (!animation || !index || !bindings || binding_count <= 0)
     return 1;
+
+  if (index->target_buckets && binding_count <= 64) {
+    for (i = 0; i < binding_count; i++) {
+      int duplicate = 0;
+      int previous;
+
+      for (previous = 0; previous < i; previous++) {
+        if (bindings[previous].target == bindings[i].target) {
+          duplicate = 1;
+          break;
+        }
+      }
+      heads[i] = duplicate
+                   ? SIZE_MAX
+                   : akb_animation_index_target_item(index,
+                                                     bindings[i].target,
+                                                     SIZE_MAX);
+    }
+
+    for (;;) {
+      selected = SIZE_MAX;
+      selected_binding = -1;
+      for (i = 0; i < binding_count; i++) {
+        if (heads[i] < selected) {
+          selected = heads[i];
+          selected_binding = i;
+        }
+      }
+      if (selected_binding < 0)
+        return 1;
+
+      {
+        const AkbResolvedAnimChannel *item = &index->items[selected];
+        AkResolvedTarget resolved = item->resolved;
+        if (!akb_animation_add_channel(animation,
+                                       item->channel,
+                                       &resolved,
+                                       &bindings[selected_binding],
+                                       coord,
+                                       item->clip_index,
+                                       item->clip_name))
+          return 0;
+      }
+      heads[selected_binding] = akb_animation_index_target_item(index,
+                                                                bindings[selected_binding].target,
+                                                                selected);
+    }
+  }
 
   for (j = 0; j < index->count; j++) {
     const AkbResolvedAnimChannel *item = &index->items[j];

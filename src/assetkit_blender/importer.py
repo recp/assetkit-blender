@@ -65,6 +65,7 @@ from .load_options import (
     AKB_LOAD_DEFER_NORMALS_YES,
     AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
     AKB_LOAD_OPT_PRESERVE_TANGENTS,
+    AKB_LOAD_OPT_SCENE_BOUNDS,
     AKB_LOAD_OPT_TEXTURE_LOADING,
     AKB_LOAD_TEXTURE_AUTO,
     AKB_LOAD_TEXTURE_DEFERRED,
@@ -117,6 +118,7 @@ def import_assetkit_file(
     clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
 ) -> list[bpy.types.Object]:
+    shading_mode = str(shading_mode or "AUTO").upper()
     _reset_action_cache()
     _reset_material_template_cache()
     _reset_material_profile()
@@ -124,6 +126,12 @@ def import_assetkit_file(
     _animation.ACTIVE_SCOPE = _new_import_animation_scope(filepath)
 
     load_options               = _compact_content_key_options(load_options)
+    load_options               = _scene_bounds_options(
+        load_options,
+        focus_mode,
+        placement_mode,
+        scene_was_empty,
+    )
     existing_actions           = _snapshot_actions(fit_timeline)
     existing_frame_range       = _snapshot_scene_frame_range(fit_timeline)
     scene_had_timeline_content = _scene_has_timeline_content(bpy.context.scene) if fit_timeline else False
@@ -191,10 +199,14 @@ def import_assetkit_file(
     sort_units_ms = _elapsed_ms(phase_started_at) if profile_detail else 0.0
 
     previous_texture_load_mode         = _textures.ACTIVE_LOAD_MODE
+    previous_validated_image_keys      = _textures.ACTIVE_VALIDATED_IMAGE_KEYS
+    previous_validated_template_keys   = _materials.ACTIVE_VALIDATED_TEMPLATE_KEYS
     previous_material_template_cloning = _materials.ACTIVE_TEMPLATE_CLONING
     previous_prebuilt_materials        = _build_common.ACTIVE_PREBUILT_MATERIALS_BY_ID
 
     _textures.ACTIVE_LOAD_MODE         = texture_load_mode
+    _textures.ACTIVE_VALIDATED_IMAGE_KEYS = set()
+    _materials.ACTIVE_VALIDATED_TEMPLATE_KEYS = set()
     _materials.ACTIVE_TEMPLATE_CLONING = (
         len(primitives) <= _MATERIAL_TEMPLATE_CLONE_PRIMITIVE_LIMIT
     )
@@ -267,6 +279,8 @@ def import_assetkit_file(
         publish_ms = _elapsed_ms(phase_started_at) if profile_detail else 0.0
     finally:
         _textures.ACTIVE_LOAD_MODE                    = previous_texture_load_mode
+        _textures.ACTIVE_VALIDATED_IMAGE_KEYS         = previous_validated_image_keys
+        _materials.ACTIVE_VALIDATED_TEMPLATE_KEYS     = previous_validated_template_keys
         _materials.ACTIVE_TEMPLATE_CLONING            = previous_material_template_cloning
         _build_common.ACTIVE_PREBUILT_MATERIALS_BY_ID = previous_prebuilt_materials
 
@@ -419,7 +433,12 @@ class _ProgressiveImportJob:
     ) -> None:
         self.filepath                = filepath
         self.library_path            = library_path
-        self.load_options            = _compact_content_key_options(load_options)
+        self.load_options            = _scene_bounds_options(
+            _compact_content_key_options(load_options),
+            focus_mode,
+            placement_mode,
+            scene_was_empty,
+        )
         self.collection              = collection
         self.batch_size              = batch_size
         self.time_budget             = time_budget
@@ -428,7 +447,7 @@ class _ProgressiveImportJob:
         self.scene_was_empty         = scene_was_empty
         self.focus_camera            = focus_camera
         self.select_imported         = select_imported
-        self.shading_mode            = shading_mode
+        self.shading_mode            = str(shading_mode or "AUTO").upper()
         self.set_viewport_shading    = set_viewport_shading
         self.clean_viewport_overlays = clean_viewport_overlays
         self.fit_timeline            = fit_timeline
@@ -506,12 +525,16 @@ class _ProgressiveImportJob:
     def _push_globals(self) -> tuple:
         previous = (
             _textures.ACTIVE_LOAD_MODE,
+            _textures.ACTIVE_VALIDATED_IMAGE_KEYS,
+            _materials.ACTIVE_VALIDATED_TEMPLATE_KEYS,
             _materials.ACTIVE_TEMPLATE_CLONING,
             _build_common.ACTIVE_PREBUILT_MATERIALS_BY_ID,
             _animation.ACTIVE_SCOPE,
         )
 
         _textures.ACTIVE_LOAD_MODE                    = self.texture_load_mode
+        _textures.ACTIVE_VALIDATED_IMAGE_KEYS         = set()
+        _materials.ACTIVE_VALIDATED_TEMPLATE_KEYS     = set()
         _materials.ACTIVE_TEMPLATE_CLONING            = self.material_template_cloning
         _build_common.ACTIVE_PREBUILT_MATERIALS_BY_ID = self.prebuilt_materials
 
@@ -523,12 +546,16 @@ class _ProgressiveImportJob:
     def _pop_globals(self, previous: tuple) -> None:
         (
             texture_load_mode,
+            validated_image_keys,
+            validated_template_keys,
             material_template_cloning,
             prebuilt_materials,
             animation_scope,
         ) = previous
 
         _textures.ACTIVE_LOAD_MODE                      = texture_load_mode
+        _textures.ACTIVE_VALIDATED_IMAGE_KEYS           = validated_image_keys
+        _materials.ACTIVE_VALIDATED_TEMPLATE_KEYS       = validated_template_keys
         _materials.ACTIVE_TEMPLATE_CLONING              = material_template_cloning
         _build_common.ACTIVE_PREBUILT_MATERIALS_BY_ID   = prebuilt_materials
         _animation.ACTIVE_SCOPE                         = animation_scope
@@ -810,6 +837,32 @@ def _load_assetkit_scene(
             list(loaded.images or []),
         )
     return loaded, [], [], None, None, {}, []
+
+
+def _scene_bounds_options(
+    options: LoadOptions | None,
+    focus_mode: str,
+    placement_mode: str,
+    scene_was_empty: bool,
+) -> LoadOptions | None:
+    if options is None:
+        return None
+
+    focus = str(focus_mode or "NEVER").upper()
+    placement = str(placement_mode or "AS_AUTHORED").upper()
+    needs_focus_bounds = focus != "NEVER" and (
+        focus != "EMPTY_SCENE" or scene_was_empty
+    )
+    needs_bounds = needs_focus_bounds or placement != "AS_AUTHORED"
+
+    values = list(options)
+    if len(values) < AKB_LOAD_OPT_SCENE_BOUNDS:
+        return options
+    if len(values) == AKB_LOAD_OPT_SCENE_BOUNDS:
+        values.append(int(needs_bounds))
+    else:
+        values[AKB_LOAD_OPT_SCENE_BOUNDS] = int(needs_bounds)
+    return tuple(values)
 
 
 def _load_option_int(load_options: LoadOptions | None, index: int, default: int) -> int:

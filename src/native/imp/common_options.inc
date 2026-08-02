@@ -12,6 +12,8 @@ akb_shared_doc_release(AkbSharedDoc *owner) {
   if (--owner->refcount == 0) {
     if (owner->doc)
       ak_free(owner->doc);
+    free(owner->image_index_keys);
+    free(owner->image_index_values);
     free(owner);
   }
 }
@@ -162,6 +164,7 @@ akb_load_options_default(AkbLoadOptions *options) {
   options->preserve_extras = 1;
   options->build_triangle_edges = 0;
   options->geometry_keys = 1;
+  options->scene_bounds = 1;
 }
 
 static PyObject *
@@ -255,7 +258,8 @@ akb_load_options_from_object(AkbLoadOptions *options, PyObject *obj) {
       || !akb_load_option_bool(items, count, AKB_LOAD_OPT_PRESERVE_EXTRAS, &options->preserve_extras)
       || !akb_load_option_bool(items, count, AKB_LOAD_OPT_BUILD_TRIANGLE_EDGES, &options->build_triangle_edges)
       || !akb_load_option_bool(items, count, AKB_LOAD_OPT_GEOMETRY_KEYS, &options->geometry_keys)
-      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS, &options->geometry_content_keys))
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_GEOMETRY_CONTENT_KEYS, &options->geometry_content_keys)
+      || !akb_load_option_bool(items, count, AKB_LOAD_OPT_SCENE_BOUNDS, &options->scene_bounds))
     goto fail;
 
   Py_DECREF(seq);
@@ -699,6 +703,7 @@ akb_node_list_free(AkbSceneNodeList *list) {
   for (i = 0; i < list->count; i++)
     akb_scene_node_free(&list->items[i]);
   free(list->items);
+  free(list->index_entries);
   memset(list, 0, sizeof(*list));
 }
 

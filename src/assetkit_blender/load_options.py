@@ -28,6 +28,7 @@ from .enums import (
     AKB_LOAD_OPT_IMPORT_LINES,
     AKB_LOAD_OPT_PRESERVE_EXTRAS,
     AKB_LOAD_OPT_PRESERVE_TANGENTS,
+    AKB_LOAD_OPT_SCENE_BOUNDS,
     AKB_LOAD_OPT_SCENE_INDEX,
     AKB_LOAD_OPT_TEXTURE_LOADING,
     AKB_LOAD_OPT_TRIANGULATE,
@@ -101,6 +102,7 @@ def make_load_options(
     texture_loading: str = "IMMEDIATE",
     defer_custom_normals: object = "AUTO",
     preserve_tangents: bool = False,
+    scene_bounds: bool = True,
 ) -> LoadOptions:
     return (
         _coord_system_id(coordinate_system),
@@ -121,4 +123,5 @@ def make_load_options(
         _texture_mode_id(texture_loading),
         _defer_normals_id(defer_custom_normals),
         int(bool(preserve_tangents)),
+        int(bool(scene_bounds)),
     )

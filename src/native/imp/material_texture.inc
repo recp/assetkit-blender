@@ -1,10 +1,60 @@
 static size_t
-akb_doc_image_index(AkDoc *doc, AkImage *image) {
+akb_doc_image_index(AkbSharedDoc *doc_owner, AkDoc *doc, AkImage *image) {
   AkImage *item;
+  AkImage **keys;
+  size_t *values;
+  size_t capacity;
+  size_t count;
   size_t index;
+  size_t mask;
 
   if (!doc || !image)
     return 0;
+
+  if (doc_owner && doc_owner->doc == doc && doc_owner->image_index_state == 0) {
+    count = 0;
+    for (item = doc->lib.images.first; item; item = item->next)
+      count++;
+
+    capacity = akb_hash_capacity_for(count);
+    keys = capacity ? (AkImage **)calloc(capacity, sizeof(*keys)) : NULL;
+    values = capacity ? (size_t *)malloc(capacity * sizeof(*values)) : NULL;
+    if (keys && values) {
+      mask = capacity - 1;
+      index = 0;
+      for (item = doc->lib.images.first; item; item = item->next, index++) {
+        size_t slot = (size_t)akb_fnv1a64_mix_u64(UINT64_C(1469598103934665603),
+                                                  (uintptr_t)item) & mask;
+        while (keys[slot])
+          slot = (slot + 1) & mask;
+        keys[slot] = item;
+        values[slot] = index;
+      }
+      doc_owner->image_index_keys = keys;
+      doc_owner->image_index_values = values;
+      doc_owner->image_index_capacity = capacity;
+      doc_owner->image_index_state = 2;
+    } else {
+      free(keys);
+      free(values);
+      doc_owner->image_index_state = 1;
+    }
+  }
+
+  if (doc_owner
+      && doc_owner->doc == doc
+      && doc_owner->image_index_state == 2
+      && doc_owner->image_index_capacity) {
+    mask = doc_owner->image_index_capacity - 1;
+    index = (size_t)akb_fnv1a64_mix_u64(UINT64_C(1469598103934665603),
+                                        (uintptr_t)image) & mask;
+    while (doc_owner->image_index_keys[index]) {
+      if (doc_owner->image_index_keys[index] == image)
+        return doc_owner->image_index_values[index];
+      index = (index + 1) & mask;
+    }
+    return 0;
+  }
 
   index = 0;
   for (item = doc->lib.images.first; item; item = item->next, index++)
@@ -14,11 +64,12 @@ akb_doc_image_index(AkDoc *doc, AkImage *image) {
   return 0;
 }
 
-static uint64_t
-akb_embedded_image_cache_hash(AkDoc *doc, AkImage *image, size_t length) {
+static int
+akb_embedded_source_stat(AkbSharedDoc *doc_owner,
+                         AkDoc *doc,
+                         uint64_t *size_out,
+                         uint64_t *mtime_out) {
   const char *path;
-  uint64_t hash;
-  size_t image_index;
 #if defined(_WIN32)
   struct _stat st;
 #else
@@ -26,20 +77,64 @@ akb_embedded_image_cache_hash(AkDoc *doc, AkImage *image, size_t length) {
 #endif
 
   path = (doc && doc->inf && doc->inf->name) ? doc->inf->name : "";
+  if (!path[0])
+    return 0;
+
+  if (doc_owner && doc_owner->doc == doc) {
+    if (doc_owner->embedded_source_stat_state == 0) {
+#if defined(_WIN32)
+      if (_stat(path, &st) == 0) {
+#else
+      if (stat(path, &st) == 0) {
+#endif
+        doc_owner->embedded_source_size = (uint64_t)st.st_size;
+        doc_owner->embedded_source_mtime = (uint64_t)st.st_mtime;
+        doc_owner->embedded_source_stat_state = 2;
+      } else {
+        doc_owner->embedded_source_stat_state = 1;
+      }
+    }
+    if (doc_owner->embedded_source_stat_state != 2)
+      return 0;
+    *size_out = doc_owner->embedded_source_size;
+    *mtime_out = doc_owner->embedded_source_mtime;
+    return 1;
+  }
+
+#if defined(_WIN32)
+  if (_stat(path, &st) != 0)
+#else
+  if (stat(path, &st) != 0)
+#endif
+    return 0;
+  *size_out = (uint64_t)st.st_size;
+  *mtime_out = (uint64_t)st.st_mtime;
+  return 1;
+}
+
+static uint64_t
+akb_embedded_image_cache_hash(AkbSharedDoc *doc_owner,
+                              AkDoc *doc,
+                              AkImage *image,
+                              size_t length) {
+  const char *path;
+  uint64_t hash;
+  uint64_t source_size;
+  uint64_t source_mtime;
+  size_t image_index;
+
+  path = (doc && doc->inf && doc->inf->name) ? doc->inf->name : "";
   hash = akb_fnv1a64((const unsigned char *)path, strlen(path));
-  image_index = akb_doc_image_index(doc, image);
+  image_index = akb_doc_image_index(doc_owner, doc, image);
   hash = akb_fnv1a64_mix_u64(hash, (uint64_t)image_index);
   hash = akb_fnv1a64_mix_u64(hash, (uint64_t)length);
 
-  if (path[0]
-#if defined(_WIN32)
-      && _stat(path, &st) == 0
-#else
-      && stat(path, &st) == 0
-#endif
-  ) {
-    hash = akb_fnv1a64_mix_u64(hash, (uint64_t)st.st_size);
-    hash = akb_fnv1a64_mix_u64(hash, (uint64_t)st.st_mtime);
+  if (akb_embedded_source_stat(doc_owner,
+                               doc,
+                               &source_size,
+                               &source_mtime)) {
+    hash = akb_fnv1a64_mix_u64(hash, source_size);
+    hash = akb_fnv1a64_mix_u64(hash, source_mtime);
   }
 
   return hash;
@@ -91,6 +186,22 @@ akb_file_has_size(const char *path, size_t length) {
 }
 
 static int
+akb_path_is_absolute(const char *path) {
+  if (!path || !path[0])
+    return 0;
+
+#if defined(_WIN32)
+  return path[0] == '/'
+         || path[0] == '\\'
+         || (path[1] == ':'
+             && ((path[0] >= 'A' && path[0] <= 'Z')
+                 || (path[0] >= 'a' && path[0] <= 'z')));
+#else
+  return path[0] == '/';
+#endif
+}
+
+static int
 akb_write_file_once(const char *path, const unsigned char *data, size_t length) {
   FILE *file;
   size_t written;
@@ -112,7 +223,11 @@ akb_write_file_once(const char *path, const unsigned char *data, size_t length) 
 }
 
 static int
-akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
+akb_copy_embedded_texture_path(AkbSharedDoc *doc_owner,
+                               AkDoc *doc,
+                               AkImage *image,
+                               char *dest,
+                               size_t capacity) {
   AkImageSource *source;
   AkBuffer *buff;
   const unsigned char *data;
@@ -135,11 +250,13 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
   /*
    * Package loaders retain the archive member name in resolvedPath while
    * exposing the member bytes through source->buffer.  That member name is
-   * not a filesystem path Blender can open, so only reuse resolvedPath for
-   * buffered images when it already names the extracted payload.
+   * not a filesystem path Blender can open.  Absolute resolved paths are
+   * derived filesystem/cache paths, including the path this function stores
+   * after the first extraction, and can be reused without another stat call.
    */
   if (source && source->resolvedPath
-      && (!data || length == 0
+      && (akb_path_is_absolute(source->resolvedPath)
+          || !data || length == 0
           || akb_file_has_size(source->resolvedPath, length))) {
     snprintf(dest, capacity, "%s", source->resolvedPath);
     return dest[0] != '\0';
@@ -155,11 +272,15 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
     tmpdir = "/tmp";
 
   akb_path_join(dir, sizeof(dir), tmpdir, "assetkit_blender");
-  if (!akb_mkdir_if_needed(dir))
-    return 0;
+  if (!doc_owner || doc_owner->doc != doc || !doc_owner->embedded_texture_dir_ready) {
+    if (!akb_mkdir_if_needed(dir))
+      return 0;
+    if (doc_owner && doc_owner->doc == doc)
+      doc_owner->embedded_texture_dir_ready = 1;
+  }
 
   hash = borrowed_slice
-           ? akb_embedded_image_cache_hash(doc, image, length)
+           ? akb_embedded_image_cache_hash(doc_owner, doc, image, length)
            : akb_fnv1a64(data, length);
   ext = akb_embedded_image_extension(data, length, source->mimeType);
   snprintf(filename,
@@ -169,7 +290,9 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
            ext);
   akb_path_join(dest, capacity, dir, filename);
 
-  if (!akb_write_file_once(dest, data, length)) {
+  if (!akb_write_file_once(dest, data, length)
+      && (!akb_mkdir_if_needed(dir)
+          || !akb_write_file_once(dest, data, length))) {
     dest[0] = '\0';
     return 0;
   }
@@ -181,7 +304,11 @@ akb_copy_embedded_texture_path(AkDoc *doc, AkImage *image, char *dest, size_t ca
 }
 
 static void
-akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
+akb_copy_image_path(AkbSharedDoc *doc_owner,
+                    AkDoc *doc,
+                    AkImage *image,
+                    char *dest,
+                    size_t capacity) {
   AkImageSource *source;
   const char *path;
   char resolved[PATH_MAX];
@@ -200,13 +327,13 @@ akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
   if (source->buffer
       && source->buffer->data
       && source->buffer->length > 0) {
-    akb_copy_embedded_texture_path(doc, image, dest, capacity);
+    akb_copy_embedded_texture_path(doc_owner, doc, image, dest, capacity);
     return;
   }
 
   path = source->resolvedPath ? source->resolvedPath : source->uri;
   if (!path || !path[0]) {
-    akb_copy_embedded_texture_path(doc, image, dest, capacity);
+    akb_copy_embedded_texture_path(doc_owner, doc, image, dest, capacity);
     return;
   }
 
@@ -219,7 +346,11 @@ akb_copy_image_path(AkDoc *doc, AkImage *image, char *dest, size_t capacity) {
 }
 
 static void
-akb_copy_texture_path(AkDoc *doc, AkTextureRef *texref, char *dest, size_t capacity) {
+akb_copy_texture_path(AkbSharedDoc *doc_owner,
+                      AkDoc *doc,
+                      AkTextureRef *texref,
+                      char *dest,
+                      size_t capacity) {
   AkImage *image;
 
   if (!dest || capacity == 0)
@@ -229,7 +360,7 @@ akb_copy_texture_path(AkDoc *doc, AkTextureRef *texref, char *dest, size_t capac
   if (!texref || !texref->texture || !(image = texref->texture->image))
     return;
 
-  akb_copy_image_path(doc, image, dest, capacity);
+  akb_copy_image_path(doc_owner, doc, image, dest, capacity);
 }
 
 static int
@@ -261,10 +392,13 @@ akb_cstr_has(const char *value) {
 }
 
 static int
-akb_copy_texture_path_alloc(AkDoc *doc, AkTextureRef *texref, char **dest) {
+akb_copy_texture_path_alloc(AkbSharedDoc *doc_owner,
+                            AkDoc *doc,
+                            AkTextureRef *texref,
+                            char **dest) {
   char path[1024];
 
-  akb_copy_texture_path(doc, texref, path, sizeof(path));
+  akb_copy_texture_path(doc_owner, doc, texref, path, sizeof(path));
   return akb_strdup_to(dest, path);
 }
 
@@ -549,7 +683,8 @@ akb_material_input_is_fast_base_color(AkMeshPrimitive *prim,
 }
 
 static int
-akb_extract_material_fast_surface(AkDoc *doc,
+akb_extract_material_fast_surface(AkbSharedDoc *doc_owner,
+                                  AkDoc *doc,
                                   AkInstanceGeometry *instance,
                                   AkMeshPrimitive *prim,
                                   AkMaterialSurface *surface,
@@ -580,7 +715,8 @@ akb_extract_material_fast_surface(AkDoc *doc,
   out->material_type = (uint32_t)surface->type;
   out->double_sided = (surface->flags & AK_MATERIAL_FLAG_DOUBLE_SIDED) ? 1 : 0;
   akb_material_input_color4(surface->baseColor, 1.0f, 1.0f, 1.0f, 1.0f, out->base_color);
-  if (!akb_copy_texture_path_alloc(doc,
+  if (!akb_copy_texture_path_alloc(doc_owner,
+                                   doc,
                                    surface->baseColor ? surface->baseColor->texture : NULL,
                                    &out->base_color_texture))
     return 0;
@@ -593,7 +729,8 @@ akb_extract_material_fast_surface(AkDoc *doc,
 }
 
 static void
-akb_copy_texture_info(AkDoc *doc,
+akb_copy_texture_info(AkbSharedDoc *doc_owner,
+                      AkDoc *doc,
                       AkInstanceGeometry *instance,
                       AkMeshPrimitive *prim,
                       AkMaterialInput *input,
@@ -607,7 +744,7 @@ akb_copy_texture_info(AkDoc *doc,
   AkTextureTransform *transform;
 
   texref = input ? input->texture : NULL;
-  if (!akb_copy_texture_path_alloc(doc, texref, dest))
+  if (!akb_copy_texture_path_alloc(doc_owner, doc, texref, dest))
     return;
   if (!dest || !*dest || !(*dest)[0])
     return;
@@ -706,7 +843,8 @@ akb_instance_affects_material(AkMeshPrimitive *prim, AkInstanceGeometry *instanc
 }
 
 static void
-akb_extract_material(AkDoc *doc,
+akb_extract_material(AkbSharedDoc *doc_owner,
+                     AkDoc *doc,
                      AkInstanceGeometry *instance,
                      AkMeshPrimitive *prim,
                      AkbPrimitive *out) {
@@ -787,13 +925,18 @@ akb_extract_material(AkDoc *doc,
 
   if (mat)
     out->material_extra = ak_extra(mat);
-  if (akb_extract_material_fast_surface(doc, instance, prim, surface, out))
+  if (akb_extract_material_fast_surface(doc_owner,
+                                        doc,
+                                        instance,
+                                        prim,
+                                        surface,
+                                        out))
     return;
 
   out->material_type = (uint32_t)surface->type;
 
 #define AKB_COPY_TEX(ROLE, TEXREF, DEST) \
-  akb_copy_texture_info(doc, instance, prim, (TEXREF), (ROLE), &(DEST), out)
+  akb_copy_texture_info(doc_owner, doc, instance, prim, (TEXREF), (ROLE), &(DEST), out)
 
   out->double_sided = (surface->flags & AK_MATERIAL_FLAG_DOUBLE_SIDED) ? 1 : 0;
   out->alpha_cutoff = surface->alphaCutoff;

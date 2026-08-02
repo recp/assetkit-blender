@@ -77,6 +77,7 @@ from .shader import (
 )
 
 ACTIVE_TEMPLATE_CLONING = True
+ACTIVE_VALIDATED_TEMPLATE_KEYS: set[object] | None = None
 _MATERIAL_TEMPLATE_CACHE: dict[object, bpy.types.Material] = {}
 _MATERIAL_CACHE_KEY_AUTO = object()
 NO_MATERIAL_CACHE_KEY = object()
@@ -1058,7 +1059,8 @@ def _configure_base_color_texture_fast_material(
         socket = bsdf_inputs.get("Roughness")
         if socket:
             socket.default_value = data.roughness
-    _apply_material_ior(mat, bsdf, data)
+    if abs(float(_material_ior(data)) - 1.5) > 1.0e-6:
+        _apply_material_ior(mat, bsdf, data)
 
     colorspace = _texture_color_space(tex_info, "sRGB")
     path = data.base_color_texture
@@ -1142,10 +1144,7 @@ def _copy_base_color_texture_template_material(
     if key is None:
         return None
 
-    template = _MATERIAL_TEMPLATE_CACHE.get(key)
-    if template is not None and not _material_ref_alive(template):
-        _MATERIAL_TEMPLATE_CACHE.pop(key, None)
-        template = None
+    template = _cached_material_template(key)
 
     if template is None:
         template = bpy.data.materials.new(".AssetKit_BaseColorTexture_Template")
@@ -1160,6 +1159,8 @@ def _copy_base_color_texture_template_material(
                 pass
             return None
         _MATERIAL_TEMPLATE_CACHE[key] = template
+        if ACTIVE_VALIDATED_TEMPLATE_KEYS is not None:
+            ACTIVE_VALIDATED_TEMPLATE_KEYS.add(key)
 
     try:
         mat = template.copy()
@@ -1191,10 +1192,7 @@ def _copy_base_color_texture_empty_template_material(
     base_color: tuple[float, float, float, float],
 ) -> bpy.types.Material | None:
     key = ("base-color-texture-empty-template", int(data.material_type))
-    template = _MATERIAL_TEMPLATE_CACHE.get(key)
-    if template is not None and not _material_ref_alive(template):
-        _MATERIAL_TEMPLATE_CACHE.pop(key, None)
-        template = None
+    template = _cached_material_template(key)
 
     if template is None:
         template = bpy.data.materials.new(".AssetKit_BaseColorTexture_EmptyTemplate")
@@ -1210,6 +1208,8 @@ def _copy_base_color_texture_empty_template_material(
                 pass
             return None
         _MATERIAL_TEMPLATE_CACHE[key] = template
+        if ACTIVE_VALIDATED_TEMPLATE_KEYS is not None:
+            ACTIVE_VALIDATED_TEMPLATE_KEYS.add(key)
 
     try:
         mat = template.copy()
@@ -1238,7 +1238,8 @@ def _copy_base_color_texture_empty_template_material(
     specular_level = _pbr_specular_level(data)
     if abs(float(specular_level) - 0.5) > 1e-6:
         _set_first_input(bsdf, ("Specular IOR Level", "Specular"), specular_level)
-    _apply_material_ior(mat, bsdf, data)
+    if abs(float(_material_ior(data)) - 1.5) > 1.0e-6:
+        _apply_material_ior(mat, bsdf, data)
 
     tex_info = _texture_info(data, "base_color")
     tex = _new_fast_image_texture_node(
@@ -1275,10 +1276,7 @@ def _copy_classic_texture_template_material(
     if key is None:
         return None
 
-    template = _MATERIAL_TEMPLATE_CACHE.get(key)
-    if template is not None and not _material_ref_alive(template):
-        _MATERIAL_TEMPLATE_CACHE.pop(key, None)
-        template = None
+    template = _cached_material_template(key)
 
     if template is None:
         template = bpy.data.materials.new(".AssetKit_ClassicTexture_Template")
@@ -1293,6 +1291,8 @@ def _copy_classic_texture_template_material(
                 pass
             return None
         _MATERIAL_TEMPLATE_CACHE[key] = template
+        if ACTIVE_VALIDATED_TEMPLATE_KEYS is not None:
+            ACTIVE_VALIDATED_TEMPLATE_KEYS.add(key)
 
     try:
         mat = template.copy()
@@ -1369,6 +1369,21 @@ def _material_ref_alive(mat: bpy.types.Material) -> bool:
         return False
     except Exception:
         return False
+
+
+def _cached_material_template(key: object) -> bpy.types.Material | None:
+    template = _MATERIAL_TEMPLATE_CACHE.get(key)
+    if template is None:
+        return None
+    validated = ACTIVE_VALIDATED_TEMPLATE_KEYS
+    if validated is not None and key in validated:
+        return template
+    if not _material_ref_alive(template):
+        _MATERIAL_TEMPLATE_CACHE.pop(key, None)
+        return None
+    if validated is not None:
+        validated.add(key)
+    return template
 
 
 def _reset_material_template_cache() -> None:
