@@ -340,21 +340,6 @@ akb_texture_info_for_role(AkbPrimitive *out, const char *role) {
 }
 
 static const char *
-akb_texture_role_color_space(const char *role) {
-  if (!role)
-    return "Non-Color";
-
-  if (strcmp(role, "base_color") == 0
-      || strcmp(role, "emissive") == 0
-      || strcmp(role, "specular_color") == 0
-      || strcmp(role, "sheen_color") == 0
-      || strcmp(role, "diffuse_transmission_color") == 0)
-    return "sRGB";
-
-  return "Non-Color";
-}
-
-static const char *
 akb_texture_role_channels(const char *role) {
   if (!role)
     return "";
@@ -389,7 +374,6 @@ akb_texture_role_channels(const char *role) {
 
 static void
 akb_material_input_color_space(AkMaterialInput *input,
-                               const char *role,
                                char *dest,
                                size_t capacity) {
   AkTextureColorSpace color_space;
@@ -399,12 +383,11 @@ akb_material_input_color_space(AkMaterialInput *input,
     return;
 
   color_space = input ? input->colorSpace : AK_TEXTURE_COLORSPACE_UNSPECIFIED;
+  /* Only AssetKit's explicit texture tag may enable Blender's sRGB decode. */
   if (color_space == AK_TEXTURE_COLORSPACE_SRGB)
     name = "sRGB";
-  else if (color_space == AK_TEXTURE_COLORSPACE_LINEAR)
-    name = "Non-Color";
   else
-    name = akb_texture_role_color_space(role);
+    name = "Non-Color";
 
   snprintf(dest, capacity, "%s", name);
 }
@@ -545,7 +528,7 @@ akb_material_input_is_fast_base_color(AkMeshPrimitive *prim,
       || texref->transform
       || ak_materialTextureSlot(prim, instance, texref) > 0)
     return 0;
-  if (input->colorSpace == AK_TEXTURE_COLORSPACE_LINEAR)
+  if (input->colorSpace != AK_TEXTURE_COLORSPACE_SRGB)
     return 0;
   if (input->channels != AK_TEXTURE_CHANNEL_NONE
       && input->channels != AK_TEXTURE_CHANNEL_RGB
@@ -636,7 +619,6 @@ akb_copy_texture_info(AkDoc *doc,
   memset(info->path, 0, sizeof(info->path));
   snprintf(info->path, sizeof(info->path), "%s", *dest);
   akb_material_input_color_space(input,
-                                 role,
                                  info->color_space,
                                  sizeof(info->color_space));
   akb_material_input_channels(input,

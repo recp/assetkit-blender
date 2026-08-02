@@ -758,98 +758,6 @@ akb_fill_missing_components(float *values,
   }
 }
 
-static float
-akb_unit_clamp(float value) {
-  if (value < 0.0f)
-    return 0.0f;
-  if (value > 1.0f)
-    return 1.0f;
-  return value;
-}
-
-static float
-akb_color_normalize_factor(AkAccessor *acc) {
-  AkTypeId source_type;
-
-  if (!acc || acc->normalized || acc->originallyNormalized)
-    return 1.0f;
-
-  source_type = acc->originalComponentType
-                  ? acc->originalComponentType
-                  : acc->componentType;
-  switch (source_type) {
-    case AKT_UBYTE:
-      return 1.0f / 255.0f;
-    case AKT_BYTE:
-      return 1.0f / 127.0f;
-    case AKT_USHORT:
-      return 1.0f / 65535.0f;
-    case AKT_SHORT:
-      return 1.0f / 32767.0f;
-    case AKT_UINT:
-      return 1.0f / 4294967295.0f;
-    case AKT_INT:
-      return 1.0f / 2147483647.0f;
-    default:
-      return 1.0f;
-  }
-}
-
-static int
-akb_color_values_need_normalization(const float *values,
-                                    uint32_t loop_count,
-                                    uint32_t width,
-                                    uint32_t source_width) {
-  uint32_t comps, i, j;
-
-  if (!values || !loop_count || !width)
-    return 0;
-
-  comps = source_width ? source_width : width;
-  if (comps > width)
-    comps = width;
-  if (!comps)
-    return 0;
-
-  for (i = 0; i < loop_count; i++) {
-    for (j = 0; j < comps; j++) {
-      float value = values[(size_t)i * width + j];
-      if (!isfinite(value) || value < 0.0f || value > 1.0f)
-        return 1;
-    }
-  }
-
-  return 0;
-}
-
-static void
-akb_normalize_color_values(float *values,
-                           uint32_t loop_count,
-                           uint32_t width,
-                           uint32_t source_width,
-                           AkAccessor *acc) {
-  float factor;
-  uint32_t comps, i, j;
-
-  if (!values || !loop_count || !width)
-    return;
-
-  factor = akb_color_normalize_factor(acc);
-  if (factor == 1.0f)
-    return;
-
-  comps = source_width ? source_width : width;
-  if (comps > width)
-    comps = width;
-  if (!comps || !akb_color_values_need_normalization(values, loop_count, width, comps))
-    return;
-
-  for (i = 0; i < loop_count; i++) {
-    for (j = 0; j < comps; j++)
-      values[(size_t)i * width + j] = akb_unit_clamp(values[(size_t)i * width + j] * factor);
-  }
-}
-
 static void
 akb_loop_attr_name(AkbLoopFloatAttribute *attr,
                    const char *prefix,
@@ -971,12 +879,6 @@ akb_extract_loop_float_attrs(AkbArena *arena,
                                 width,
                                 input->accessor->componentCount,
                                 missing_default);
-    if (input->semantic == AK_INPUT_COLOR || akb_raw_semantic_starts_with(input, "COLOR"))
-      akb_normalize_color_values(attrs[count].values,
-                                 loop_count,
-                                 width,
-                                 input->accessor->componentCount,
-                                 input->accessor);
     akb_loop_attr_name(&attrs[count], name_prefix, count);
     count++;
   }
@@ -1054,12 +956,6 @@ akb_extract_one_loop_float_attr(AkbArena *arena,
                               width,
                               input->accessor->componentCount,
                               missing_default);
-  if (input->semantic == AK_INPUT_COLOR || akb_raw_semantic_starts_with(input, "COLOR"))
-    akb_normalize_color_values(attrs[0].values,
-                               loop_count,
-                               width,
-                               input->accessor->componentCount,
-                               input->accessor);
   akb_loop_attr_name(attrs, name_prefix, 0);
 
   *attrs_out = attrs;

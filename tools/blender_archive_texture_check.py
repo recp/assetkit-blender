@@ -276,6 +276,11 @@ def _assert_texture(mode: str, archive_path: Path) -> None:
         raise AssertionError(
             f"{archive_path.name} {mode}: unexpected archive image size {tuple(image.size)}"
         )
+    if image.colorspace_settings.name != "sRGB":
+        raise AssertionError(
+            f"{archive_path.name} {mode}: AssetKit color texture was tagged "
+            f"{image.colorspace_settings.name!r}, expected 'sRGB'"
+        )
 
 
 def main() -> None:
