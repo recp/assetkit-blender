@@ -651,19 +651,35 @@ akb_export_material_features(AkDoc             *doc,
         double factor;
         int factor_slot;
         int color_slot;
+        int factor_is_level;
 
-        if (item_size != 9
-            || !PyArg_ParseTuple(item,
-                                 "ldziOOziO",
-                                 &feature_type,
-                                 &factor,
-                                 &factor_uri,
-                                 &factor_slot,
-                                 &factor_info,
-                                 &color_obj,
-                                 &color_uri,
-                                 &color_slot,
-                                 &color_info)) {
+        factor_is_level = 0;
+        if ((item_size == 10
+             && !PyArg_ParseTuple(item,
+                                  "ldziOOziOp",
+                                  &feature_type,
+                                  &factor,
+                                  &factor_uri,
+                                  &factor_slot,
+                                  &factor_info,
+                                  &color_obj,
+                                  &color_uri,
+                                  &color_slot,
+                                  &color_info,
+                                  &factor_is_level))
+            || (item_size == 9
+                && !PyArg_ParseTuple(item,
+                                     "ldziOOziO",
+                                     &feature_type,
+                                     &factor,
+                                     &factor_uri,
+                                     &factor_slot,
+                                     &factor_info,
+                                     &color_obj,
+                                     &color_uri,
+                                     &color_slot,
+                                     &color_info))
+            || (item_size != 9 && item_size != 10)) {
           Py_DECREF(features_seq);
           return 0;
         }
@@ -679,7 +695,9 @@ akb_export_material_features(AkDoc             *doc,
         feature->factor = akb_export_feature_scalar_input(doc,
                                                           feature,
                                                           (float)factor,
-                                                          AK_TEXTURE_CHANNEL_A,
+                                                          factor_is_level
+                                                            ? AK_TEXTURE_CHANNEL_R
+                                                            : AK_TEXTURE_CHANNEL_A,
                                                           AK_TEXTURE_COLORSPACE_LINEAR,
                                                           factor_uri,
                                                           factor_slot,
@@ -1288,6 +1306,7 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   int                emissive_slot;
   int                material_type;
   int                opacity_inverted;
+  int                normal_is_height;
   int                alpha_mode;
   int                double_sided;
   Py_ssize_t         obj_size;
@@ -1337,11 +1356,59 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   emissive_slot = 0;
   material_type = 0;
   opacity_inverted = 0;
+  normal_is_height = 0;
   emissive_color_obj = Py_None;
   memset(&color_view, 0, sizeof(color_view));
   memset(&emissive_color_view, 0, sizeof(emissive_color_view));
   obj_size = PyTuple_Check(obj) ? PyTuple_Size(obj) : -1;
-  if (obj_size == 42) {
+  if (obj_size == 43) {
+    if (!PyArg_ParseTuple(obj,
+                          "sOddidpzizizizidzidOzidOOOOOOiiOOOziiOziiOp",
+                          &name,
+                          &color_obj,
+                          &metallic,
+                          &roughness,
+                          &alpha_mode,
+                          &alpha_cutoff,
+                          &double_sided,
+                          &base_color_uri,
+                          &base_color_slot,
+                          &opacity_uri,
+                          &opacity_slot,
+                          &metallic_roughness_uri,
+                          &metallic_roughness_slot,
+                          &normal_uri,
+                          &normal_slot,
+                          &normal_scale,
+                          &occlusion_uri,
+                          &occlusion_slot,
+                          &occlusion_strength,
+                          &emissive_color_obj,
+                          &emissive_uri,
+                          &emissive_slot,
+                          &emissive_strength,
+                          &base_color_info_obj,
+                          &opacity_info_obj,
+                          &metallic_roughness_info_obj,
+                          &normal_info_obj,
+                          &occlusion_info_obj,
+                          &emissive_info_obj,
+                          &material_type,
+                          &opacity_inverted,
+                          &features_obj,
+                          &animations_obj,
+                          &extra_obj,
+                          &metallic_uri,
+                          &metallic_slot,
+                          &metallic_channel,
+                          &metallic_info_obj,
+                          &roughness_uri,
+                          &roughness_slot,
+                          &roughness_channel,
+                          &roughness_info_obj,
+                          &normal_is_height))
+      return NULL;
+  } else if (obj_size == 42) {
     if (!PyArg_ParseTuple(obj,
                           "sOddidpzizizizidzidOzidOOOOOOiiOOOziiOziiO",
                           &name,
@@ -1829,12 +1896,17 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
 
   if (normal_uri && normal_uri[0]) {
     AkTextureRef *normal_texture;
+    AkTextureChannels normal_channels;
+
+    normal_channels = normal_is_height
+                      ? AK_TEXTURE_CHANNEL_R
+                      : AK_TEXTURE_CHANNEL_RGB;
 
     surface->normal = akb_export_material_scalar(heap,
                                                  surface,
                                                  AK_MATERIAL_SEMANTIC_NORMAL,
                                                  (float)normal_scale,
-                                                 AK_TEXTURE_CHANNEL_RGB);
+                                                 normal_channels);
     if (!surface->normal) {
       AKB_EXPORT_MAT_RELEASE_BUFFERS();
       return NULL;
@@ -1844,7 +1916,7 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
                                        surface->normal,
                                        normal_uri,
                                        AK_TEXTURE_COLORSPACE_LINEAR,
-                                       AK_TEXTURE_CHANNEL_RGB,
+                                       normal_channels,
                                        (int32_t)normal_slot,
                                        normal_info_obj);
     if (PyErr_Occurred()) {
@@ -1854,6 +1926,8 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
     if (normal_texture) {
       surface->normal->texture = normal_texture;
       surface->normal->source  = AK_MATERIAL_INPUT_TEXTURE;
+      if (normal_is_height)
+        surface->normal->flags |= AK_MATERIAL_INPUT_FLAG_HEIGHT;
     }
   }
 

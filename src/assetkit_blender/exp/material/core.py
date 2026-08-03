@@ -72,6 +72,7 @@ def _material_tuple(
     normal_texture = None
     normal_slot = 0
     normal_info = None
+    normal_is_height = False
     metallic_image = None
     roughness_image = None
     metallic_channel = 0
@@ -188,7 +189,7 @@ def _material_tuple(
                         base_color_texture = image_store.path_for(base_color_image)
                 metallic_texture = image_store.path_for(metallic_image) if metallic_image else None
                 roughness_texture = image_store.path_for(roughness_image) if roughness_image else None
-                normal_texture, normal_slot, normal_scale, normal_info = _normal_texture_info(
+                normal_texture, normal_slot, normal_scale, normal_info, normal_is_height = _normal_texture_info(
                     bsdf.inputs.get("Normal"),
                     image_store,
                     uv_slot_by_name,
@@ -314,6 +315,7 @@ def _material_tuple(
             normal_info = None
             normal_slot = 0
             normal_scale = 1.0
+            normal_is_height = False
             occlusion_texture = None
             occlusion_info = None
             occlusion_slot = 0
@@ -451,4 +453,5 @@ def _material_tuple(
         int(obj_roughness_slot),
         int(obj_roughness_channel),
         obj_roughness_info,
+        bool(normal_is_height),
     )

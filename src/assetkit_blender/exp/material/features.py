@@ -94,16 +94,36 @@ def _material_feature_tuples(
             clearcoat_normal[3],
         ))
 
-    specular_factor = _scalar_texture_payload(
-        bsdf.inputs.get("Specular IOR Level"),
-        image_store,
-        uv_slot_by_name,
-        default=0.5,
-        linked_default=0.5,
-        scale=2.0,
-        target_channel=3,
-        name=f"{material.name}_specular",
-    )
+    specular_socket = bsdf.inputs.get("Specular IOR Level")
+    specular_level_node = None
+    if specular_socket is not None and specular_socket.is_linked:
+        for link in specular_socket.links:
+            node = link.from_node
+            if node.get("assetkit_specular_kind") == "level":
+                specular_level_node = node
+                break
+    specular_is_level = specular_level_node is not None
+    if specular_is_level:
+        specular_factor = _scalar_texture_payload(
+            specular_socket,
+            image_store,
+            uv_slot_by_name,
+            default=1.0,
+            linked_default=float(specular_level_node.get("assetkit_specular_factor", 1.0)),
+            target_channel=0,
+            name=f"{material.name}_specularLevel",
+        )
+    else:
+        specular_factor = _scalar_texture_payload(
+            specular_socket,
+            image_store,
+            uv_slot_by_name,
+            default=0.5,
+            linked_default=0.5,
+            scale=2.0,
+            target_channel=3,
+            name=f"{material.name}_specular",
+        )
     specular_color = _color_texture_payload(
         bsdf.inputs.get("Specular Tint"),
         image_store,
@@ -136,6 +156,7 @@ def _material_feature_tuples(
             _FEATURE_SPECULAR,
             *specular_factor,
             *specular_color,
+            specular_is_level,
         ))
 
     transmission = _scalar_texture_payload(

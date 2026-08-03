@@ -9,6 +9,7 @@ Run with:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import tempfile
@@ -28,9 +29,26 @@ from assetkit_blender.enums import AK_FILE_TYPE_DAE  # noqa: E402
 from assetkit_blender.exp.exporter import export_scene  # noqa: E402
 from assetkit_blender.importer import import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
+from assetkit_blender.imp.viewport import (  # noqa: E402
+    _DEFAULT_LINE_PREVIEW_COLOR,
+    _clean_viewport_overlay,
+    _set_line_preview_shading,
+)
 
 
 COLOR_SET_COUNT = 40
+
+
+def assert_color(
+    actual: tuple[float, ...],
+    expected: tuple[float, ...],
+    label: str,
+) -> None:
+    if len(actual) != len(expected) or any(
+        not math.isclose(got, wanted, rel_tol=1.0e-6, abs_tol=1.0e-6)
+        for got, wanted in zip(actual, expected)
+    ):
+        raise AssertionError(f"{label}: expected {expected}, got {actual}")
 
 
 def reset_scene() -> None:
@@ -241,6 +259,21 @@ def inspect_mixed_surface_line_roundtrip(
         raise AssertionError(
             f"material-less mixed line gained a material slot: {line_material_slot}"
         )
+    if expect_line_material:
+        line_material = obj.material_slots[line_material_slot].material
+        if line_material is None:
+            raise AssertionError("mixed line material slot is empty")
+        assert_color(
+            tuple(obj.color),
+            tuple(line_material.diffuse_color),
+            "mixed line viewport color",
+        )
+    else:
+        assert_color(
+            tuple(obj.color),
+            _DEFAULT_LINE_PREVIEW_COLOR,
+            "material-less line viewport fallback",
+        )
 
     result = export_scene(bpy.context, out_path, AK_FILE_TYPE_DAE)
     if result < 0 or not out_path.is_file():
@@ -317,6 +350,28 @@ def main(argv: list[str]) -> int:
         material_less_roundtrip_path,
         expect_line_material=False,
     )
+
+    class FakeShading:
+        wireframe_color_type = "THEME"
+
+    class FakeOverlay:
+        show_wireframes = True
+        wireframe_opacity = 0.0
+        show_relationship_lines = True
+
+    shading = FakeShading()
+    overlay = FakeOverlay()
+    _set_line_preview_shading(shading)
+    _clean_viewport_overlay(overlay)
+    if shading.wireframe_color_type != "OBJECT":
+        raise AssertionError("line preview does not use object/material colors")
+    if overlay.show_wireframes:
+        raise AssertionError("polygon wireframe overlay was not hidden")
+    if overlay.wireframe_opacity != 1.0:
+        raise AssertionError("authored loose edges remain transparent")
+    if overlay.show_relationship_lines:
+        raise AssertionError("relationship-line overlay was not hidden")
+
     print(
         "BeamNG COLLADA checks passed: "
         f"{dae_path}; mixed surface/line: {mixed_roundtrip_path}; "

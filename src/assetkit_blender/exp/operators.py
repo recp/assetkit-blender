@@ -11,7 +11,7 @@ from ..enums import (
     AK_DAE_EXPORT_INDEX_MULTI,
     AK_DAE_EXPORT_INDEX_SINGLE,
     AK_DAE_EXPORT_VERSION_1_4,
-    AK_DAE_EXPORT_VERSION_1_5,
+    AK_DAE_EXPORT_VERSION_1_5_1,
     AK_DAE_EXPORT_VERSION_AUTO,
     AK_GLTF_EXPORT_VERSION_2_0,
     AK_GLTF_EXPORT_VERSION_AUTO,
@@ -22,7 +22,7 @@ from .common import EXPORT_FORMATS, file_type_from_format, suffix_from_format
 _DAE_VERSION_VALUES = {
     "AUTO": AK_DAE_EXPORT_VERSION_AUTO,
     "1_4": AK_DAE_EXPORT_VERSION_1_4,
-    "1_5": AK_DAE_EXPORT_VERSION_1_5,
+    "1_5": AK_DAE_EXPORT_VERSION_1_5_1,
 }
 
 _DAE_INDEX_MODE_VALUES = {
@@ -320,7 +320,11 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         items=(
             ("AUTO", "Auto", "Use AssetKit's lowest compatible COLLADA version"),
             ("1_4", "1.4.1", "Force COLLADA 1.4.1"),
-            ("1_5", "1.5.0", "Force COLLADA 1.5.0"),
+            (
+                "1_5",
+                "1.5.1",
+                "Use the latest COLLADA 1.5 specification revision (schema 1.5.0)",
+            ),
         ),
         default="AUTO",
     )

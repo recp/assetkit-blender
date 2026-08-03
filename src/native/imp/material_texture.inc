@@ -492,6 +492,9 @@ akb_texture_role_channels(const char *role) {
   if (strcmp(role, "specular") == 0
       || strcmp(role, "diffuse_transmission") == 0)
     return "A";
+  if (strcmp(role, "height") == 0
+      || strcmp(role, "specular_level") == 0)
+    return "R";
   if (strcmp(role, "base_color") == 0
       || strcmp(role, "emissive") == 0
       || strcmp(role, "normal") == 0
@@ -814,6 +817,13 @@ akb_clampf(float value, float min_value, float max_value) {
   return value;
 }
 
+static float
+akb_classic_roughness(float shininess) {
+  if (shininess <= 0.0f)
+    return 1.0f;
+  return akb_clampf(sqrtf(2.0f / (shininess + 2.0f)), 0.0f, 1.0f);
+}
+
 static AkInstanceGeometry *
 akb_node_geometry_instance(AkNode *node) {
   return node ? node->geometry : NULL;
@@ -958,7 +968,11 @@ akb_extract_material(AkbSharedDoc *doc_owner,
 
   if (surface->normal) {
     out->normal_scale = akb_material_input_scalar(surface->normal, 1.0f);
-    AKB_COPY_TEX("normal", surface->normal, out->normal_texture);
+    AKB_COPY_TEX(
+      (surface->normal->flags & AK_MATERIAL_INPUT_FLAG_HEIGHT)
+        ? "height" : "normal",
+      surface->normal,
+      out->normal_texture);
   }
 
   if (surface->occlusion) {
@@ -990,18 +1004,6 @@ akb_extract_material(AkbSharedDoc *doc_owner,
     out->roughness = 1.0f - akb_clampf(out->specular_strength, 0.0f, 1.0f);
   }
 
-  specular = (void*)ak_materialFeature(surface, AK_MATERIAL_FEATURE_SPECULAR);
-  if (specular) {
-    if (specular->factor) {
-      out->specular_strength = akb_material_input_scalar(specular->factor, out->specular_strength);
-      AKB_COPY_TEX("specular", specular->factor, out->specular_texture);
-    }
-    if (specular->color) {
-      akb_material_input_color3(specular->color, 1.0f, 1.0f, 1.0f, out->specular_color);
-      AKB_COPY_TEX("specular_color", specular->color, out->specular_color_texture);
-    }
-  }
-
   classic = (void*)ak_materialFeature(surface, AK_MATERIAL_FEATURE_CLASSIC);
   if (classic) {
     if (classic->diffuse) {
@@ -1017,8 +1019,30 @@ akb_extract_material(AkbSharedDoc *doc_owner,
       AKB_COPY_TEX("emissive", classic->emission, out->emissive_texture);
     }
     out->specular_strength = classic->shininess;
+    out->roughness = akb_classic_roughness(classic->shininess);
     if (classic->ior > 0.0f)
       out->ior = classic->ior;
+  }
+
+  /* Preserve classic shininess in roughness before the modern specular
+     feature supplies its independent factor. */
+  specular = (void*)ak_materialFeature(surface, AK_MATERIAL_FEATURE_SPECULAR);
+  if (specular) {
+    if (specular->factor) {
+      out->specular_strength = akb_material_input_scalar(specular->factor,
+                                                         out->specular_strength);
+      AKB_COPY_TEX(
+        specular->factor->channels == AK_TEXTURE_CHANNEL_R
+          ? "specular_level" : "specular",
+        specular->factor,
+        out->specular_texture);
+    }
+    if (specular->color) {
+      akb_material_input_color3(specular->color, 1.0f, 1.0f, 1.0f,
+                                out->specular_color);
+      AKB_COPY_TEX("specular_color", specular->color,
+                   out->specular_color_texture);
+    }
   }
 
   clearcoat = (void*)ak_materialFeature(surface, AK_MATERIAL_FEATURE_CLEARCOAT);

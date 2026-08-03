@@ -450,15 +450,16 @@ def _link_factor_texture(
     channel: str,
     factor: float = 1.0,
     tex_info: TextureRefData | None = None,
-) -> None:
+) -> object | None:
     output = _factor_texture_output(mat, path, colorspace, channel, factor, tex_info)
     if not output:
-        return
+        return None
     for input_name in input_names:
         socket = target.inputs.get(input_name)
         if socket:
             mat.node_tree.links.new(output, socket)
-            return
+            return output
+    return None
 
 
 def _factor_texture_output(
@@ -1189,6 +1190,33 @@ def _link_metallic_roughness_texture(
         links.new(metallic_output, metallic)
 
 
+def _link_normal_texture_node(
+    mat: bpy.types.Material,
+    bsdf,
+    tex,
+    strength: float,
+    tex_info: TextureRefData | None = None,
+    input_name: str = "Normal",
+):
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    is_height = bool(tex_info and tex_info.role == "height")
+    normal_node = nodes.new("ShaderNodeBump" if is_height else "ShaderNodeNormalMap")
+    role = "clearcoat_normal" if input_name == "Coat Normal" else "normal"
+    normal_node.label = f"AssetKit {'height' if is_height else role}"
+    normal_node["assetkit_normal_role"] = role
+    normal_node["assetkit_normal_kind"] = "height" if is_height else "normal"
+    normal_node.inputs["Strength"].default_value = strength
+    source_input = normal_node.inputs.get("Height" if is_height else "Color")
+    color_output = tex.outputs.get("Color")
+    if color_output and source_input:
+        links.new(color_output, source_input)
+    normal = bsdf.inputs.get(input_name)
+    if normal:
+        links.new(normal_node.outputs["Normal"], normal)
+    return normal_node
+
+
 def _link_normal_texture(
     mat: bpy.types.Material,
     bsdf,
@@ -1201,14 +1229,4 @@ def _link_normal_texture(
     if not tex:
         return
 
-    nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
-    normal_map = nodes.new("ShaderNodeNormalMap")
-    normal_map.label = f"AssetKit {(tex_info.role if tex_info else input_name)}"
-    if tex_info and tex_info.role:
-        normal_map["assetkit_normal_role"] = tex_info.role
-    normal_map.inputs["Strength"].default_value = strength
-    links.new(tex.outputs["Color"], normal_map.inputs["Color"])
-    normal = bsdf.inputs.get(input_name)
-    if normal:
-        links.new(normal_map.outputs["Normal"], normal)
+    _link_normal_texture_node(mat, bsdf, tex, strength, tex_info, input_name)

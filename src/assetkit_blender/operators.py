@@ -159,7 +159,10 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     )
     clean_viewport_overlays: bpy.props.BoolProperty(
         name="Clean Viewport Overlays",
-        description="Hide wireframe and relationship overlays after importing into an empty scene",
+        description=(
+            "Hide polygon wireframes and relationship lines while preserving "
+            "authored line primitives"
+        ),
         default=True,
     )
     fit_timeline: bpy.props.BoolProperty(

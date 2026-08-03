@@ -64,6 +64,7 @@ from .shader import (
     _link_factor_texture,
     _link_metallic_roughness_texture,
     _link_normal_texture,
+    _link_normal_texture_node,
     _link_occlusion_texture,
     _link_range_texture,
     _link_specular_glossiness_texture,
@@ -570,7 +571,7 @@ def _create_material(
     else:
         if _is_classic_lit_material(data):
             _set_input(bsdf, "Metallic", 0.0)
-            _set_input(bsdf, "Roughness", _classic_roughness(data.specular_strength))
+            _set_input(bsdf, "Roughness", data.roughness)
             _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _classic_specular(data))
         elif _is_specular_glossiness_material(data):
             _set_input(bsdf, "Metallic", 0.0)
@@ -654,16 +655,23 @@ def _create_material(
             if int(data.material_type) == _AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS:
                 _link_specular_glossiness_texture(mat, bsdf, data)
             else:
-                _link_factor_texture(
+                specular_info = _texture_info(data, "specular")
+                classic_level = bool(specular_info and specular_info.role == "specular_level")
+                specular_output = _link_factor_texture(
                     mat,
                     bsdf,
                     data.specular_texture,
                     ("Specular IOR Level", "Specular"),
                     colorspace="Non-Color",
-                    channel="Alpha",
-                    factor=_pbr_specular_level(data),
-                    tex_info=_texture_info(data, "specular"),
+                    channel="Red" if classic_level else "Alpha",
+                    factor=data.specular_strength if classic_level else _pbr_specular_level(data),
+                    tex_info=specular_info,
                 )
+                if classic_level and specular_output is not None:
+                    specular_node = getattr(specular_output, "node", None)
+                    if specular_node is not None:
+                        specular_node["assetkit_specular_kind"] = "level"
+                        specular_node["assetkit_specular_factor"] = float(data.specular_strength)
         if data.specular_color_texture:
             _link_color_texture(
                 mat,
@@ -1309,7 +1317,7 @@ def _copy_classic_texture_template_material(
     if bsdf:
         _set_input(bsdf, "Base Color", base_color)
         _set_input(bsdf, "Metallic", 0.0)
-        _set_input(bsdf, "Roughness", _classic_roughness(data.specular_strength))
+        _set_input(bsdf, "Roughness", data.roughness)
         _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _classic_specular(data))
         _set_input(
             bsdf,
@@ -1445,7 +1453,7 @@ def _configure_classic_texture_fast_material(
     if color_socket:
         color_socket.default_value = base_color
     _set_input(bsdf, "Metallic", 0.0)
-    _set_input(bsdf, "Roughness", _classic_roughness(data.specular_strength))
+    _set_input(bsdf, "Roughness", data.roughness)
     _set_first_input(bsdf, ("Specular IOR Level", "Specular"), _classic_specular(data))
     if _has_emission(data):
         _set_input(bsdf, "Emission Color", (*data.emissive_color, 1.0))
@@ -1475,23 +1483,7 @@ def _configure_classic_texture_fast_material(
     )
     normal_socket = bsdf_inputs.get("Normal")
     if normal_tex and normal_socket:
-        normal_map = tree.nodes.new("ShaderNodeNormalMap")
-        normal_map.label = "AssetKit normal"
-        try:
-            normal_map["assetkit_normal_role"] = "normal"
-        except Exception:
-            pass
-        if abs(float(data.normal_scale) - 1.0) > 1e-6:
-            scale = normal_map.inputs.get("Strength")
-            if scale:
-                scale.default_value = data.normal_scale
-        color_output = normal_tex.outputs.get("Color")
-        color_input = normal_map.inputs.get("Color")
-        normal_output = normal_map.outputs.get("Normal")
-        if color_output and color_input:
-            tree.links.new(color_output, color_input)
-        if normal_output:
-            tree.links.new(normal_output, normal_socket)
+        _link_normal_texture_node(mat, bsdf, normal_tex, data.normal_scale, normal_info)
     return True
 
 
@@ -1806,18 +1798,7 @@ def _apply_deferred_classic_texture_material(
     )
     normal_socket = bsdf_inputs.get("Normal")
     if normal_tex and normal_socket:
-        normal_map = tree.nodes.new("ShaderNodeNormalMap")
-        if abs(float(normal_scale) - 1.0) > 1e-6:
-            scale = normal_map.inputs.get("Strength")
-            if scale:
-                scale.default_value = normal_scale
-        color_output = normal_tex.outputs.get("Color")
-        color_input = normal_map.inputs.get("Color")
-        normal_output = normal_map.outputs.get("Normal")
-        if color_output and color_input:
-            tree.links.new(color_output, color_input)
-        if normal_output:
-            tree.links.new(normal_output, normal_socket)
+        _link_normal_texture_node(mat, bsdf, normal_tex, normal_scale, normal_tex_info)
     try:
         mat["assetkit_deferred_material_nodes"] = False
     except Exception:
@@ -1998,13 +1979,6 @@ def _is_default_rgb(values: tuple[float, ...]) -> bool:
 
 def _is_unlit_material(data: MeshPrimitiveData) -> bool:
     return int(data.material_type) == _AK_MATERIAL_TYPE_CONSTANT
-
-
-def _classic_roughness(shininess: float) -> float:
-    value = max(float(shininess), 0.0)
-    if value <= 0.0:
-        return 1.0
-    return max(0.0, min(1.0, math.sqrt(2.0 / (value + 2.0))))
 
 
 def _classic_specular(data: MeshPrimitiveData) -> float:

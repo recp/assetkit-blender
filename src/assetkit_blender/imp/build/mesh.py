@@ -54,6 +54,7 @@ from ..animation.object import _apply_animation, _apply_morph_presets, _apply_sh
 from ..objects import _set_node_visibility
 from ..profile import _record_finish_profile, _record_mesh_profile
 from ..skin import _apply_skin, _apply_skin_bind_shape
+from ..viewport import set_line_preview_color as _set_line_preview_color
 from .common import (
     _apply_matrix,
     _blender_natural_name_key,
@@ -705,6 +706,7 @@ def _create_grouped_mesh_object_bulk(
             "assetkit_mixed_line_primitive_extra_json",
             line_primitive.primitive_extra,
         )
+        _set_line_preview_color(obj, line_material)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"materials={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -834,6 +836,7 @@ def _assign_grouped_object_materials(
         "assetkit_mixed_line_primitive_extra_json",
         line_primitive.primitive_extra,
     )
+    _set_line_preview_color(obj, line_material)
 
 
 def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiveData | list[MeshPrimitiveData]]:
@@ -1574,10 +1577,13 @@ def _finish_mesh_object(
         now = time.perf_counter()
         object_ms = (now - phase_started_at) * 1000.0
         phase_started_at = now
+    material = None
     if assign_material:
         material = _material_for_data(data, material_cache)
         if material:
             _assign_mesh_material(obj, mesh, material, object_material_slot=object_material_slot)
+    if int(data.primitive_type) == AK_PRIMITIVE_LINES:
+        _set_line_preview_color(obj, material)
     if profile_detail:
         now = time.perf_counter()
         material_ms = (now - phase_started_at) * 1000.0

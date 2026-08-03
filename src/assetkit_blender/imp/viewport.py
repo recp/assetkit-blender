@@ -7,6 +7,9 @@ from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Vector
 
 
+_DEFAULT_LINE_PREVIEW_COLOR = (0.08, 0.08, 0.08, 1.0)
+
+
 def select_imported_objects(objects: list[bpy.types.Object]) -> None:
     if not objects:
         return
@@ -109,20 +112,66 @@ def set_viewport_material_preview(clean_overlays: bool = False) -> None:
                 if space.type != "VIEW_3D" or not hasattr(space, "shading"):
                     continue
                 try:
-                    space.shading.color_type = "MATERIAL"
-                    space.shading.type       = "MATERIAL"
+                    _set_material_preview_shading(space.shading)
+                    _set_line_preview_shading(space.shading)
                     if not clean_overlays:
                         continue
                     overlay = getattr(space, "overlay", None)
                     if overlay:
-                        if hasattr(overlay, "show_wireframes"):
-                            overlay.show_wireframes = False
-                        if hasattr(overlay, "wireframe_opacity"):
-                            overlay.wireframe_opacity = 0.0
-                        if hasattr(overlay, "show_relationship_lines"):
-                            overlay.show_relationship_lines = False
+                        _clean_viewport_overlay(overlay)
                 except Exception:
                     pass
+
+
+def _set_material_preview_shading(shading: object) -> None:
+    was_material_preview = shading.type == "MATERIAL"
+    shading.color_type = "MATERIAL"
+    shading.type       = "MATERIAL"
+    if was_material_preview:
+        return
+
+    # Blender's default material-preview light follows the view. That is
+    # convenient while sculpting, but it can make orthogonal faces keep nearly
+    # identical lighting while orbiting an imported asset. Keep the studio
+    # light in world space so authored normals remain visually meaningful,
+    # without replacing a Material Preview setup the user already chose.
+    if hasattr(shading, "use_studiolight_view_rotation"):
+        shading.use_studiolight_view_rotation = False
+    if hasattr(shading, "show_shadows"):
+        shading.show_shadows = True
+
+
+def _set_line_preview_shading(shading: object) -> None:
+    if hasattr(shading, "wireframe_color_type"):
+        shading.wireframe_color_type = "OBJECT"
+
+
+def set_line_preview_color(
+    obj: bpy.types.Object,
+    material: bpy.types.Material | None,
+) -> None:
+    color = (
+        material.diffuse_color
+        if material is not None
+        else _DEFAULT_LINE_PREVIEW_COLOR
+    )
+    try:
+        # Both RNA properties use Blender's linear color subtype. Assign the
+        # four-component view directly: no gamma work or per-edge conversion.
+        obj.color = color
+    except (AttributeError, TypeError, ValueError):
+        obj.color = _DEFAULT_LINE_PREVIEW_COLOR
+
+
+def _clean_viewport_overlay(overlay: object) -> None:
+    if hasattr(overlay, "show_wireframes"):
+        overlay.show_wireframes = False
+    if hasattr(overlay, "wireframe_opacity"):
+        # Polygon wireframes stay hidden, while loose edges remain visible in
+        # the owning object's line-material color selected above.
+        overlay.wireframe_opacity = 1.0
+    if hasattr(overlay, "show_relationship_lines"):
+        overlay.show_relationship_lines = False
 
 
 def focus_imported_objects(
@@ -469,15 +518,10 @@ def set_view_distance(
         minimum, maximum        = bounds
         region_3d.view_location = (minimum + maximum) * 0.5
         target                  = radius * viewport_distance_factor(radius)
-        current                 = float(
-            getattr(region_3d, "view_distance", 0.0) or 0.0
-        )
-        if (
-            current <= 0.0
-            or current > target * 2.0
-            or current < target * 0.35
-        ):
-            region_3d.view_distance = target
+        # A focus request is an explicit framing operation. Reusing a previous
+        # view distance within a broad tolerance made the same asset open at
+        # different zoom levels depending on the user's last manual dolly.
+        region_3d.view_distance = target
     except Exception:
         pass
 
@@ -661,7 +705,10 @@ def set_camera_clip(
 
 
 def clip_start_for_radius(radius: float) -> float:
-    return max(radius / 100_000.0, 0.001)
+    # Keep enough near-plane precision for coplanar authored line primitives.
+    # An excessively small near clip makes Blender's native loose-edge overlay
+    # alternate with the underlying surface and appear dashed at a distance.
+    return max(radius / 1_000.0, 0.001)
 
 
 def clip_end_for_radius(radius: float) -> float:

@@ -82,4 +82,12 @@ def _tuple_close(value, default: tuple[float, ...]) -> bool:
 
 
 def _texture_info(data: MeshPrimitiveData, role: str) -> TextureRefData | None:
-    return (data.texture_infos or {}).get(role)
+    infos = data.texture_infos or {}
+    info = infos.get(role)
+    if info is not None:
+        return info
+    if role == "normal":
+        return infos.get("height")
+    if role == "specular":
+        return infos.get("specular_level")
+    return None

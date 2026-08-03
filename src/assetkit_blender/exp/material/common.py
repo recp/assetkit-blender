@@ -857,22 +857,24 @@ def _normal_texture_info(
     socket,
     image_store: _ExportImageStore,
     uv_slot_by_name: dict[str, int],
-) -> tuple[str | None, int, float, tuple | None]:
+) -> tuple[str | None, int, float, tuple | None, bool]:
     image, _channel, slot, info = _linked_texture_info(socket, uv_slot_by_name)
     path = image_store.path_for(image) if image else None
     scale = 1.0
+    is_height = False
 
     if socket is not None and socket.is_linked:
         for link in socket.links:
             node = link.from_node
-            if node.type != "NORMAL_MAP":
+            if node.type not in {"NORMAL_MAP", "BUMP"}:
                 continue
+            is_height = node.type == "BUMP" or node.get("assetkit_normal_kind") == "height"
             strength = node.inputs.get("Strength")
             if strength is not None and not strength.is_linked:
                 scale = float(strength.default_value)
             break
 
-    return path, slot, scale, info
+    return path, slot, scale, info, is_height
 
 
 def _clamp01(value: float) -> float:
