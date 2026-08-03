@@ -1,6 +1,6 @@
 # AssetKit-Blender
 
-<img width="1824" height="913" alt="gh_social2" src="https://github.com/user-attachments/assets/124611a9-999e-4d59-8480-d37b26d7e5f4" />
+<img width="1280" height="640" alt="gh_social" src="https://github.com/user-attachments/assets/ae2b607a-259a-4832-b6d5-1b0afa7217c1" />
 
 Blender add-on for importing and exporting 3D assets through [AssetKit](https://github.com/recp/assetkit)
 
