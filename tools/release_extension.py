@@ -280,6 +280,7 @@ def main() -> int:
     assetkit_build_dir = args.assetkit_build_dir or (
         assetkit_root / ("build-static" if static_assetkit else "build")
     )
+    assetkit_build_dir = assetkit_build_dir.resolve()
     tag = platform_tag(args.platform)
 
     if args.clean_artifacts:
@@ -317,6 +318,7 @@ def main() -> int:
                 build_dir,
                 [
                     f"-DASSETKIT_ROOT={assetkit_root}",
+                    f"-DASSETKIT_BUILD_DIR={assetkit_build_dir}",
                     f"-DASSETKIT_BLENDER_STATIC_ASSETKIT={'ON' if static_assetkit else 'OFF'}",
                     f"-DPython3_EXECUTABLE={python}",
                     *([f"-DPython3_INCLUDE_DIR={python_include}"] if python_include else []),

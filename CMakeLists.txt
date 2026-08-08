@@ -6,6 +6,7 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(ASSETKIT_ROOT "" CACHE PATH "AssetKit source or install root")
+set(ASSETKIT_BUILD_DIR "" CACHE PATH "Exact AssetKit build directory to link")
 set(ASSETKIT_BLENDER_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/assetkit_blender" CACHE PATH "Output directory for the native Python module")
 set(ASSETKIT_BLENDER_PYTHON_SOABI "" CACHE STRING "Override Python extension ABI tag, for example cpython-313-darwin")
 option(ASSETKIT_STRICT_ROOT "Only resolve AssetKit headers and libraries from ASSETKIT_ROOT" ON)
@@ -36,6 +37,11 @@ endif()
 if(ASSETKIT_ROOT)
   get_filename_component(ASSETKIT_ROOT "${ASSETKIT_ROOT}" ABSOLUTE)
   set(ASSETKIT_ROOT "${ASSETKIT_ROOT}" CACHE PATH "AssetKit source or install root" FORCE)
+endif()
+
+if(ASSETKIT_BUILD_DIR)
+  get_filename_component(ASSETKIT_BUILD_DIR "${ASSETKIT_BUILD_DIR}" ABSOLUTE)
+  set(ASSETKIT_BUILD_DIR "${ASSETKIT_BUILD_DIR}" CACHE PATH "Exact AssetKit build directory to link" FORCE)
 endif()
 
 set(ASSETKIT_CACHE_PATH_VARS
@@ -81,6 +87,32 @@ set(ASSETKIT_LIBRARY_HINTS)
 set(CGLM_INCLUDE_HINTS)
 set(ASSETKIT_DS_LIBRARY_HINTS)
 set(ASSETKIT_LIBDEFLATE_LIBRARY_HINTS)
+if(ASSETKIT_BUILD_DIR)
+  list(APPEND ASSETKIT_LIBRARY_HINTS
+    "${ASSETKIT_BUILD_DIR}"
+    "${ASSETKIT_BUILD_DIR}/src"
+    "${ASSETKIT_BUILD_DIR}/Release"
+    "${ASSETKIT_BUILD_DIR}/RelWithDebInfo"
+    "${ASSETKIT_BUILD_DIR}/Debug"
+    "${ASSETKIT_BUILD_DIR}/MinSizeRel")
+  list(APPEND ASSETKIT_DS_LIBRARY_HINTS
+    "${ASSETKIT_BUILD_DIR}/deps/ds"
+    "${ASSETKIT_BUILD_DIR}/deps/ds/Release"
+    "${ASSETKIT_BUILD_DIR}/deps/ds/RelWithDebInfo"
+    "${ASSETKIT_BUILD_DIR}/deps/ds/Debug"
+    "${ASSETKIT_BUILD_DIR}/deps/ds/MinSizeRel")
+  list(APPEND ASSETKIT_LIBDEFLATE_LIBRARY_HINTS
+    "${ASSETKIT_BUILD_DIR}"
+    "${ASSETKIT_BUILD_DIR}/Release"
+    "${ASSETKIT_BUILD_DIR}/RelWithDebInfo"
+    "${ASSETKIT_BUILD_DIR}/Debug"
+    "${ASSETKIT_BUILD_DIR}/MinSizeRel"
+    "${ASSETKIT_BUILD_DIR}/deps/libdeflate"
+    "${ASSETKIT_BUILD_DIR}/deps/libdeflate/Release"
+    "${ASSETKIT_BUILD_DIR}/deps/libdeflate/RelWithDebInfo"
+    "${ASSETKIT_BUILD_DIR}/deps/libdeflate/Debug"
+    "${ASSETKIT_BUILD_DIR}/deps/libdeflate/MinSizeRel")
+endif()
 if(ASSETKIT_ROOT)
   list(APPEND ASSETKIT_INCLUDE_HINTS "${ASSETKIT_ROOT}/include")
   list(APPEND CGLM_INCLUDE_HINTS "${ASSETKIT_ROOT}/deps/cglm/include")
