@@ -198,6 +198,15 @@ def run_checks(out_root: Path) -> None:
     for index, (actual, want) in enumerate(zip(vertices, expected)):
         assert_close_vec(actual, want, f"axis/scale vertex {index}")
 
+    reset_scene()
+    add_triangle("DefaultAxisTriangle")
+    default_axis_path = out_root / "axis_default.stl"
+    export_scene(bpy.context, default_axis_path, AK_FILE_TYPE_STL)
+    default_vertices = first_binary_triangle_vertices(default_axis_path)
+    default_expected = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, -1.0)]
+    for index, (actual, want) in enumerate(zip(default_vertices, default_expected)):
+        assert_close_vec(actual, want, f"default Y-up axis vertex {index}")
+
     print(f"STL export checks passed: {out_root}")
 
 

@@ -286,13 +286,13 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Forward Axis",
         description="Forward axis for mesh export",
         items=_FORWARD_AXIS_ITEMS,
-        default="Y",
+        default="-Z",
     )
     up_axis: bpy.props.EnumProperty(
         name="Up Axis",
         description="Up axis for mesh export",
         items=_UP_AXIS_ITEMS,
-        default="Z",
+        default="Y",
     )
     coordinate_conversion: bpy.props.EnumProperty(
         name="Mode",
@@ -424,13 +424,13 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Forward Axis",
         description="Forward axis for STL export",
         items=_FORWARD_AXIS_ITEMS,
-        default="Y",
+        default="-Z",
     )
     stl_up_axis: bpy.props.EnumProperty(
         name="Up Axis",
         description="Up axis for STL export",
         items=_UP_AXIS_ITEMS,
-        default="Z",
+        default="Y",
     )
     ply_format: bpy.props.EnumProperty(
         name="Format",
@@ -463,13 +463,13 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         name="Forward Axis",
         description="Forward axis for PLY export",
         items=_FORWARD_AXIS_ITEMS,
-        default="Y",
+        default="-Z",
     )
     ply_up_axis: bpy.props.EnumProperty(
         name="Up Axis",
         description="Up axis for PLY export",
         items=_UP_AXIS_ITEMS,
-        default="Z",
+        default="Y",
     )
     ply_export_uv: bpy.props.BoolProperty(
         name="UV",

@@ -411,9 +411,9 @@ akb_export_linear_unorm8(float value) {
 }
 
 static int
-akb_export_attach_linear_rgba(AkDoc       *doc,
-                              AkTextureRef *texref,
-                              PyObject     *pixels_obj) {
+akb_export_attach_rgba(AkDoc       *doc,
+                       AkTextureRef *texref,
+                       PyObject     *pixels_obj) {
   AkHeap      *heap;
   AkImage     *image;
   AkImageData *data;
@@ -425,6 +425,7 @@ akb_export_attach_linear_rgba(AkDoc       *doc,
   Py_ssize_t   height_py;
   size_t       pixel_count;
   size_t       byte_count;
+  int          source_srgb;
 
   if (!pixels_obj || pixels_obj == Py_None)
     return 1;
@@ -432,7 +433,13 @@ akb_export_attach_linear_rgba(AkDoc       *doc,
     PyErr_SetString(PyExc_ValueError, "texture pixel payload has no target image");
     return 0;
   }
-  if (!PyArg_ParseTuple(pixels_obj, "nnO", &width_py, &height_py, &buffer_obj))
+  source_srgb = 0;
+  if (!PyArg_ParseTuple(pixels_obj,
+                        "nnO|p",
+                        &width_py,
+                        &height_py,
+                        &buffer_obj,
+                        &source_srgb))
     return 0;
   if (width_py <= 0 || height_py <= 0
       || (size_t)width_py > UINT32_MAX || (size_t)height_py > UINT32_MAX
@@ -475,9 +482,15 @@ akb_export_attach_linear_rgba(AkDoc       *doc,
     size_t offset;
 
     offset = i * 4u;
-    dst[offset]     = akb_export_linear_srgb8(src[offset]);
-    dst[offset + 1] = akb_export_linear_srgb8(src[offset + 1]);
-    dst[offset + 2] = akb_export_linear_srgb8(src[offset + 2]);
+    if (source_srgb) {
+      dst[offset]     = akb_export_linear_unorm8(src[offset]);
+      dst[offset + 1] = akb_export_linear_unorm8(src[offset + 1]);
+      dst[offset + 2] = akb_export_linear_unorm8(src[offset + 2]);
+    } else {
+      dst[offset]     = akb_export_linear_srgb8(src[offset]);
+      dst[offset + 1] = akb_export_linear_srgb8(src[offset + 1]);
+      dst[offset + 2] = akb_export_linear_srgb8(src[offset + 2]);
+    }
     dst[offset + 3] = akb_export_linear_unorm8(src[offset + 3]);
   }
   PyBuffer_Release(&view);
@@ -1900,11 +1913,22 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   surface->alphaCutoff      = (float)alpha_cutoff;
   surface->ior              = 1.5f;
   surface->emissiveStrength = (float)emissive_strength;
-  if (material_type == AK_MATERIAL_TYPE_UNLIT) {
-    surface->type = AK_MATERIAL_TYPE_UNLIT;
-    surface->flags |= AK_MATERIAL_FLAG_UNLIT;
-  } else if (material_type == AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS) {
-    surface->type = AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS;
+  switch ((AkMaterialType)material_type) {
+    case AK_MATERIAL_TYPE_PHONG:
+    case AK_MATERIAL_TYPE_BLINN:
+    case AK_MATERIAL_TYPE_LAMBERT:
+      surface->type = (AkMaterialType)material_type;
+      break;
+    case AK_MATERIAL_TYPE_UNLIT:
+      /* CONSTANT and UNLIT intentionally share the same AssetKit type. */
+      surface->type = AK_MATERIAL_TYPE_UNLIT;
+      surface->flags |= AK_MATERIAL_FLAG_UNLIT;
+      break;
+    case AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS:
+      surface->type = AK_MATERIAL_TYPE_PBR_SPECULAR_GLOSSINESS;
+      break;
+    default:
+      break;
   }
   surface->baseColor        = akb_export_material_color(heap,
                                                         surface,
@@ -1941,9 +1965,9 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   if (base_color_texture) {
     surface->baseColor->texture = base_color_texture;
     surface->baseColor->source  = AK_MATERIAL_INPUT_TEXTURE;
-    if (!akb_export_attach_linear_rgba(doc,
-                                       base_color_texture,
-                                       base_color_pixels_obj)) {
+    if (!akb_export_attach_rgba(doc,
+                                base_color_texture,
+                                base_color_pixels_obj)) {
       AKB_EXPORT_MAT_RELEASE_BUFFERS();
       return NULL;
     }

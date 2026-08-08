@@ -145,6 +145,12 @@ def _material_tuple(
     if material.use_nodes and material.node_tree and not baked_visual_only:
         bsdf = _principled_bsdf(material)
         unlit_emission = _unlit_emission_node(material)
+        if unlit_emission is not None:
+            # Blender keeps its default Principled node after the surface is
+            # rewired to an unlit Emission node.  Only the connected surface
+            # defines the material; the disconnected Principled node must not
+            # override the authored unlit color during export.
+            bsdf = None
         if bsdf is not None:
             if export_images:
                 base_color_image, base_color_channel, base_color_slot, base_color_info = _linked_texture_info(
@@ -410,7 +416,7 @@ def _material_tuple(
         material_type = _MATERIAL_TYPE_UNLIT
     animations = None if lighting_baked else _material_animation_payload(material, bsdf, base_color, fps)
     base_color_pixels = (
-        image_store.linear_pixels_for_path(base_color_texture)
+        image_store.pixels_for_path(base_color_texture)
         if int(file_type or 0) == AK_FILE_TYPE_PLY and base_color_texture
         else None
     )

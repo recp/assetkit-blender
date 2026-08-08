@@ -10,6 +10,7 @@ Run inside Blender:
 from __future__ import annotations
 
 import math
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -23,6 +24,8 @@ PYTHON_ROOT = REPO_ROOT / "src"
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
+from assetkit_blender.enums import AK_FILE_TYPE_DAE, AK_FILE_TYPE_GLTF  # noqa: E402
+from assetkit_blender.exp.core import export_scene  # noqa: E402
 from assetkit_blender.importer import _object_bounds, import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
@@ -197,6 +200,61 @@ def main() -> None:
         raise AssertionError("expected imported collection instances to have bounds")
     _assert_close(list(imported_bounds[0]), [11.0, 12.0, 3.0], "imported minimum")
     _assert_close(list(imported_bounds[1]), [22.0, 14.0, 3.0], "imported maximum")
+
+    with tempfile.TemporaryDirectory(prefix="assetkit-dae-instance-export-") as temp_dir:
+        output_paths = []
+        for file_type, suffix in (
+            (AK_FILE_TYPE_GLTF, "gltf"),
+            (AK_FILE_TYPE_DAE, "dae"),
+        ):
+            for apply_modifiers in (False, True):
+                mode = "apply" if apply_modifiers else "raw"
+                output = Path(temp_dir) / f"instance-{mode}.{suffix}"
+                result = export_scene(
+                    bpy.context,
+                    output,
+                    file_type,
+                    apply_modifiers=apply_modifiers,
+                )
+                if result < 0 or not output.is_file():
+                    raise AssertionError(
+                        f"compact instance {suffix} export failed "
+                        f"with apply_modifiers={apply_modifiers}"
+                    )
+                output_paths.append(output)
+
+        previous_mode = os.environ.get("ASSETKIT_BLENDER_COMPACT_STATIC_INSTANCES")
+        os.environ["ASSETKIT_BLENDER_COMPACT_STATIC_INSTANCES"] = "0"
+        try:
+            for output in output_paths:
+                bpy.ops.wm.read_factory_settings(use_empty=True)
+                import_assetkit_file(
+                    str(output),
+                    load_options=make_load_options(
+                        coordinate_system="Z_UP",
+                        coordinate_conversion="TRANSFORM",
+                        texture_loading="DEFERRED",
+                    ),
+                    collection=bpy.context.collection,
+                    focus_mode="NEVER",
+                    placement_mode="AS_AUTHORED",
+                    select_imported=False,
+                    set_viewport_shading=False,
+                    clean_viewport_overlays=False,
+                )
+                bpy.context.view_layer.update()
+                count, minimum, maximum = _evaluated_mesh_bounds()
+                if count != 2:
+                    raise AssertionError(
+                        f"{output.name}: expected 2 reimported mesh instances, got {count}"
+                    )
+                _assert_close(minimum, [11.0, 12.0, 3.0], f"{output.name} minimum")
+                _assert_close(maximum, [22.0, 14.0, 3.0], f"{output.name} maximum")
+        finally:
+            if previous_mode is None:
+                os.environ.pop("ASSETKIT_BLENDER_COMPACT_STATIC_INSTANCES", None)
+            else:
+                os.environ["ASSETKIT_BLENDER_COMPACT_STATIC_INSTANCES"] = previous_mode
     print("DAE compact instance_node check passed")
 
 

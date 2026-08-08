@@ -22,7 +22,7 @@ class _ExportImageStore:
         self._shader_bake_cache: dict[tuple[int, int, int, int, str], str | None] = {}
         self._lighting_bake_cache: dict[tuple[int, int, int, int, str], str | None] = {}
         self._image_by_path: dict[str, bpy.types.Image] = {}
-        self._linear_pixels_by_path: dict[str, tuple[int, int, array] | None] = {}
+        self._pixels_by_path: dict[str, tuple[int, int, array, bool] | None] = {}
         self._counter = 0
 
     def path_for(self, image: bpy.types.Image) -> str | None:
@@ -39,12 +39,12 @@ class _ExportImageStore:
             self._image_by_path[os.path.realpath(path)] = image
         return path
 
-    def linear_pixels_for_path(self, path: str | None) -> tuple[int, int, array] | None:
+    def pixels_for_path(self, path: str | None) -> tuple[int, int, array, bool] | None:
         if not path:
             return None
         key = os.path.realpath(path)
-        if key in self._linear_pixels_by_path:
-            return self._linear_pixels_by_path[key]
+        if key in self._pixels_by_path:
+            return self._pixels_by_path[key]
 
         image = self._image_by_path.get(key)
         temporary = False
@@ -53,19 +53,34 @@ class _ExportImageStore:
                 image = bpy.data.images.load(path, check_existing=False)
                 temporary = True
             except Exception:
-                self._linear_pixels_by_path[key] = None
+                self._pixels_by_path[key] = None
                 return None
 
         try:
             pixels = self._image_pixels(image)
+            if pixels is not None:
+                width, height, values = pixels
+                pixels = (width,
+                          height,
+                          values,
+                          self._image_pixels_are_srgb(image))
         finally:
             if temporary:
                 try:
                     bpy.data.images.remove(image)
                 except Exception:
                     pass
-        self._linear_pixels_by_path[key] = pixels
+        self._pixels_by_path[key] = pixels
         return pixels
+
+    @staticmethod
+    def _image_pixels_are_srgb(image: bpy.types.Image) -> bool:
+        settings = image.colorspace_settings
+        if bool(getattr(settings, "is_data", False)):
+            return False
+        name = str(getattr(settings, "name", "") or "").casefold()
+        compact = "".join(ch for ch in name if ch.isalnum())
+        return "srgb" in compact and "linear" not in compact
 
     def metallic_roughness_path(
         self,

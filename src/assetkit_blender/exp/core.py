@@ -219,8 +219,8 @@ def export_scene(
     )
     stl_scale_value = _resolve_format_float(global_scale, stl_global_scale, 1.0)
     stl_scene_unit = _resolve_format_bool(use_scene_unit, stl_use_scene_unit, False)
-    stl_forward = _resolve_format_text(forward_axis, stl_forward_axis, "Y")
-    stl_up = _resolve_format_text(up_axis, stl_up_axis, "Z")
+    stl_forward = _resolve_format_text(forward_axis, stl_forward_axis, "-Z")
+    stl_up = _resolve_format_text(up_axis, stl_up_axis, "Y")
     stl_scale = _static_mesh_effective_scale(
         context,
         file_type,
@@ -246,8 +246,8 @@ def export_scene(
     three_mf_compression_level = max(0, min(12, int(three_mf_compression_level)))
     ply_scale_value = _resolve_format_float(global_scale, ply_global_scale, 1.0)
     ply_scene_unit = _resolve_format_bool(use_scene_unit, ply_use_scene_unit, False)
-    ply_forward = _resolve_format_text(forward_axis, ply_forward_axis, "Y")
-    ply_up = _resolve_format_text(up_axis, ply_up_axis, "Z")
+    ply_forward = _resolve_format_text(forward_axis, ply_forward_axis, "-Z")
+    ply_up = _resolve_format_text(up_axis, ply_up_axis, "Y")
     ply_scale = _static_mesh_effective_scale(
         context,
         file_type,
@@ -498,8 +498,8 @@ def _export_scene_once(
                 int(three_mf_compression_level),
                 _assetkit_blender_authoring_tool(),
                 float(stl_scale),
-                str(stl_forward_axis or "Y"),
-                str(stl_up_axis or "Z"),
+                str(stl_forward_axis or "-Z"),
+                str(stl_up_axis or "Y"),
                 int(bool(ply_bake_textures)),
             ))
             if profile:

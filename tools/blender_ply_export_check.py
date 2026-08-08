@@ -26,6 +26,8 @@ if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
 from assetkit_blender.enums import AK_FILE_TYPE_PLY  # noqa: E402
+from assetkit_blender.exp.images import _ExportImageStore  # noqa: E402
+from assetkit_blender.exp.material.core import _material_tuple  # noqa: E402
 from assetkit_blender.exp.exporter import export_scene  # noqa: E402
 from assetkit_blender.importer import import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
@@ -121,6 +123,12 @@ def ascii_vertices(path: Path) -> list[tuple[float, float, float]]:
     return out
 
 
+def ascii_vertex_rows(path: Path) -> list[list[str]]:
+    text = path.read_text(encoding="ascii", errors="replace")
+    _header, body = text.split("end_header\n", 1)
+    return [line.split() for line in body.splitlines()[: ply_header_count(path, "vertex")]]
+
+
 def mesh_stats() -> tuple[int, int, int]:
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
     return (
@@ -184,6 +192,35 @@ def run_checks(out_root: Path) -> None:
     assert_equal(ply_header_count(selected_path, "face"), 12, "selected-only export")
 
     reset_scene()
+    mixed_mesh = bpy.data.meshes.new("MixedFaceLineMesh")
+    mixed_mesh.from_pydata(
+        [(0.0, 0.0, 0.0),
+         (1.0, 0.0, 0.0),
+         (0.0, 1.0, 0.0),
+         (2.0, 0.0, 0.0),
+         (2.0, 1.0, 0.0)],
+        [(3, 4)],
+        [(0, 1, 2)],
+    )
+    mixed_mesh.materials.append(bpy.data.materials.new("Surface"))
+    mixed_mesh.materials.append(bpy.data.materials.new("Edge"))
+    mixed = bpy.data.objects.new("MixedFaceLine", mixed_mesh)
+    mixed["assetkit_mixed_line_material_slot"] = 1
+    mixed["assetkit_mixed_line_mode"] = 1
+    bpy.context.collection.objects.link(mixed)
+    mixed_path = out_root / "mixed_face_line.ply"
+    export_scene(
+        bpy.context,
+        mixed_path,
+        AK_FILE_TYPE_PLY,
+        ply_bake_textures=False,
+    )
+    assert_equal(ply_header_count(mixed_path, "face"), 1,
+                 "mixed PLY face count")
+    assert_equal(ply_header_count(mixed_path, "edge"), 1,
+                 "mixed PLY loose-edge count")
+
+    reset_scene()
     add_triangle("AsciiTriangle", with_attrs=True)
     ascii_path = out_root / "ascii_attrs.ply"
     export_scene(
@@ -218,6 +255,107 @@ def run_checks(out_root: Path) -> None:
     )
     if ply_header_count(bake_option_path, "face") < 1:
         raise AssertionError("texture-bake option export has no faces")
+
+    reset_scene()
+    gamma_triangle = add_triangle("GammaTriangle")
+    gamma_uv = gamma_triangle.data.uv_layers.new(name="UVMap")
+    gamma_coords = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))
+    for polygon in gamma_triangle.data.polygons:
+        for corner, loop_index in enumerate(polygon.loop_indices):
+            gamma_uv.data[loop_index].uv = gamma_coords[corner]
+    gamma_image = bpy.data.images.new("GammaHalf", width=1, height=1)
+    gamma_image.colorspace_settings.name = "Non-Color"
+    gamma_image.pixels = (0.5, 0.5, 0.5, 1.0)
+    gamma_image.filepath_raw = os.fspath(out_root / "gamma_half.png")
+    gamma_image.file_format = "PNG"
+    gamma_image.save()
+    bpy.data.images.remove(gamma_image)
+    gamma_image = bpy.data.images.load(os.fspath(out_root / "gamma_half.png"),
+                                       check_existing=False)
+    gamma_image.colorspace_settings.name = "sRGB"
+    gamma_material = bpy.data.materials.new("GammaMaterial")
+    gamma_material.use_nodes = True
+    gamma_nodes = gamma_material.node_tree.nodes
+    gamma_bsdf = gamma_nodes.get("Principled BSDF")
+    if gamma_bsdf is None:
+        raise AssertionError("Principled BSDF node is missing")
+    gamma_texture = gamma_nodes.new("ShaderNodeTexImage")
+    gamma_texture.image = gamma_image
+    gamma_bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    gamma_material.node_tree.links.new(gamma_texture.outputs["Color"],
+                                       gamma_bsdf.inputs["Base Color"])
+    gamma_triangle.data.materials.append(gamma_material)
+    gamma_store = _ExportImageStore(out_root / "gamma_payload")
+    gamma_payload = _material_tuple(
+        gamma_material,
+        gamma_store,
+        {"UVMap": 0},
+        24.0,
+        context=bpy.context,
+        obj=gamma_triangle,
+        mesh=gamma_triangle.data,
+        material_index=0,
+        file_type=AK_FILE_TYPE_PLY,
+        material_export_mode="DIRECT",
+        material_bake_size=1024,
+        lighting_bake_mode="OFF",
+        export_images=True,
+    )
+    factor_material = bpy.data.materials.new("LinearFactorMaterial")
+    factor_material.use_nodes = True
+    factor_bsdf = factor_material.node_tree.nodes.get("Principled BSDF")
+    if factor_bsdf is None:
+        raise AssertionError("factor Principled BSDF node is missing")
+    factor_bsdf.inputs["Base Color"].default_value = (0.5, 0.25, 0.75, 0.4)
+    factor_bsdf.inputs["Alpha"].default_value = 0.4
+    factor_payload = _material_tuple(
+        factor_material,
+        gamma_store,
+        {},
+        24.0,
+        file_type=AK_FILE_TYPE_PLY,
+        material_export_mode="DIRECT",
+        material_bake_size=1024,
+        lighting_bake_mode="OFF",
+        export_images=True,
+    )
+    gamma_factor = tuple(float(value) for value in factor_payload[1])
+    expected_factor = (0.5, 0.25, 0.75, 0.4)
+    if any(abs(actual - expected) > 1.0e-6
+           for actual, expected in zip(gamma_factor, expected_factor)):
+        raise AssertionError(
+            f"Blender linear material factor changed at the bridge: {gamma_factor!r}"
+        )
+    if not gamma_payload[7]:
+        raise AssertionError("sRGB regression material has no base-color texture")
+    gamma_pixels = gamma_payload[-1]
+    if gamma_pixels is None:
+        raise AssertionError("sRGB regression material has no pixel payload")
+    if gamma_pixels[3] is not True:
+        raise AssertionError("sRGB regression image was not classified as encoded sRGB")
+    if any(abs(float(value) - (128.0 / 255.0)) > 1.0e-5
+           for value in gamma_pixels[2][:3]):
+        raise AssertionError(f"unexpected Blender sRGB pixel payload: {gamma_pixels[2][:3]!r}")
+    gamma_path = out_root / "srgb_texture_bake.ply"
+    export_scene(
+        bpy.context,
+        gamma_path,
+        AK_FILE_TYPE_PLY,
+        ply_format="ASCII",
+        ply_export_normals=False,
+        ply_export_uv=False,
+        ply_bake_textures=True,
+        material_export_mode="DIRECT",
+    )
+    gamma_rows = ascii_vertex_rows(gamma_path)
+    if not gamma_rows:
+        raise AssertionError("sRGB texture bake exported no vertices")
+    for row in gamma_rows:
+        rgb = tuple(map(int, row[3:6]))
+        if any(abs(channel - 128) > 1 for channel in rgb):
+            raise AssertionError(
+                f"sRGB texture texel was gamma-encoded twice: {rgb!r}"
+            )
 
     reset_scene()
     add_triangle("SrgbTriangle", with_attrs=True)
@@ -269,6 +407,21 @@ def run_checks(out_root: Path) -> None:
     expected = [(0.0, 0.0, 0.0), (0.0, -2.0, 0.0), (2.0, 0.0, 0.0)]
     for index, (actual, want) in enumerate(zip(vertices, expected)):
         assert_close_vec(actual, want, f"axis/scale vertex {index}")
+
+    reset_scene()
+    add_triangle("DefaultAxisTriangle")
+    default_axis_path = out_root / "axis_default.ply"
+    export_scene(
+        bpy.context,
+        default_axis_path,
+        AK_FILE_TYPE_PLY,
+        ply_format="ASCII",
+        ply_bake_textures=False,
+    )
+    default_vertices = ascii_vertices(default_axis_path)
+    default_expected = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, -1.0)]
+    for index, (actual, want) in enumerate(zip(default_vertices, default_expected)):
+        assert_close_vec(actual, want, f"default Y-up axis vertex {index}")
 
     axes = ("X", "Y", "Z", "-X", "-Y", "-Z")
     native_axis = {

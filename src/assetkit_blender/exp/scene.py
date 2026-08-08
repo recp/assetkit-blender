@@ -190,7 +190,10 @@ def _collect_scene_items(
         if obj in instancing_skips:
             continue
 
-        if not static_mesh_export and export_cameras and obj.type == "CAMERA":
+        if bool(obj.get("assetkit_compact_instance_batch", False)):
+            payload_kinds[obj] = AKB_EXPORT_ITEM_NODE
+            include_export_chain(obj)
+        elif not static_mesh_export and export_cameras and obj.type == "CAMERA":
             payload_kinds[obj] = AKB_EXPORT_ITEM_CAMERA
             include_export_chain(obj)
         elif not static_mesh_export and export_lights and obj.type == "LIGHT":
@@ -537,6 +540,39 @@ def _collect_scene_items(
         out[item_index][4] = payload
         payload_count += 1
 
+    compact_instance_count = _append_compact_batch_instance_items(
+        context,
+        depsgraph,
+        objects,
+        exportable,
+        selected,
+        object_filter,
+        out,
+        object_indices,
+        world_matrices,
+        file_type,
+        image_store,
+        material_cache,
+        mesh_payload_cache,
+        material_export_mode,
+        material_bake_size,
+        lighting_bake_mode,
+        export_uv,
+        export_normals,
+        export_tangents,
+        export_vertex_colors,
+        export_attributes,
+        export_materials,
+        export_images,
+        export_custom_properties,
+        apply_modifiers,
+        ply_export_normals,
+        ply_export_uv,
+        ply_export_colors,
+        ply_export_triangulated,
+    )
+    payload_count += compact_instance_count
+
     if not out:
         return []
 
@@ -549,6 +585,137 @@ def _collect_scene_items(
         )
 
     return [tuple(item) for item in out]
+
+
+def _append_compact_batch_instance_items(
+    context: bpy.types.Context,
+    depsgraph,
+    objects: list[bpy.types.Object],
+    exportable: set[bpy.types.Object],
+    selected: set[bpy.types.Object] | None,
+    object_filter: set[bpy.types.Object] | None,
+    out: list[list],
+    object_indices: dict[bpy.types.Object, int],
+    world_matrices: dict[bpy.types.Object, object],
+    file_type: int,
+    image_store: "_ExportImageStore",
+    material_cache: dict[tuple, tuple | None],
+    mesh_payload_cache: dict[tuple[int, tuple[int, ...]], tuple | None],
+    material_export_mode: str,
+    material_bake_size: int,
+    lighting_bake_mode: str,
+    export_uv: bool,
+    export_normals: bool,
+    export_tangents: bool,
+    export_vertex_colors: bool,
+    export_attributes: bool,
+    export_materials: bool,
+    export_images: bool,
+    export_custom_properties: bool,
+    apply_modifiers: bool,
+    ply_export_normals: bool,
+    ply_export_uv: bool,
+    ply_export_colors: bool,
+    ply_export_triangulated: bool,
+) -> int:
+    compact_batches = {
+        obj.as_pointer(): (
+            object_indices[obj],
+            world_matrices[obj].inverted_safe(),
+        )
+        for obj in objects
+        if bool(obj.get("assetkit_compact_instance_batch", False))
+        and obj in exportable
+        and (object_filter is None or obj in object_filter)
+        and (selected is None or obj in selected)
+        and obj in object_indices
+    }
+    if not compact_batches:
+        return 0
+
+    instance_index = 0
+    for instance in depsgraph.object_instances:
+        parent = instance.parent
+        if parent is None:
+            continue
+        batch = compact_batches.get(parent.original.as_pointer())
+        if batch is None:
+            continue
+
+        obj_eval = instance.object
+        if obj_eval.type != "MESH":
+            continue
+        obj = obj_eval.original
+        source_mesh = obj.data if obj.type == "MESH" else None
+        mesh = getattr(obj_eval, "data", None) if apply_modifiers else source_mesh
+        if mesh is None or len(mesh.polygons) == 0:
+            continue
+
+        shared_key = (
+            None
+            if (
+                _mesh_material_bake_required(obj, material_export_mode)
+                or lighting_bake_mode == "FINAL"
+            )
+            else _shared_mesh_payload_key(
+                obj,
+                ignore_modifiers=not apply_modifiers,
+            )
+        )
+        payload = mesh_payload_cache.get(shared_key) if shared_key is not None else None
+        if payload is None:
+            payload = _mesh_payload(
+                context,
+                obj,
+                mesh,
+                source_mesh,
+                file_type,
+                image_store,
+                material_cache,
+                material_export_mode,
+                material_bake_size,
+                lighting_bake_mode,
+                skin_setup=None,
+                export_uv=export_uv,
+                export_normals=export_normals,
+                export_tangents=export_tangents,
+                export_vertex_colors=export_vertex_colors,
+                export_attributes=export_attributes,
+                export_materials=export_materials,
+                export_images=export_images,
+                export_shape_keys=False,
+                export_shape_key_normals=False,
+                export_shape_key_tangents=False,
+                export_shape_key_animations=False,
+                export_custom_properties=export_custom_properties,
+                ply_export_normals=ply_export_normals,
+                ply_export_uv=ply_export_uv,
+                ply_export_colors=ply_export_colors,
+                ply_export_triangulated=ply_export_triangulated,
+            )
+            if shared_key is not None:
+                mesh_payload_cache[shared_key] = payload
+        if payload is None:
+            continue
+
+        parent_index, batch_inverse = batch
+        local_matrix = batch_inverse @ instance.matrix_world
+        out.append([
+            AKB_EXPORT_ITEM_MESH,
+            f"{obj.name} Instance {instance_index}",
+            _matrix_values(local_matrix),
+            parent_index,
+            payload,
+            None,
+            None,
+            _assetkit_json_prop(obj, "assetkit_node_extra_json")
+            if export_custom_properties
+            else None,
+            True,
+        ])
+        instance_index += 1
+
+    return instance_index
 
 
 def _collect_static_mesh_scene_items(

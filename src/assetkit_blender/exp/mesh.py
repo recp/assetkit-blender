@@ -146,7 +146,14 @@ def _mesh_payload(
     is_stl = file_type in _NO_UV_COLOR_FORMATS
     is_ply = file_type == AK_FILE_TYPE_PLY
     is_static_mesh = file_type in _NATIVE_STATIC_MESH_PAYLOAD_FORMATS
-    uv_layers = [] if is_stl or not export_uv or (is_ply and not ply_export_uv) else _uv_layers(mesh)
+    # PLY can omit UV properties from the file while still needing source UVs
+    # internally to bake image texels into vertex colors.  PLY export_images is
+    # enabled only for that bake path, so retain the layers in that case.
+    uv_layers = (
+        []
+        if is_stl or not export_uv or (is_ply and not ply_export_uv and not export_images)
+        else _uv_layers(mesh)
+    )
     color_layers = [] if is_stl or not export_vertex_colors or (is_ply and not ply_export_colors) else _color_attributes(mesh)
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0

@@ -4140,8 +4140,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
 
   if (mixed_line_material_index != INT_MIN
       && !is_3mf_export
-      && !is_stl_export
-      && !is_ply_export) {
+      && !is_stl_export) {
     AkMeshPrimitive *line_prim;
 
     line_prim = akb_export_add_loose_line_primitive(heap,

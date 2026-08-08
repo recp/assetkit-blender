@@ -116,6 +116,35 @@ def make_scene() -> None:
     bpy.context.object.name = "Camera"
 
 
+def make_unlit_line_scene() -> tuple[float, float, float, float]:
+    reset_scene()
+    expected = (0.25, 0.125, 0.0625, 1.0)
+
+    mesh = bpy.data.meshes.new("UnlitLineMesh")
+    mesh.from_pydata([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)], [(0, 1)], [])
+    mesh.update()
+
+    material = bpy.data.materials.new("UnlitLineMaterial")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    output = nodes.get("Material Output")
+    if output is None:
+        raise AssertionError("Material Output node is missing")
+    surface = output.inputs.get("Surface")
+    if surface is None:
+        raise AssertionError("Material Output surface socket is missing")
+    for link in list(surface.links):
+        material.node_tree.links.remove(link)
+    emission = nodes.new("ShaderNodeEmission")
+    emission.inputs["Color"].default_value = expected
+    material.node_tree.links.new(emission.outputs["Emission"], surface)
+
+    obj = bpy.data.objects.new("UnlitLine", mesh)
+    bpy.context.collection.objects.link(obj)
+    mesh.materials.append(material)
+    return expected
+
+
 def export_case(out_root: Path, name: str, **kwargs) -> dict:
     make_scene()
     path = out_root / f"{name}.gltf"
@@ -123,6 +152,15 @@ def export_case(out_root: Path, name: str, **kwargs) -> dict:
     if result < 0:
         raise AssertionError(f"export failed for {name}: {result}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def export_unlit_line_case(out_root: Path) -> tuple[dict, tuple[float, float, float, float]]:
+    expected = make_unlit_line_scene()
+    path = out_root / "unlit_line.gltf"
+    result = export_scene(bpy.context, path, AK_FILE_TYPE_GLTF)
+    if result < 0:
+        raise AssertionError(f"unlit line export failed: {result}")
+    return json.loads(path.read_text(encoding="utf-8")), expected
 
 
 def primitives(data: dict) -> list[dict]:
@@ -242,6 +280,20 @@ def run_checks(out_root: Path) -> None:
     for prim in primitives(data):
         if prim.get("targets"):
             raise AssertionError("shape key targets were exported while export_shape_keys=False")
+
+    data, expected = export_unlit_line_case(out_root)
+    line_primitives = [prim for prim in primitives(data) if prim.get("mode") == 1]
+    if len(line_primitives) != 1:
+        raise AssertionError(f"unlit line export wrote {len(line_primitives)} line primitives")
+    materials = data.get("materials") or []
+    if len(materials) != 1:
+        raise AssertionError(f"unlit line export wrote {len(materials)} materials")
+    material = materials[0]
+    if "KHR_materials_unlit" not in material.get("extensions", {}):
+        raise AssertionError("unlit line material lost KHR_materials_unlit")
+    actual = material.get("pbrMetallicRoughness", {}).get("baseColorFactor")
+    if actual is None or any(abs(float(a) - float(b)) > 1.0e-6 for a, b in zip(actual, expected)):
+        raise AssertionError(f"unlit line color changed: expected {expected}, got {actual}")
 
 
 def main(argv: list[str]) -> int:

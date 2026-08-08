@@ -142,8 +142,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
   export_coord_conversion_id = AKB_COORD_TRANSFORM;
   authoring_tool_fragment = NULL;
   stl_global_scale = 1.0;
-  stl_forward_axis = "Y";
-  stl_up_axis = "Z";
+  stl_forward_axis = "-Z";
+  stl_up_axis = "Y";
   if (!PyArg_ParseTuple(args,
                         "sisO|O" "iiiiiiiiiiii" "sdssi",
                         &out_dir,
@@ -507,8 +507,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
        || file_type_int == AK_FILE_TYPE_PLY
        || file_type_int == AK_FILE_TYPE_WAVEFRONT)
       && (stl_global_scale != 1.0
-          || strcmp(stl_forward_axis ? stl_forward_axis : "Y", "Y") != 0
-          || strcmp(stl_up_axis ? stl_up_axis : "Z", "Z") != 0)) {
+          || strcmp(stl_forward_axis ? stl_forward_axis : "-Z", "Y") != 0
+          || strcmp(stl_up_axis ? stl_up_axis : "Y", "Z") != 0)) {
     if (!akb_export_static_mesh_axis_matrix((float)stl_global_scale,
                                             stl_forward_axis,
                                             stl_up_axis,
