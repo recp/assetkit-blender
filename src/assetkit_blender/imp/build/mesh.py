@@ -237,6 +237,10 @@ def _create_grouped_mesh_object(
         line_primitive,
         total_vertex_count,
         line_vertex_offset,
+        {
+            attr.name or ("Color" if index == 0 else f"Color.{index:03d}")
+            for index, attr in enumerate(color_sets)
+        },
     )
     has_materials = any(_has_material_data(primitive) for primitive in surface_primitives)
     material_indices = bytearray(total_face_count * 4) if has_materials else b""
@@ -456,11 +460,13 @@ def _group_line_point_attrs(
     line: MeshPrimitiveData | None,
     total_vertex_count: int,
     vertex_offset: int,
+    reserved_names: set[str] | None = None,
 ) -> list[LoopFloatAttributeData]:
     if line is None or vertex_offset < 0:
         return []
 
     grouped = []
+    used_names = set(reserved_names or ())
     for attr in line.point_attrs or ():
         width = int(attr.width or 0)
         values = _buffer_view(attr.values_f32, "f")
@@ -475,18 +481,29 @@ def _group_line_point_attrs(
         )
         if copied != len(values) * 4:
             continue
-        grouped.append(_replace_loop_float_attr(attr, merged))
+        name = attr.name
+        if name in used_names:
+            base_name = "Color.AssetKitLine" if name == "Color" or name.startswith("Color.") else f"{name}.AssetKitLine"
+            name = base_name
+            suffix = 1
+            while name in used_names:
+                name = f"{base_name}.{suffix:03d}"
+                suffix += 1
+        used_names.add(name)
+        grouped.append(_replace_loop_float_attr(attr, merged, name=name))
     return grouped
 
 
 def _replace_loop_float_attr(
     attr: LoopFloatAttributeData,
     values_f32: object,
+    *,
+    name: str | None = None,
 ) -> LoopFloatAttributeData:
     if isinstance(attr, LoopFloatAttributeData):
-        return replace(attr, values_f32=values_f32)
+        return replace(attr, name=attr.name if name is None else name, values_f32=values_f32)
     return LoopFloatAttributeData(
-        name=attr.name,
+        name=attr.name if name is None else name,
         set=int(attr.set),
         width=int(attr.width),
         values_f32=values_f32,
@@ -600,18 +617,22 @@ def _create_grouped_mesh_object_bulk(
         detail_parts.append(f"uv={(now - phase_started_at) * 1000.0:.3f}ms")
         phase_started_at = now
 
+    render_color_name = None
     for index, attr in enumerate(data.color_sets or ()):
         colors = _buffer_view(attr.values_f32, "f")
         if colors is None:
             continue
+        color_name = attr.name or ("Color" if index == 0 else f"Color.{index:03d}")
         color_attr = mesh.color_attributes.new(
-            name=attr.name or ("Color" if index == 0 else f"Color.{index:03d}"),
+            name=color_name,
             type="FLOAT_COLOR",
             domain="CORNER",
         )
         color_attr.data.foreach_set("color", colors)
-    if data.color_sets:
-        _set_render_color_index(mesh)
+        if render_color_name is None:
+            render_color_name = color_name
+    if render_color_name is not None:
+        _set_render_color_index(mesh, render_color_name)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"color={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -1366,22 +1387,27 @@ def _create_mesh_object_bulk(
     lap_detail("uv")
 
     if data.color_sets:
+        render_color_name = None
         for index, attr in enumerate(data.color_sets):
             colors = _buffer_view(attr.values_f32, "f")
             if colors is not None:
+                color_name = attr.name or ("Color" if index == 0 else f"Color.{index:03d}")
                 color_attr = mesh.color_attributes.new(
-                    name=attr.name or ("Color" if index == 0 else f"Color.{index:03d}"),
+                    name=color_name,
                     type="FLOAT_COLOR",
                     domain="CORNER",
                 )
                 color_attr.data.foreach_set("color", colors)
-        _set_render_color_index(mesh)
+                if render_color_name is None:
+                    render_color_name = color_name
+        if render_color_name is not None:
+            _set_render_color_index(mesh, render_color_name)
     elif data.colors_f32:
         colors = _buffer_view(data.colors_f32, "f")
         if colors is not None:
             color_attr = mesh.color_attributes.new(name="Color", type="FLOAT_COLOR", domain="CORNER")
             color_attr.data.foreach_set("color", colors)
-            _set_render_color_index(mesh)
+            _set_render_color_index(mesh, "Color")
     lap_detail("color")
 
     if preserve_tangents and data.tangents_f32:

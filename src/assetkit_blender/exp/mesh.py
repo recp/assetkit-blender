@@ -47,9 +47,9 @@ _ANIMATED_SCENE_FORMATS = frozenset((AK_FILE_TYPE_GLTF, AK_FILE_TYPE_GLB, AK_FIL
 _STATIC_SCENE_MESH_FORMATS = frozenset(
     (AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT)
 )
-_NATIVE_STATIC_MESH_PAYLOAD_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
-_NO_MATERIAL_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
-_NO_UV_COLOR_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL))
+_NATIVE_STATIC_MESH_PAYLOAD_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
+_NO_MATERIAL_FORMATS = frozenset((AK_FILE_TYPE_STL,))
+_NO_UV_COLOR_FORMATS = frozenset((AK_FILE_TYPE_STL,))
 _STATIC_SCALE_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT))
 _RAW_Z_UP_FORMATS = frozenset(
     (AK_FILE_TYPE_3MF, AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT)
@@ -151,7 +151,7 @@ def _mesh_payload(
     layer_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile else 0.0
     phase_started_at = time.perf_counter() if profile else 0.0
 
-    if is_static_mesh:
+    if is_stl:
         export_ply_normals = bool(export_normals and ply_export_normals) if is_ply else False
         native_payload = (
             _AKB_NATIVE_MESH_PAYLOAD,
@@ -189,7 +189,10 @@ def _mesh_payload(
     if fps <= 0.0:
         fps = 24.0
 
-    if export_shape_keys and animation_bake_mode == "EVALUATED_MESH":
+    if is_static_mesh:
+        morph_targets = []
+        morph_animation = None
+    elif export_shape_keys and animation_bake_mode == "EVALUATED_MESH":
         baked = _evaluated_mesh_animation_bake(context, obj, mesh)
         if baked is not None:
             morph_targets, morph_animation = baked

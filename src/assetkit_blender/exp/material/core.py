@@ -4,7 +4,7 @@ from array import array
 
 import bpy
 
-from ...enums import AK_FILE_TYPE_WAVEFRONT
+from ...enums import AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT
 from ..images import _ExportImageStore
 from .animation import _material_animation_payload
 from .common import (
@@ -409,6 +409,11 @@ def _material_tuple(
     elif baked_base_color_texture is not None and bsdf is None:
         material_type = _MATERIAL_TYPE_UNLIT
     animations = None if lighting_baked else _material_animation_payload(material, bsdf, base_color, fps)
+    base_color_pixels = (
+        image_store.linear_pixels_for_path(base_color_texture)
+        if int(file_type or 0) == AK_FILE_TYPE_PLY and base_color_texture
+        else None
+    )
 
     return (
         material.name,
@@ -454,4 +459,5 @@ def _material_tuple(
         int(obj_roughness_channel),
         obj_roughness_info,
         bool(normal_is_height),
+        base_color_pixels,
     )

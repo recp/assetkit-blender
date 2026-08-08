@@ -52,9 +52,9 @@ _ANIMATED_SCENE_FORMATS = frozenset((AK_FILE_TYPE_GLTF, AK_FILE_TYPE_GLB, AK_FIL
 _STATIC_SCENE_MESH_FORMATS = frozenset(
     (AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT)
 )
-_NATIVE_STATIC_MESH_PAYLOAD_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
-_NO_MATERIAL_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
-_NO_UV_COLOR_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL))
+_NATIVE_STATIC_MESH_PAYLOAD_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
+_NO_MATERIAL_FORMATS = frozenset((AK_FILE_TYPE_STL,))
+_NO_UV_COLOR_FORMATS = frozenset((AK_FILE_TYPE_STL,))
 _STATIC_SCALE_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT))
 _RAW_Z_UP_FORMATS = frozenset(
     (AK_FILE_TYPE_3MF, AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT)
@@ -179,6 +179,7 @@ def export_scene(
     ply_export_normals: bool = True,
     ply_export_colors: str = "SRGB",
     ply_export_triangulated_mesh: bool = False,
+    ply_bake_textures: bool = True,
     three_mf_compression_level: int = 1,
 ) -> int:
     module = _native_module()
@@ -228,6 +229,20 @@ def export_scene(
     )
     ply_export_format = _ply_export_format_id(ply_format)
     ply_color_mode = _ply_export_color_mode_id(ply_export_colors)
+    ply_bake_textures_enabled = (
+        file_type == AK_FILE_TYPE_PLY
+        and bool(ply_bake_textures)
+        and ply_color_mode != AK_PLY_EXPORT_COLOR_NONE
+        and bool(export_vertex_colors)
+        and bool(export_materials)
+        and bool(export_images)
+    )
+    if file_type == AK_FILE_TYPE_PLY and not ply_bake_textures_enabled:
+        # PLY cannot reference external textures. Avoid node-image extraction,
+        # pixel conversion, and material bake setup unless vertex-color texture
+        # baking is explicitly enabled and can affect the output.
+        material_export_mode = "DIRECT"
+        lighting_bake_mode = "OFF"
     three_mf_compression_level = max(0, min(12, int(three_mf_compression_level)))
     ply_scale_value = _resolve_format_float(global_scale, ply_global_scale, 1.0)
     ply_scene_unit = _resolve_format_bool(use_scene_unit, ply_use_scene_unit, False)
@@ -282,6 +297,7 @@ def export_scene(
             ply_export_uv=False,
             ply_export_color_mode=AK_PLY_EXPORT_COLOR_NONE,
             ply_export_triangulated=False,
+            ply_bake_textures=False,
             apply_modifiers=bool(mesh_apply_modifiers),
         )
 
@@ -315,7 +331,9 @@ def export_scene(
         export_vertex_colors=bool(export_vertex_colors),
         export_attributes=bool(export_attributes),
         export_materials=bool(export_materials),
-        export_images=bool(export_images),
+        export_images=bool(export_images) and (
+            file_type != AK_FILE_TYPE_PLY or ply_bake_textures_enabled
+        ),
         export_animations=bool(export_animations),
         export_skins=bool(export_skins),
         export_shape_keys=bool(export_shape_keys),
@@ -333,6 +351,7 @@ def export_scene(
         ply_export_uv=bool(ply_export_uv) and bool(export_uv),
         ply_export_color_mode=ply_color_mode if export_vertex_colors else AK_PLY_EXPORT_COLOR_NONE,
         ply_export_triangulated=bool(ply_export_triangulated_mesh),
+        ply_bake_textures=ply_bake_textures_enabled,
         three_mf_compression_level=three_mf_compression_level,
         apply_modifiers=bool(mesh_apply_modifiers),
     )
@@ -383,6 +402,7 @@ def _export_scene_once(
     ply_export_uv: bool,
     ply_export_color_mode: int,
     ply_export_triangulated: bool,
+    ply_bake_textures: bool,
     three_mf_compression_level: int,
     apply_modifiers: bool,
 ) -> int:
@@ -480,6 +500,7 @@ def _export_scene_once(
                 float(stl_scale),
                 str(stl_forward_axis or "Y"),
                 str(stl_up_axis or "Z"),
+                int(bool(ply_bake_textures)),
             ))
             if profile:
                 _profile_log(
@@ -548,6 +569,7 @@ def _export_stl_batch_scene(
     ply_export_uv: bool,
     ply_export_color_mode: int,
     ply_export_triangulated: bool,
+    ply_bake_textures: bool,
     apply_modifiers: bool,
 ) -> int:
     objects = _stl_batch_objects(context, selected_only)
@@ -601,6 +623,7 @@ def _export_stl_batch_scene(
             ply_export_uv=ply_export_uv,
             ply_export_color_mode=ply_export_color_mode,
             ply_export_triangulated=ply_export_triangulated,
+            ply_bake_textures=ply_bake_textures,
             three_mf_compression_level=1,
             apply_modifiers=apply_modifiers,
         )

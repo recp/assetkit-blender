@@ -72,32 +72,18 @@ akb_blender_unit_scale(const AkDoc *doc) {
   return scale_f;
 }
 
-static AkCoordSys *
-akb_blender_source_coord(AkDoc *doc) {
-  AkFileType ftype;
-
-  if (!doc)
-    return AK_YUP;
-
-  ftype = doc->inf ? doc->inf->ftype : AK_FILE_TYPE_AUTO;
-  switch (ftype) {
-    case AK_FILE_TYPE_WAVEFRONT:
-    case AK_FILE_TYPE_STL:
-    case AK_FILE_TYPE_PLY:
-      return AK_ZUP;
-    default:
-      break;
-  }
-
-  return doc->coordSys ? doc->coordSys : AK_YUP;
-}
-
 static void
 akb_coord_ctx_init(AkbCoordContext *coord, AkDoc *doc, const AkbLoadOptions *options) {
   uint8_t axis_convert;
   uint8_t unit_convert;
 
-  coord->source = akb_blender_source_coord(doc);
+  /*
+   * The core importer owns the source-space contract.  In particular,
+   * unlabelled OBJ, PLY and STL documents are canonical right-handed Y-up.
+   * Overriding those formats to Blender's Z-up here bypassed that contract
+   * and swapped Y/Z for files written by AssetKit's canonical exporters.
+   */
+  coord->source = doc && doc->coordSys ? doc->coordSys : AK_YUP;
   coord->target = options->target_coord ? options->target_coord : AK_ZUP;
   coord->conversion = options->coord_conversion;
   coord->unit_scale = coord->conversion == AKB_COORD_RAW

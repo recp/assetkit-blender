@@ -99,7 +99,7 @@ def _apply_point_attributes(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> No
                 blender_attr = mesh.color_attributes.new(name=name, type="FLOAT_COLOR", domain="POINT")
                 blender_attr.data.foreach_set("color", values)
                 if name == "Color":
-                    _set_render_color_index(mesh)
+                    _set_render_color_index(mesh, name)
             elif not _apply_vector_attribute(mesh, name, values, "FLOAT4", "POINT"):
                 _apply_split_attribute(mesh, name, values, ("x", "y", "z", "w"), "POINT")
 
@@ -534,8 +534,16 @@ def _triangle_loop_starts(loop_count: int) -> array:
     return values
 
 
-def _set_render_color_index(mesh: bpy.types.Mesh) -> None:
+def _set_render_color_index(mesh: bpy.types.Mesh, name: str = "Color") -> None:
     try:
-        mesh.color_attributes.render_color_index = 0
+        attributes = mesh.color_attributes
+        index = attributes.find(name)
+        if index < 0:
+            return
+        attributes.render_color_index = index
+        try:
+            attributes.active_color_index = index
+        except Exception:
+            pass
     except Exception:
         pass

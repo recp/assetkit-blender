@@ -58,9 +58,9 @@ _ANIMATED_SCENE_FORMATS = frozenset((AK_FILE_TYPE_GLTF, AK_FILE_TYPE_GLB, AK_FIL
 _STATIC_SCENE_MESH_FORMATS = frozenset(
     (AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT)
 )
-_NATIVE_STATIC_MESH_PAYLOAD_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
-_NO_MATERIAL_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
-_NO_UV_COLOR_FORMATS = frozenset((AK_FILE_TYPE_3MF, AK_FILE_TYPE_STL))
+_NATIVE_STATIC_MESH_PAYLOAD_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY))
+_NO_MATERIAL_FORMATS = frozenset((AK_FILE_TYPE_STL,))
+_NO_UV_COLOR_FORMATS = frozenset((AK_FILE_TYPE_STL,))
 _STATIC_SCALE_FORMATS = frozenset((AK_FILE_TYPE_STL, AK_FILE_TYPE_PLY, AK_FILE_TYPE_WAVEFRONT))
 _RAW_Z_UP_FORMATS = frozenset(
     (AK_FILE_TYPE_3MF, AK_FILE_TYPE_DAE, AK_FILE_TYPE_PLY, AK_FILE_TYPE_STL, AK_FILE_TYPE_WAVEFRONT)
@@ -590,6 +590,14 @@ def _collect_static_mesh_scene_items(
     mesh_payload_ms = 0.0
     to_mesh_ms = 0.0
     candidate_count = 0
+    compact_batches = {
+        obj.as_pointer(): obj
+        for obj in objects
+        if bool(obj.get("assetkit_compact_instance_batch", False))
+        and obj in exportable
+        and (object_filter is None or obj in object_filter)
+        and (selected is None or obj in selected)
+    }
 
     for obj in objects:
         if obj not in exportable:
@@ -597,6 +605,8 @@ def _collect_static_mesh_scene_items(
         if object_filter is not None and obj not in object_filter:
             continue
         if selected is not None and obj not in selected:
+            continue
+        if bool(obj.get("assetkit_compact_instance_batch", False)):
             continue
         if not _object_type_exports_as_mesh(obj, file_type):
             continue
@@ -678,6 +688,78 @@ def _collect_static_mesh_scene_items(
             payload,
             None,
         ))
+
+    # Compact batches intentionally contain only points.  Their visible mesh
+    # objects live in prototype collections and are exposed by the depsgraph as
+    # instances, so exporting the carrier itself either produces an empty mesh
+    # or drops every repeated object.  Flatten those evaluated instances for
+    # static formats while reusing one payload per prototype mesh.
+    if compact_batches:
+        instance_index = 0
+        for instance in depsgraph.object_instances:
+            parent = instance.parent
+            if parent is None or parent.original.as_pointer() not in compact_batches:
+                continue
+
+            obj_eval = instance.object
+            if obj_eval.type != "MESH":
+                continue
+            mesh = getattr(obj_eval, "data", None)
+            if mesh is None or len(mesh.polygons) == 0:
+                continue
+
+            candidate_count += 1
+            obj = obj_eval.original
+            source_mesh = obj.data if obj.type == "MESH" else None
+            shared_key = _shared_mesh_payload_key(obj, ignore_modifiers=True)
+            payload = mesh_payload_cache.get(shared_key) if shared_key is not None else None
+            if payload is None:
+                mesh_payload_started_at = time.perf_counter() if profile else 0.0
+                payload = _mesh_payload(
+                    context,
+                    obj,
+                    mesh,
+                    source_mesh,
+                    file_type,
+                    image_store,
+                    material_cache,
+                    material_export_mode,
+                    material_bake_size,
+                    lighting_bake_mode,
+                    skin_setup=None,
+                    export_uv=export_uv,
+                    export_normals=export_normals,
+                    export_tangents=export_tangents,
+                    export_vertex_colors=export_vertex_colors,
+                    export_attributes=export_attributes,
+                    export_materials=export_materials,
+                    export_images=export_images,
+                    export_shape_keys=False,
+                    export_shape_key_normals=False,
+                    export_shape_key_tangents=False,
+                    export_shape_key_animations=False,
+                    export_custom_properties=export_custom_properties,
+                    ply_export_normals=ply_export_normals,
+                    ply_export_uv=ply_export_uv,
+                    ply_export_colors=ply_export_colors,
+                    ply_export_triangulated=ply_export_triangulated,
+                )
+                if profile:
+                    mesh_payload_ms += (time.perf_counter() - mesh_payload_started_at) * 1000.0
+                if shared_key is not None:
+                    mesh_payload_cache[shared_key] = payload
+            if payload is None:
+                continue
+
+            out.append((
+                AKB_EXPORT_ITEM_MESH,
+                f"{obj.name} Instance {instance_index}",
+                _matrix_values(instance.matrix_world),
+                -1,
+                payload,
+                None,
+            ))
+            instance_index += 1
 
     if profile:
         _profile_log(
@@ -830,6 +912,12 @@ def _shared_mesh_payload_key(
 
 
 def _static_mesh_requires_evaluated_mesh(obj: bpy.types.Object, apply_modifiers: bool) -> bool:
+    # Compact instance batches are point carriers whose visible geometry is
+    # produced entirely by their Geometry Nodes modifier.  Exporting the raw
+    # carrier yields an empty mesh (and loses every instance), even when the
+    # caller otherwise asked to preserve unapplied modifiers.
+    if bool(obj.get("assetkit_compact_instance_batch", False)):
+        return True
     if not apply_modifiers and obj.type == "MESH":
         return False
     if obj.type != "MESH":

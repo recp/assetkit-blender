@@ -2038,6 +2038,13 @@ def _set_material_alpha_mode(mat: bpy.types.Material, data: MeshPrimitiveData) -
 
 
 def _prefers_hashed_transparency(data: MeshPrimitiveData) -> bool:
+    # Vertex alpha commonly mixes opaque and transparent faces in one mesh
+    # (notably PLY). Sorted blending treats that whole merged mesh as a single
+    # transparent surface and produces severe ordering artifacts. Hashed /
+    # dithered transparency preserves the authored alpha without that global
+    # sort dependency.
+    if _color_attribute_name(data):
+        return True
     if not data.transparent_texture and not _uses_transparent_as_surface_color(data):
         return False
     return bool(data.transparent_inverted)

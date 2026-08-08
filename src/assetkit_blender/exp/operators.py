@@ -496,6 +496,11 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
         description="Triangulate polygon faces for PLY export",
         default=False,
     )
+    ply_bake_textures: bpy.props.BoolProperty(
+        name="Bake Textures",
+        description="Bake material textures to PLY vertex colors (may add geometry)",
+        default=True,
+    )
 
     def draw(self, _context):
         layout = self.layout
@@ -533,6 +538,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
             if ply:
                 ply.prop(self, "ply_format")
                 ply.prop(self, "ply_export_triangulated_mesh")
+                ply.prop(self, "ply_bake_textures")
 
     def _draw_coordinates_settings(self, layout):
         if self.export_format in _MESH_TRANSFORM_FORMATS:
@@ -769,6 +775,7 @@ class ASSETKIT_OT_export_assetkit(bpy.types.Operator, ExportHelper):
                     "SRGB" if self.export_format == "PLY" and self.export_vertex_colors else self.ply_export_colors
                 ),
                 ply_export_triangulated_mesh=self.ply_export_triangulated_mesh,
+                ply_bake_textures=self.ply_bake_textures,
                 three_mf_compression_level=self.three_mf_compression_level,
             )
         except AssetKitError as exc:

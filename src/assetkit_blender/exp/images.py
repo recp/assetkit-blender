@@ -21,6 +21,8 @@ class _ExportImageStore:
         self._spec_gloss_cache: dict[tuple[int, int, int, int, bytes, float], str | None] = {}
         self._shader_bake_cache: dict[tuple[int, int, int, int, str], str | None] = {}
         self._lighting_bake_cache: dict[tuple[int, int, int, int, str], str | None] = {}
+        self._image_by_path: dict[str, bpy.types.Image] = {}
+        self._linear_pixels_by_path: dict[str, tuple[int, int, array] | None] = {}
         self._counter = 0
 
     def path_for(self, image: bpy.types.Image) -> str | None:
@@ -33,7 +35,37 @@ class _ExportImageStore:
             path = self._write_temp_image(image)
 
         self._cache[key] = path
+        if path:
+            self._image_by_path[os.path.realpath(path)] = image
         return path
+
+    def linear_pixels_for_path(self, path: str | None) -> tuple[int, int, array] | None:
+        if not path:
+            return None
+        key = os.path.realpath(path)
+        if key in self._linear_pixels_by_path:
+            return self._linear_pixels_by_path[key]
+
+        image = self._image_by_path.get(key)
+        temporary = False
+        if image is None:
+            try:
+                image = bpy.data.images.load(path, check_existing=False)
+                temporary = True
+            except Exception:
+                self._linear_pixels_by_path[key] = None
+                return None
+
+        try:
+            pixels = self._image_pixels(image)
+        finally:
+            if temporary:
+                try:
+                    bpy.data.images.remove(image)
+                except Exception:
+                    pass
+        self._linear_pixels_by_path[key] = pixels
+        return pixels
 
     def metallic_roughness_path(
         self,

@@ -199,15 +199,45 @@ def run_checks(out_root: Path) -> None:
     for expected in (
         "property float s",
         "property float t",
-        "property uchar red",
-        "property uchar green",
-        "property uchar blue",
-        "property uchar alpha",
+        "property float red",
+        "property float green",
+        "property float blue",
+        "property float alpha",
     ):
         if expected not in header:
             raise AssertionError(f"ASCII PLY header missing {expected!r}")
     assert_equal(ply_header_count(ascii_path, "face"), 1, "ASCII attr face count")
     assert_equal(assetkit_import_stats(ascii_path)[2], 1, "AssetKit import of ASCII PLY")
+
+    bake_option_path = out_root / "bake_option.ply"
+    export_scene(
+        bpy.context,
+        bake_option_path,
+        AK_FILE_TYPE_PLY,
+        ply_bake_textures=True,
+    )
+    if ply_header_count(bake_option_path, "face") < 1:
+        raise AssertionError("texture-bake option export has no faces")
+
+    reset_scene()
+    add_triangle("SrgbTriangle", with_attrs=True)
+    srgb_path = out_root / "srgb_attrs.ply"
+    export_scene(
+        bpy.context,
+        srgb_path,
+        AK_FILE_TYPE_PLY,
+        ply_format="ASCII",
+        ply_export_colors="SRGB",
+    )
+    srgb_header = ply_header(srgb_path)
+    for expected in (
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "property uchar alpha",
+    ):
+        if expected not in srgb_header:
+            raise AssertionError(f"sRGB PLY header missing {expected!r}")
 
     reset_scene()
     plane = add_plane("SolidPlane")
@@ -239,6 +269,48 @@ def run_checks(out_root: Path) -> None:
     expected = [(0.0, 0.0, 0.0), (0.0, -2.0, 0.0), (2.0, 0.0, 0.0)]
     for index, (actual, want) in enumerate(zip(vertices, expected)):
         assert_close_vec(actual, want, f"axis/scale vertex {index}")
+
+    axes = ("X", "Y", "Z", "-X", "-Y", "-Z")
+    native_axis = {
+        "-X": "NEGATIVE_X",
+        "-Y": "NEGATIVE_Y",
+        "-Z": "NEGATIVE_Z",
+    }
+    for forward_axis in axes:
+        for up_axis in axes:
+            if forward_axis.lstrip("-") == up_axis.lstrip("-"):
+                continue
+            stem = f"axis_{forward_axis.replace('-', 'neg')}_{up_axis.replace('-', 'neg')}"
+            assetkit_path = out_root / f"{stem}_assetkit.ply"
+            native_path = out_root / f"{stem}_native.ply"
+            export_scene(
+                bpy.context,
+                assetkit_path,
+                AK_FILE_TYPE_PLY,
+                ply_format="ASCII",
+                global_scale=2.0,
+                forward_axis=forward_axis,
+                up_axis=up_axis,
+            )
+            bpy.ops.wm.ply_export(
+                filepath=os.fspath(native_path),
+                ascii_format=True,
+                export_selected_objects=False,
+                global_scale=2.0,
+                apply_modifiers=True,
+                forward_axis=native_axis.get(forward_axis, forward_axis),
+                up_axis=native_axis.get(up_axis, up_axis),
+                export_uv=True,
+                export_normals=False,
+                export_colors="SRGB",
+                export_attributes=True,
+                export_triangulated_mesh=False,
+            )
+            assetkit_vertices = ascii_vertices(assetkit_path)
+            native_vertices = ascii_vertices(native_path)
+            assert_equal(len(assetkit_vertices), len(native_vertices), f"{stem} vertex count")
+            for index, (actual, want) in enumerate(zip(assetkit_vertices, native_vertices)):
+                assert_close_vec(actual, want, f"{stem} vertex {index}")
 
     print(f"PLY export checks passed: {out_root}")
 

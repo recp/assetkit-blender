@@ -76,6 +76,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   uintptr_t saved_ply_export_uv;
   uintptr_t saved_ply_export_color_mode;
   uintptr_t saved_ply_export_triangulated;
+  uintptr_t saved_ply_bake_textures;
   uintptr_t saved_zip_export_compression_level;
   uintptr_t saved_authoring_tool;
   const char *authoring_tool_fragment;
@@ -84,6 +85,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   char authoring_tool[256];
   Py_ssize_t item_count;
   Py_ssize_t i;
+  Py_ssize_t failed_item;
   AkDoc *doc;
   AkNode **nodes;
   AkbExportSceneItem *scene_items;
@@ -106,6 +108,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   int ply_export_uv;
   int ply_export_color_mode;
   int ply_export_triangulated;
+  int ply_bake_textures;
   int zip_export_compression_level;
   int export_coord_system_id;
   int export_coord_conversion_id;
@@ -133,6 +136,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   ply_export_uv = 1;
   ply_export_color_mode = AK_PLY_EXPORT_COLOR_SRGB;
   ply_export_triangulated = 0;
+  ply_bake_textures = 1;
   zip_export_compression_level = 1;
   export_coord_system_id = AKB_LOAD_COORD_Y_UP;
   export_coord_conversion_id = AKB_COORD_TRANSFORM;
@@ -141,7 +145,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   stl_forward_axis = "Y";
   stl_up_axis = "Z";
   if (!PyArg_ParseTuple(args,
-                        "sisO|O" "iiiiiiiiiiii" "sdss",
+                        "sisO|O" "iiiiiiiiiiii" "sdssi",
                         &out_dir,
                         &file_type_int,
                         &name,
@@ -162,7 +166,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
                         &authoring_tool_fragment,
                         &stl_global_scale,
                         &stl_forward_axis,
-                        &stl_up_axis))
+                        &stl_up_axis,
+                        &ply_bake_textures))
     return NULL;
   if (!PySequence_Check(items_obj)) {
     PyErr_SetString(PyExc_TypeError, "scene items must be a sequence");
@@ -176,6 +181,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
   profile = akb_profile_enabled();
   total_started_at = phase_started_at = profile ? akb_now_ms() : 0.0;
   item_ms = payload_ms = coord_ms = core_export_ms = 0.0;
+  failed_item = -1;
 
   doc = akb_export_doc_new(name, (AkFileType)file_type_int);
   if (!doc)
@@ -466,6 +472,8 @@ akb_export_scene(PyObject *self, PyObject *args) {
       ok = akb_export_add_transform_animations(doc,
                                                node,
                                                scene_items[i].animation);
+    if (!ok)
+      failed_item = i;
   }
 
   if (profile) {
@@ -478,10 +486,18 @@ akb_export_scene(PyObject *self, PyObject *args) {
   akb_export_geometry_cache_free(&geometry_cache);
 
   if (!ok) {
+    if (!PyErr_Occurred()) {
+      if (failed_item >= 0 && failed_item < item_count && nodes[failed_item])
+        PyErr_Format(PyExc_RuntimeError,
+                     "AssetKit Blender export bridge failed at scene item %zd (%s)",
+                     failed_item,
+                     nodes[failed_item]->name ? nodes[failed_item]->name : "unnamed");
+      else
+        PyErr_SetString(PyExc_RuntimeError,
+                        "AssetKit Blender export bridge could not build document");
+    }
     free(nodes);
     ak_free(doc);
-    if (!PyErr_Occurred())
-      PyErr_SetString(PyExc_RuntimeError, "AssetKit Blender export bridge could not build document");
     return NULL;
   }
 
@@ -502,6 +518,21 @@ akb_export_scene(PyObject *self, PyObject *args) {
       return NULL;
     }
     ak_nodeSetTransformMatrix(doc->scene->node, stl_root_matrix);
+  }
+
+  /*
+   * Blender's static-mesh axis options describe the axes written to the
+   * unlabelled OBJ/PLY/STL file.  The scene items above are already in
+   * Blender Z-up space and stl_root_matrix is the complete Blender-compatible
+   * output-axis transform.  Mark the bridge document as canonical here so the
+   * core exporters do not append their generic unlabelled-file Z-up -> Y-up
+   * transform a second time.
+   */
+  if (file_type_int == AK_FILE_TYPE_STL
+      || file_type_int == AK_FILE_TYPE_PLY
+      || file_type_int == AK_FILE_TYPE_WAVEFRONT) {
+    doc->inf->base.coordSys = AK_YUP;
+    doc->coordSys           = AK_YUP;
   }
 
   Py_BEGIN_ALLOW_THREADS
@@ -541,12 +572,15 @@ akb_export_scene(PyObject *self, PyObject *args) {
     saved_ply_export_uv = ak_opt_get(AK_OPT_PLY_EXPORT_UV);
     saved_ply_export_color_mode = ak_opt_get(AK_OPT_PLY_EXPORT_COLOR_MODE);
     saved_ply_export_triangulated = ak_opt_get(AK_OPT_PLY_EXPORT_TRIANGULATED);
+    saved_ply_bake_textures = ak_opt_get(AK_OPT_PLY_EXPORT_BAKE_TEXTURES);
     ak_opt_set(AK_OPT_PLY_EXPORT_FORMAT, (uintptr_t)ply_export_format);
     ak_opt_set(AK_OPT_PLY_EXPORT_NORMALS, (uintptr_t)(ply_export_normals != 0));
     ak_opt_set(AK_OPT_PLY_EXPORT_UV, (uintptr_t)(ply_export_uv != 0));
     ak_opt_set(AK_OPT_PLY_EXPORT_COLOR_MODE, (uintptr_t)ply_export_color_mode);
     ak_opt_set(AK_OPT_PLY_EXPORT_TRIANGULATED,
                (uintptr_t)(ply_export_triangulated != 0));
+    ak_opt_set(AK_OPT_PLY_EXPORT_BAKE_TEXTURES,
+               (uintptr_t)(ply_bake_textures != 0));
   }
   set_zip_options = file_type_int == AK_FILE_TYPE_3MF;
   if (set_zip_options) {
@@ -587,6 +621,7 @@ akb_export_scene(PyObject *self, PyObject *args) {
     ak_opt_set(AK_OPT_PLY_EXPORT_UV, saved_ply_export_uv);
     ak_opt_set(AK_OPT_PLY_EXPORT_COLOR_MODE, saved_ply_export_color_mode);
     ak_opt_set(AK_OPT_PLY_EXPORT_TRIANGULATED, saved_ply_export_triangulated);
+    ak_opt_set(AK_OPT_PLY_EXPORT_BAKE_TEXTURES, saved_ply_bake_textures);
   }
   if (set_zip_options)
     ak_opt_set(AK_OPT_ZIP_EXPORT_COMPRESSION_LEVEL,

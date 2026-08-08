@@ -385,6 +385,111 @@ akb_export_texref(AkDoc               *doc,
   return texref;
 }
 
+static uint8_t
+akb_export_linear_srgb8(float value) {
+  float encoded;
+
+  if (!(value > 0.0f))
+    return 0u;
+  if (value >= 1.0f)
+    return 255u;
+  encoded = ak_linear_sRGBf(value);
+  if (!(encoded > 0.0f))
+    return 0u;
+  if (encoded >= 1.0f)
+    return 255u;
+  return (uint8_t)(encoded * 255.0f + 0.5f);
+}
+
+static uint8_t
+akb_export_linear_unorm8(float value) {
+  if (!(value > 0.0f))
+    return 0u;
+  if (value >= 1.0f)
+    return 255u;
+  return (uint8_t)(value * 255.0f + 0.5f);
+}
+
+static int
+akb_export_attach_linear_rgba(AkDoc       *doc,
+                              AkTextureRef *texref,
+                              PyObject     *pixels_obj) {
+  AkHeap      *heap;
+  AkImage     *image;
+  AkImageData *data;
+  PyObject    *buffer_obj;
+  Py_buffer    view;
+  const float *src;
+  uint8_t     *dst;
+  Py_ssize_t   width_py;
+  Py_ssize_t   height_py;
+  size_t       pixel_count;
+  size_t       byte_count;
+
+  if (!pixels_obj || pixels_obj == Py_None)
+    return 1;
+  if (!doc || !texref || !texref->texture || !texref->texture->image) {
+    PyErr_SetString(PyExc_ValueError, "texture pixel payload has no target image");
+    return 0;
+  }
+  if (!PyArg_ParseTuple(pixels_obj, "nnO", &width_py, &height_py, &buffer_obj))
+    return 0;
+  if (width_py <= 0 || height_py <= 0
+      || (size_t)width_py > UINT32_MAX || (size_t)height_py > UINT32_MAX
+      || (size_t)width_py > SIZE_MAX / (size_t)height_py) {
+    PyErr_SetString(PyExc_ValueError, "texture pixel payload dimensions are invalid");
+    return 0;
+  }
+  pixel_count = (size_t)width_py * (size_t)height_py;
+  if (pixel_count > SIZE_MAX / (4u * sizeof(float))
+      || pixel_count > SIZE_MAX / 4u) {
+    PyErr_SetString(PyExc_OverflowError, "texture pixel payload is too large");
+    return 0;
+  }
+  byte_count = pixel_count * 4u;
+  memset(&view, 0, sizeof(view));
+  if (PyObject_GetBuffer(buffer_obj, &view, PyBUF_CONTIG_RO) < 0)
+    return 0;
+  if ((size_t)view.len < byte_count * sizeof(float)) {
+    PyBuffer_Release(&view);
+    PyErr_SetString(PyExc_ValueError, "texture pixel buffer is truncated");
+    return 0;
+  }
+
+  image = texref->texture->image;
+  if (image->data) {
+    PyBuffer_Release(&view);
+    return 1;
+  }
+  heap = ak_heap_getheap(doc);
+  data = heap ? (AkImageData *)ak_heap_calloc(heap, image, sizeof(*data)) : NULL;
+  dst = data ? (uint8_t *)ak_heap_calloc(heap, data, byte_count) : NULL;
+  if (!data || !dst) {
+    PyBuffer_Release(&view);
+    PyErr_NoMemory();
+    return 0;
+  }
+
+  src = (const float *)view.buf;
+  for (size_t i = 0; i < pixel_count; i++) {
+    size_t offset;
+
+    offset = i * 4u;
+    dst[offset]     = akb_export_linear_srgb8(src[offset]);
+    dst[offset + 1] = akb_export_linear_srgb8(src[offset + 1]);
+    dst[offset + 2] = akb_export_linear_srgb8(src[offset + 2]);
+    dst[offset + 3] = akb_export_linear_unorm8(src[offset + 3]);
+  }
+  PyBuffer_Release(&view);
+
+  data->data   = dst;
+  data->width  = (uint32_t)width_py;
+  data->height = (uint32_t)height_py;
+  data->comp   = 4;
+  image->data  = data;
+  return 1;
+}
+
 static void
 akb_export_material_feature_append(AkMaterialSurface *surface,
                                    AkMaterialFeature *feature) {
@@ -1274,6 +1379,7 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   PyObject          *features_obj;
   PyObject          *animations_obj;
   PyObject          *extra_obj;
+  PyObject          *base_color_pixels_obj;
   Py_buffer          color_view;
   Py_buffer          emissive_color_view;
   const char        *name;
@@ -1341,6 +1447,7 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   features_obj = Py_None;
   animations_obj = Py_None;
   extra_obj = Py_None;
+  base_color_pixels_obj = Py_None;
   normal_scale = 1.0;
   occlusion_strength = 1.0;
   emissive_strength = 1.0;
@@ -1361,7 +1468,55 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   memset(&color_view, 0, sizeof(color_view));
   memset(&emissive_color_view, 0, sizeof(emissive_color_view));
   obj_size = PyTuple_Check(obj) ? PyTuple_Size(obj) : -1;
-  if (obj_size == 43) {
+  if (obj_size == 44) {
+    if (!PyArg_ParseTuple(obj,
+                          "sOddidpzizizizidzidOzidOOOOOOiiOOOziiOziiOpO",
+                          &name,
+                          &color_obj,
+                          &metallic,
+                          &roughness,
+                          &alpha_mode,
+                          &alpha_cutoff,
+                          &double_sided,
+                          &base_color_uri,
+                          &base_color_slot,
+                          &opacity_uri,
+                          &opacity_slot,
+                          &metallic_roughness_uri,
+                          &metallic_roughness_slot,
+                          &normal_uri,
+                          &normal_slot,
+                          &normal_scale,
+                          &occlusion_uri,
+                          &occlusion_slot,
+                          &occlusion_strength,
+                          &emissive_color_obj,
+                          &emissive_uri,
+                          &emissive_slot,
+                          &emissive_strength,
+                          &base_color_info_obj,
+                          &opacity_info_obj,
+                          &metallic_roughness_info_obj,
+                          &normal_info_obj,
+                          &occlusion_info_obj,
+                          &emissive_info_obj,
+                          &material_type,
+                          &opacity_inverted,
+                          &features_obj,
+                          &animations_obj,
+                          &extra_obj,
+                          &metallic_uri,
+                          &metallic_slot,
+                          &metallic_channel,
+                          &metallic_info_obj,
+                          &roughness_uri,
+                          &roughness_slot,
+                          &roughness_channel,
+                          &roughness_info_obj,
+                          &normal_is_height,
+                          &base_color_pixels_obj))
+      return NULL;
+  } else if (obj_size == 43) {
     if (!PyArg_ParseTuple(obj,
                           "sOddidpzizizizidzidOzidOOOOOOiiOOOziiOziiOp",
                           &name,
@@ -1786,6 +1941,12 @@ akb_export_material(AkDoc *doc, PyObject *obj) {
   if (base_color_texture) {
     surface->baseColor->texture = base_color_texture;
     surface->baseColor->source  = AK_MATERIAL_INPUT_TEXTURE;
+    if (!akb_export_attach_linear_rgba(doc,
+                                       base_color_texture,
+                                       base_color_pixels_obj)) {
+      AKB_EXPORT_MAT_RELEASE_BUFFERS();
+      return NULL;
+    }
   }
 
   if (opacity_uri && opacity_uri[0]) {

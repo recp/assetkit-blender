@@ -3356,7 +3356,15 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
                  && !(is_ply_export && !ply_export_normals);
   if (is_ply_export)
     export_tangents = 0;
-  use_ply_polygons = is_ply_export && !ply_export_triangulated;
+  /* The compact polygon path deliberately has no material groups.  Keep it
+   * for plain geometry, but use the triangle path when PLY must bake a
+   * material/texture into vertex colors so UV seams remain correct. */
+  use_ply_polygons = is_ply_export
+                     && !ply_export_triangulated
+                     && PyTuple_Check(materials_obj)
+                     && PyTuple_GET_SIZE(materials_obj) == 0
+                     && PyTuple_Check(color_layers_obj)
+                     && PyTuple_GET_SIZE(color_layers_obj) == 0;
 
   if (!use_ply_polygons
       && PyObject_CallMethod(mesh_py, "calc_loop_triangles", NULL) == NULL)
@@ -3724,7 +3732,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
   if (!ok)
     goto done_native;
 
-  if (is_stl_export || is_3mf_export) {
+  if (is_stl_export) {
     ok = akb_export_add_stl_compact_tri_mesh_payload_to_node(doc,
                                                              node,
                                                              name,
@@ -3861,6 +3869,15 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
 
   if (is_ply_export) {
     has_tangents = 0;
+    if (material_count_py > 0
+        && !akb_export_read_tri_materials(loop_tris_obj,
+                                          tri_count,
+                                          &tri_materials_buf,
+                                          &tri_materials_view,
+                                          &tri_materials)) {
+      ok = 0;
+      goto done_native;
+    }
   } else {
     if (!akb_export_read_tri_materials(loop_tris_obj,
                                        tri_count,
@@ -3890,7 +3907,7 @@ akb_export_add_native_mesh_payload_to_node(AkDoc      *doc,
     AkbExportFastGroup *group;
     int material_index;
 
-    material_index = is_ply_export ? -1 : tri_materials[tri_index];
+    material_index = tri_materials ? tri_materials[tri_index] : -1;
     if (material_index >= 0 && material_index < material_count_py)
       group = &groups[material_index];
     else
