@@ -572,9 +572,9 @@ akb_sampler_is_default(AkSampler *sampler) {
   return sampler->wrapS == AK_WRAP_MODE_WRAP
          && sampler->wrapT == AK_WRAP_MODE_WRAP
          && sampler->wrapP == AK_WRAP_MODE_WRAP
-         && sampler->minfilter == AK_MINFILTER_LINEAR
-         && sampler->magfilter == AK_MAGFILTER_LINEAR
-         && sampler->mipfilter == AK_MIPFILTER_LINEAR
+         && sampler->minfilter == AK_MINFILTER_UNSPECIFIED
+         && sampler->magfilter == AK_MAGFILTER_UNSPECIFIED
+         && sampler->mipfilter == AK_MIPFILTER_UNSPECIFIED
          && sampler->maxAnisotropy == 0
          && sampler->mipMaxLevel == 0
          && sampler->mipMinLevel == 0
@@ -785,9 +785,9 @@ akb_copy_texture_info(AkbSharedDoc *doc_owner,
   info->wrap_s = sampler ? sampler->wrapS : AK_WRAP_MODE_WRAP;
   info->wrap_t = sampler ? sampler->wrapT : AK_WRAP_MODE_WRAP;
   info->wrap_p = sampler ? sampler->wrapP : AK_WRAP_MODE_WRAP;
-  info->min_filter = sampler ? sampler->minfilter : AK_MINFILTER_LINEAR;
-  info->mag_filter = sampler ? sampler->magfilter : AK_MAGFILTER_LINEAR;
-  info->mip_filter = sampler ? sampler->mipfilter : AK_MIPFILTER_LINEAR;
+  info->min_filter = sampler ? sampler->minfilter : AK_MINFILTER_UNSPECIFIED;
+  info->mag_filter = sampler ? sampler->magfilter : AK_MAGFILTER_UNSPECIFIED;
+  info->mip_filter = sampler ? sampler->mipfilter : AK_MIPFILTER_UNSPECIFIED;
 
   transform = texref->transform;
   info->transform_offset[0] = 0.0f;

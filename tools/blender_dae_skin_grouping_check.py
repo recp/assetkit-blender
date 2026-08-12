@@ -87,6 +87,29 @@ FIXTURE = f"""<?xml version="1.0" encoding="utf-8"?>
 """
 
 
+INSTANCE_SKELETON_FIXTURE = f"""<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><unit name="meter" meter="1"/><up_axis>Y_UP</up_axis></asset>
+  <library_geometries><geometry id="geom"><mesh>
+    <source id="positions"><float_array id="positions-array" count="9">0 0 0  1 0 0  0 1 0</float_array><technique_common><accessor source="#positions-array" count="3" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <vertices id="vertices"><input semantic="POSITION" source="#positions"/></vertices>
+    <triangles count="1"><input semantic="VERTEX" source="#vertices" offset="0"/><p>0 1 2</p></triangles>
+  </mesh></geometry></library_geometries>
+  <library_controllers>{_controller_xml("skinShared", "joint", IDENTITY)}</library_controllers>
+  <library_visual_scenes><visual_scene id="Scene">
+    <node id="rigA" name="rigA"><translate sid="translation">0 0 0</translate>
+      <node id="jointA" sid="joint" name="jointA" type="JOINT"><matrix>{IDENTITY}</matrix></node>
+    </node>
+    <node id="rigB" name="rigB"><translate sid="translation">100 0 0</translate>
+      <node id="jointB" sid="joint" name="jointB" type="JOINT"><matrix>{IDENTITY}</matrix></node>
+    </node>
+    <node id="meshA" name="meshA"><matrix>{IDENTITY}</matrix><instance_controller url="#skinShared"><skeleton>#rigA</skeleton></instance_controller></node>
+    <node id="meshB" name="meshB"><matrix>{IDENTITY}</matrix><instance_controller url="#skinShared"><skeleton>#rigB</skeleton></instance_controller></node>
+  </visual_scene></library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>"""
+
+
 def _i32_values(buffer: object) -> tuple[int, ...]:
     return tuple(memoryview(buffer).cast("B").cast("i")) if buffer else ()
 
@@ -99,6 +122,52 @@ def _evaluated_centroid_x(obj: bpy.types.Object) -> float:
         return sum(float((evaluated.matrix_world @ vertex.co).x) for vertex in mesh.vertices) / len(mesh.vertices)
     finally:
         evaluated.to_mesh_clear()
+
+
+def _assert_instance_skeleton_roots(path: Path, options: object) -> None:
+    path.write_text(INSTANCE_SKELETON_FIXTURE, encoding="utf-8")
+    loaded = native_load_meshes(os.fspath(path), options)
+    if loaded is None or len(loaded.meshes) != 2:
+        raise AssertionError("failed to load two instance-specific skeleton roots")
+    roots = {
+        loaded.nodes[int(primitive.skin_root_node_index)].name
+        for primitive in loaded.meshes
+        if int(primitive.skin_root_node_index) >= 0
+    }
+    joint_palettes = {
+        tuple(loaded.nodes[index].name for index in _i32_values(primitive.skin_joint_nodes_i32))
+        for primitive in loaded.meshes
+    }
+    if roots != {"rigA", "rigB"} or joint_palettes != {("jointA",), ("jointB",)}:
+        raise AssertionError(
+            f"instance_controller skeleton override was shared: roots={roots}, joints={joint_palettes}"
+        )
+
+    objects = import_assetkit_file(
+        os.fspath(path),
+        load_options=options,
+        collection=bpy.context.collection,
+        focus_mode="NEVER",
+        placement_mode="AS_AUTHORED",
+        select_imported=False,
+        shading_mode="AUTO",
+        set_viewport_shading=False,
+        clean_viewport_overlays=False,
+    )
+    meshes = [obj for obj in objects if obj.type == "MESH"]
+    armatures = {
+        modifier.object
+        for obj in meshes
+        for modifier in obj.modifiers
+        if modifier.type == "ARMATURE" and modifier.object is not None
+    }
+    if len(meshes) != 2 or len(armatures) != 2:
+        raise AssertionError(
+            f"distinct skeleton instances were grouped: meshes={len(meshes)}, armatures={len(armatures)}"
+        )
+    root_x = sorted(round(float(armature.matrix_world.translation.x), 5) for armature in armatures)
+    if root_x != [0.0, 100.0]:
+        raise AssertionError(f"armatures used the wrong instance roots: {root_x}")
 
 
 def main() -> None:
@@ -189,6 +258,11 @@ def main() -> None:
             raise AssertionError(
                 f"controller animation affected the wrong grouped meshes: {deltas}"
             )
+
+        _assert_instance_skeleton_roots(
+            Path(temp_dir) / "instance-skeleton-roots.dae",
+            options,
+        )
 
     print("DAE skin grouping check passed")
 

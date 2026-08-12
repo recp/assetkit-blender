@@ -31,6 +31,7 @@ from ..skin import (
     _set_bone_from_rest_matrix,
     _skin_bone_children_by_parent,
     _skin_bone_length,
+    _skin_bone_names_by_node,
     _skin_bone_node_indices,
     _skin_rest_matrices_from_assetkit_nodes,
     _remove_temporary_view_layer_link,
@@ -749,6 +750,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
             "node_data": first_node_data,
             "bone_node_indices": bone_node_indices,
             "bone_names_by_node": _bind_pose_group_bone_names(items),
+            "deform_node_indices": _bind_pose_group_deform_node_indices(items),
             "rest_matrices_by_node": _skin_rest_matrices_from_assetkit_nodes(
                 first_data,
                 first_node_data,
@@ -776,6 +778,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
         edit_bones = record["armature_data"].edit_bones
         bone_node_indices = record["bone_node_indices"]
         bone_names_by_node = record["bone_names_by_node"]
+        deform_node_indices = record["deform_node_indices"]
         rest_matrices_by_node = record["rest_matrices_by_node"]
         node_data = record["node_data"]
         bone_children_by_parent = _skin_bone_children_by_parent(bone_node_indices, node_data)
@@ -784,6 +787,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
             if not name:
                 continue
             bone = edit_bones.new(name)
+            bone.use_deform = node_index in deform_node_indices
             matrix = rest_matrices_by_node.get(node_index) or Matrix.Identity(4)
             _set_bone_from_rest_matrix(
                 bone,
@@ -830,13 +834,29 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
                     _apply_animation(armature, root_node)
                 root_animation_applied.add(root_index)
             joint_names, joint_nodes, node_data, pose_channels = _bind_pose_group_animation_payload(immediate_items)
-            _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels)
+            _apply_bone_animations(
+                armature,
+                joint_names,
+                joint_nodes,
+                node_data,
+                pose_channels,
+                record["bone_names_by_node"],
+            )
         if deferred_items:
             joint_names, joint_nodes, node_data, pose_channels = _bind_pose_group_animation_payload(deferred_items)
             _obj, data, _old_joint_names, _old_joint_nodes, _node_objects, _old_node_data, _collection, _apply_animation_flag, _old_pose_channels, deferred_skin_animations = deferred_items[0]
             include_root = int(data.skin_root_node_index) >= 0
             if deferred_skin_animations is not None:
-                deferred_skin_animations.append((armature, data, joint_names, joint_nodes, node_data, pose_channels, include_root))
+                deferred_skin_animations.append((
+                    armature,
+                    data,
+                    joint_names,
+                    joint_nodes,
+                    node_data,
+                    pose_channels,
+                    include_root,
+                    record["bone_names_by_node"],
+                ))
         skin_count += len(record["items"])
     animation_ms = lap_ms()
 
@@ -911,13 +931,30 @@ def _bind_pose_group_bone_node_indices(items: list[tuple]) -> list[int]:
 
 def _bind_pose_group_bone_names(items: list[tuple]) -> dict[int, str]:
     names: dict[int, str] = {}
-    for _obj, _data, joint_names, joint_nodes, _node_objects, _node_data, *_rest in items:
-        count = min(len(joint_nodes), len(joint_names))
-        for joint_index in range(count):
-            node_index = int(joint_nodes[joint_index])
-            if node_index >= 0 and node_index not in names:
-                names[node_index] = joint_names[joint_index]
+    for _obj, data, joint_names, joint_nodes, node_objects, node_data, *_rest in items:
+        node_to_joint = {
+            int(joint_nodes[index]): index
+            for index in range(min(len(joint_nodes), len(joint_names)))
+            if int(joint_nodes[index]) >= 0
+        }
+        item_names = _skin_bone_names_by_node(
+            _skin_bone_node_indices(data, joint_nodes, node_data),
+            node_objects,
+            node_to_joint,
+            joint_names,
+        )
+        for node_index, name in item_names.items():
+            names.setdefault(node_index, name)
     return names
+
+
+def _bind_pose_group_deform_node_indices(items: list[tuple]) -> set[int]:
+    return {
+        int(joint_nodes[index])
+        for _obj, data, _joint_names, joint_nodes, _node_objects, _node_data, *_rest in items
+        for index in range(min(len(joint_nodes), int(data.skin_joint_count)))
+        if int(joint_nodes[index]) >= 0
+    }
 
 
 def _bind_pose_group_animation_payload(items: list[tuple]) -> tuple[list[str], list[int], dict[int, SceneNodeData], list[list[dict]]]:
@@ -990,12 +1027,28 @@ def _apply_deferred_skin_animations(state: ImportState | None) -> None:
     profile_detail = _profile_state.stats is not None
     started_at = time.perf_counter() if profile_detail else 0.0
     skin_count = len(pending)
-    for armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, include_root in pending:
+    for (
+        armature,
+        data,
+        joint_names,
+        joint_nodes,
+        node_data,
+        pose_channels_by_joint,
+        include_root,
+        bone_names_by_node,
+    ) in pending:
         if include_root:
             root_node = node_data.get(int(data.skin_root_node_index))
             if root_node:
                 _apply_animation(armature, root_node)
-        _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels_by_joint)
+        _apply_bone_animations(
+            armature,
+            joint_names,
+            joint_nodes,
+            node_data,
+            pose_channels_by_joint,
+            bone_names_by_node,
+        )
 
     state.skin_animation_deferred = False
     pending.clear()

@@ -21,6 +21,14 @@ akb_morph_position_input(AkMorphInspectMorphable *morphable) {
   return NULL;
 }
 
+static int
+akb_float3_bytes(uint32_t count, size_t *bytes) {
+  if (!bytes || (size_t)count > SIZE_MAX / (3u * sizeof(float)))
+    return 0;
+  *bytes = (size_t)count * 3u * sizeof(float);
+  return 1;
+}
+
 static float
 akb_morph_initial_weight(AkInstanceMorph *morpher, AkMesh *mesh, uint32_t index) {
   AkMorph *morph;
@@ -50,7 +58,9 @@ akb_morph_copy_positions(AkbMorphTarget *target,
   float *source;
   float *dest;
   uint32_t source_count = 0;
-  uint32_t i;
+  size_t element_count;
+  size_t bytes;
+  size_t i;
   uint8_t source_borrowed;
 
   if (!target || !base_positions || !position || !position->accessor)
@@ -70,7 +80,13 @@ akb_morph_copy_positions(AkbMorphTarget *target,
     return 0;
   }
 
-  dest = (float *)malloc((size_t)base_count * 3 * sizeof(float));
+  if (!akb_float3_bytes(base_count, &bytes)) {
+    if (!source_borrowed)
+      free(source);
+    return 0;
+  }
+  element_count = (size_t)base_count * 3u;
+  dest = (float *)malloc(bytes);
   if (!dest) {
     if (!source_borrowed)
       free(source);
@@ -78,10 +94,10 @@ akb_morph_copy_positions(AkbMorphTarget *target,
   }
 
   if (relative) {
-    for (i = 0; i < base_count * 3; i++)
+    for (i = 0; i < element_count; i++)
       dest[i] = base_positions[i] + source[i];
   } else {
-    memcpy(dest, source, (size_t)base_count * 3 * sizeof(float));
+    memcpy(dest, source, bytes);
   }
 
   if (!source_borrowed)
@@ -107,7 +123,8 @@ akb_extract_morph_targets(AkbPrimitive *out,
   AkInput *position;
   AkbMorphTarget *targets;
   uint32_t target_index;
-  uint32_t write_index;
+  uint32_t cleanup_index;
+  size_t position_bytes;
   const char *target_name;
 
   (void)prim;
@@ -115,6 +132,8 @@ akb_extract_morph_targets(AkbPrimitive *out,
   if (!out || !geom || !mesh || !morpher || !(morph = morpher->morph)
       || !morph->targetCount || !out->vertices || !out->vertex_count)
     return 1;
+  if (!akb_float3_bytes(out->vertex_count, &position_bytes))
+    return 0;
 
   out->morph_presets = morph->presets;
   out->morph_preset_count = morph->presetCount;
@@ -132,42 +151,55 @@ akb_extract_morph_targets(AkbPrimitive *out,
   if (!targets)
     return 0;
 
-  write_index = 0;
   target_index = 0;
   for (target_view = view->targets;
        target_view && target_index < morph->targetCount;
        target_view = target_view->next, target_index++) {
     morphable = akb_morphable_at(target_view, prim_index);
     position = akb_morph_position_input(morphable);
-    if (!position)
-      continue;
-
-    if (!akb_morph_copy_positions(&targets[write_index],
-                                  out->vertices,
-                                  out->vertex_count,
-                                  position,
-                                  akb_morph_is_relative(morph)))
-      continue;
+    if (!position
+        || !akb_morph_copy_positions(&targets[target_index],
+                                     out->vertices,
+                                     out->vertex_count,
+                                     position,
+                                     akb_morph_is_relative(morph))) {
+      /* Keep morph slot indices stable even when one target has no POSITION
+       * input for this primitive. Blender needs one shape key per authored
+       * weight slot, so materialize a zero-delta placeholder from the basis. */
+      targets[target_index].positions = (float *)malloc(
+        position_bytes);
+      if (!targets[target_index].positions) {
+        for (cleanup_index = 0; cleanup_index < morph->targetCount; cleanup_index++)
+          free(targets[cleanup_index].positions);
+        free(targets);
+        return 0;
+      }
+      memcpy(targets[target_index].positions,
+             out->vertices,
+             position_bytes);
+      targets[target_index].vertex_count = out->vertex_count;
+    }
 
     target_name = morph->targetNames && target_index < morph->targetCount
                   ? morph->targetNames[target_index]
                   : NULL;
     if (target_name && target_name[0])
-      snprintf(targets[write_index].name, sizeof(targets[write_index].name), "%s", target_name);
+      snprintf(targets[target_index].name, sizeof(targets[target_index].name), "%s", target_name);
     else
-      snprintf(targets[write_index].name, sizeof(targets[write_index].name), "AssetKitMorph_%u", target_index);
+      snprintf(targets[target_index].name, sizeof(targets[target_index].name), "AssetKitMorph_%u", target_index);
 
-    targets[write_index].weight = akb_morph_initial_weight(morpher, mesh, target_index);
-    write_index++;
+    targets[target_index].weight = akb_morph_initial_weight(morpher, mesh, target_index);
   }
 
-  if (!write_index) {
+  if (target_index != morph->targetCount) {
+    for (cleanup_index = 0; cleanup_index < morph->targetCount; cleanup_index++)
+      free(targets[cleanup_index].positions);
     free(targets);
     return 1;
   }
 
   out->morph_targets = targets;
-  out->morph_target_count = write_index;
+  out->morph_target_count = morph->targetCount;
   return 1;
 }
 
@@ -449,7 +481,10 @@ akb_extract_skin(AkbArena *arena,
   memcpy(out->skin_bind_shape_matrix,
          skin->bindShapeMatrix,
          sizeof(out->skin_bind_shape_matrix));
-  root = akb_skin_armature_root(skin->skeleton, joint_sources, skin->nJoints);
+  root = akb_skin_armature_root(
+    skinner->overrideSkeleton ? skinner->overrideSkeleton : skin->skeleton,
+    joint_sources,
+    skin->nJoints);
   out->skin_root_source = root;
   out->skin_root_node_index = akb_scene_node_index_for(nodes, root);
   out->skin_vertex_count = (uint32_t)filled_count;
@@ -472,15 +507,18 @@ akb_node_world_matrix(AkNode *node, float out[16]) {
 static int
 akb_ensure_owned_vertices(AkbPrimitive *out) {
   float *copy;
+  size_t bytes;
 
   if (!out || !out->vertices || !out->vertex_count || !out->borrowed_vertices)
     return 1;
 
-  copy = (float *)malloc((size_t)out->vertex_count * 3 * sizeof(*copy));
+  if (!akb_float3_bytes(out->vertex_count, &bytes))
+    return 0;
+  copy = (float *)malloc(bytes);
   if (!copy)
     return 0;
 
-  memcpy(copy, out->vertices, (size_t)out->vertex_count * 3 * sizeof(*copy));
+  memcpy(copy, out->vertices, bytes);
   out->vertices = copy;
   out->borrowed_vertices = 0;
   out->zero_copy_flags &= (uint8_t)~1u;
@@ -1685,11 +1723,209 @@ akb_animation_convert_values(AkbAnimChannel *out,
 }
 
 static int
+akb_animation_sample_clip_channel(AkAnimSampler *sampler,
+                                  AkAccessor *time_accessor,
+                                  uint32_t value_width,
+                                  AkAnimationClip *clip,
+                                  float **times_out,
+                                  uint32_t *count_out,
+                                  float **values_out,
+                                  uint32_t *value_count_out,
+                                  uint8_t *interpolation_out) {
+  float *source_times;
+  float *base_times;
+  float *times;
+  float *values;
+  float start;
+  float end;
+  float previous_time;
+  float local_time;
+  float sample_time;
+  float gap;
+  float subdivision_count_float;
+  size_t required_width;
+  size_t base_count;
+  size_t base_index;
+  size_t sample_capacity;
+  size_t sample_index;
+  size_t subdivision_count;
+  size_t subdivision;
+  size_t value_total;
+  uint32_t source_count;
+  uint32_t i;
+
+  if (!sampler || !time_accessor || !value_width || !clip || !times_out
+      || !count_out || !values_out || !value_count_out || !interpolation_out)
+    return 0;
+
+  *times_out = NULL;
+  *count_out = 0;
+  *values_out = NULL;
+  *value_count_out = 0;
+
+  if (!ak_animationClipTimeRange(clip, &start, &end)
+      || !isfinite(start) || !isfinite(end) || end < start)
+    return 0;
+
+  required_width = ak_animationSamplerSample(sampler, start, NULL, 0);
+  if (required_width != value_width)
+    return 0;
+
+  source_times = akb_accessor_float_copy(time_accessor, 1, &source_count);
+  if (!source_times || !source_count) {
+    free(source_times);
+    return 0;
+  }
+
+  if ((size_t)source_count > SIZE_MAX - 2u
+      || (size_t)source_count + 2u > SIZE_MAX / sizeof(float)) {
+    free(source_times);
+    return 0;
+  }
+  base_times = (float *)malloc(((size_t)source_count + 2u) * sizeof(float));
+  if (!base_times) {
+    free(source_times);
+    return 0;
+  }
+
+  base_count = 0u;
+  base_times[base_count++] = start;
+  for (i = 0; i < source_count; i++) {
+    if (!isfinite(source_times[i])
+        || (i && !(source_times[i] > source_times[i - 1]))) {
+      free(source_times);
+      free(base_times);
+      return 0;
+    }
+    if (source_times[i] > start && source_times[i] < end)
+      base_times[base_count++] = source_times[i];
+  }
+  if (end > start)
+    base_times[base_count++] = end;
+  free(source_times);
+  source_times = NULL;
+
+  /* Blender channels carry one interpolation mode, while COLLADA samplers
+   * may mix per-key STEP/LINEAR/BEZIER/HERMITE modes.  Sample every segment
+   * on the same 30 Hz upper-bound used by the matrix baker, then emit LINEAR
+   * curves.  A left-limit sample immediately before every authored key keeps
+   * STEP discontinuities sharp while the exact key stores the right value. */
+  sample_capacity = 1u;
+  previous_time = base_times[0];
+  for (base_index = 1u; base_index < base_count; base_index++) {
+    gap = base_times[base_index] - previous_time;
+    subdivision_count_float = ceilf(gap / (1.0f / 30.0f));
+    if (!isfinite(subdivision_count_float)
+        || subdivision_count_float < 1.0f
+        || subdivision_count_float >= (float)SIZE_MAX) {
+      free(base_times);
+      return 0;
+    }
+    subdivision_count = (size_t)subdivision_count_float;
+    if (sample_capacity > SIZE_MAX - subdivision_count) {
+      free(base_times);
+      return 0;
+    }
+    sample_capacity += subdivision_count;
+    if (sample_capacity == SIZE_MAX) {
+      free(base_times);
+      return 0;
+    }
+    sample_capacity++;
+    previous_time = base_times[base_index];
+  }
+  if (sample_capacity > UINT32_MAX
+      || sample_capacity > SIZE_MAX / sizeof(float)
+      || sample_capacity > SIZE_MAX / value_width) {
+    free(base_times);
+    return 0;
+  }
+  value_total = sample_capacity * value_width;
+  if (value_total > SIZE_MAX / sizeof(float)) {
+    free(base_times);
+    return 0;
+  }
+
+  times = (float *)malloc(sample_capacity * sizeof(float));
+  values = (float *)malloc(value_total * sizeof(float));
+  if (!times || !values) {
+    free(base_times);
+    free(times);
+    free(values);
+    return 0;
+  }
+
+  sample_index = 0u;
+  times[sample_index] = 0.0f;
+  if (ak_animationSamplerSample(sampler,
+                                start,
+                                values + sample_index * value_width,
+                                value_width) != value_width)
+    goto fail;
+  sample_index++;
+
+  previous_time = base_times[0];
+  for (base_index = 1u; base_index < base_count; base_index++) {
+    sample_time = base_times[base_index];
+    gap = sample_time - previous_time;
+    subdivision_count = (size_t)ceilf(gap / (1.0f / 30.0f));
+    for (subdivision = 1u; subdivision <= subdivision_count; subdivision++) {
+      if (subdivision == subdivision_count) {
+        float left_time = nextafterf(sample_time, previous_time);
+        local_time = left_time - start;
+        if (isfinite(local_time) && local_time > times[sample_index - 1u]) {
+          times[sample_index] = local_time;
+          if (ak_animationSamplerSample(sampler,
+                                        left_time,
+                                        values + sample_index * value_width,
+                                        value_width) != value_width)
+            goto fail;
+          sample_index++;
+        }
+      }
+
+      local_time = subdivision == subdivision_count
+                   ? sample_time - start
+                   : previous_time - start
+                     + gap * (float)subdivision / (float)subdivision_count;
+      if (!isfinite(local_time) || local_time <= times[sample_index - 1u])
+        goto fail;
+      times[sample_index] = local_time;
+      if (ak_animationSamplerSample(sampler,
+                                    subdivision == subdivision_count
+                                      ? sample_time
+                                      : start + local_time,
+                                    values + sample_index * value_width,
+                                    value_width) != value_width)
+        goto fail;
+      sample_index++;
+    }
+    previous_time = sample_time;
+  }
+
+  free(base_times);
+  *times_out = times;
+  *count_out = (uint32_t)sample_index;
+  *values_out = values;
+  *value_count_out = (uint32_t)sample_index;
+  *interpolation_out = AK_INTERPOLATION_LINEAR;
+  return 1;
+
+fail:
+  free(source_times);
+  free(base_times);
+  free(times);
+  free(values);
+  return 0;
+}
+
+static int
 akb_animation_add_channel(AkbAnimation *animation,
                           AkChannel *channel,
                           AkResolvedTarget *target,
                           const AkbAnimBinding *binding,
                           const AkbCoordContext *coord,
+                          AkAnimationClip *clip,
                           uint32_t clip_index,
                           const char *clip_name) {
   AkbAnimChannel out = {0};
@@ -1702,6 +1938,7 @@ akb_animation_add_channel(AkbAnimation *animation,
   uint32_t read_width;
   uint32_t logical_value_count;
   uint8_t raw_borrowed;
+  uint8_t clipped_interpolation;
 
   sampler = ak_getObjectByUrl(&channel->source);
   if (!sampler)
@@ -1734,33 +1971,48 @@ akb_animation_add_channel(AkbAnimation *animation,
       read_width = 1;
   }
 
-  out.times = akb_accessor_float_borrow(time_input->accessor, 1, &time_count);
-  if (out.times) {
-    out.borrowed_times = 1;
-  } else {
-    out.times = akb_accessor_float_copy(time_input->accessor, 1, &time_count);
-    if (!out.times)
+  if (clip) {
+    if (!akb_animation_sample_clip_channel(sampler,
+                                           time_input->accessor,
+                                           out.value_width,
+                                           clip,
+                                           &out.times,
+                                           &time_count,
+                                           &raw_values,
+                                           &value_count,
+                                           &clipped_interpolation))
       return 0;
-  }
-
-  raw_values = akb_accessor_float_borrow(value_input->accessor,
-                                         read_width,
-                                         &value_count);
-  if (raw_values) {
-    raw_borrowed = 1;
-  } else {
-    raw_values = akb_accessor_float_copy(value_input->accessor,
-                                         read_width,
-                                         &value_count);
     raw_borrowed = 0;
-    if (!raw_values) {
-      if (!out.borrowed_times)
-        free(out.times);
-      return 0;
+  } else {
+    out.times = akb_accessor_float_borrow(time_input->accessor, 1, &time_count);
+    if (out.times) {
+      out.borrowed_times = 1;
+    } else {
+      out.times = akb_accessor_float_copy(time_input->accessor, 1, &time_count);
+      if (!out.times)
+        return 0;
+    }
+
+    raw_values = akb_accessor_float_borrow(value_input->accessor,
+                                           read_width,
+                                           &value_count);
+    if (raw_values) {
+      raw_borrowed = 1;
+    } else {
+      raw_values = akb_accessor_float_copy(value_input->accessor,
+                                           read_width,
+                                           &value_count);
+      raw_borrowed = 0;
+      if (!raw_values) {
+        if (!out.borrowed_times)
+          free(out.times);
+        return 0;
+      }
     }
   }
 
-  if (sampler->uniInterpolation == AK_INTERPOLATION_HERMITE
+  if (!clip
+      && sampler->uniInterpolation == AK_INTERPOLATION_HERMITE
       && !akb_animation_extract_cubic_values(&raw_values,
                                              &out.in_tangents,
                                              &out.out_tangents,
@@ -1778,6 +2030,7 @@ akb_animation_add_channel(AkbAnimation *animation,
 
   logical_value_count = value_count;
   if (binding->kind == AKB_ANIM_MORPH_WEIGHTS
+      && !clip
       && !target->isPartial
       && read_width == 1
       && out.value_width > 1)
@@ -1789,7 +2042,9 @@ akb_animation_add_channel(AkbAnimation *animation,
   out.count = time_count;
   out.target_offset = target->isPartial ? target->off : 0;
   out.is_partial = target->isPartial ? 1 : 0;
-  out.interpolation = (uint8_t)sampler->uniInterpolation;
+  out.interpolation = clip
+                      ? clipped_interpolation
+                      : (uint8_t)sampler->uniInterpolation;
 
   if (!akb_animation_convert_values(&out,
                                     raw_values,
@@ -1872,6 +2127,7 @@ akb_animation_collect_tree(AkbAnimation *animation,
                                        &resolved,
                                        &bindings[i],
                                        coord,
+                                       NULL,
                                        clip_index,
                                        clip_name))
           return 0;
@@ -1932,16 +2188,33 @@ static int
 akb_animation_index_push(AkbAnimationIndex *index,
                          AkChannel *channel,
                          const AkResolvedTarget *resolved,
+                         AkAnimationClip *clip,
                          uint32_t clip_index,
                          const char *clip_name) {
   AkbResolvedAnimChannel *items;
+  size_t i;
   size_t capacity;
 
   if (!index || !channel || !resolved || !resolved->target)
     return 1;
 
+  /* An explicit COLLADA clip may reference the same animation twice, or both
+   * an animation and one of its descendants.  The clip owns one logical copy
+   * of each authored channel; do not emit duplicate Blender curves. */
+  for (i = 0; i < index->count; i++) {
+    if (index->items[i].channel == channel
+        && index->items[i].clip_index == clip_index
+        && index->items[i].resolved.target == resolved->target
+        && index->items[i].resolved.off == resolved->off
+        && index->items[i].resolved.isPartial == resolved->isPartial)
+      return 1;
+  }
+
   if (index->count == index->capacity) {
     capacity = index->capacity ? index->capacity * 2 : 64;
+    if (capacity < index->capacity
+        || capacity > SIZE_MAX / sizeof(*items))
+      return 0;
     items = (AkbResolvedAnimChannel *)realloc(index->items,
                                               capacity * sizeof(*items));
     if (!items)
@@ -1951,12 +2224,65 @@ akb_animation_index_push(AkbAnimationIndex *index,
   }
 
   index->items[index->count].channel = channel;
+  index->items[index->count].clip = clip;
   index->items[index->count].resolved = *resolved;
   index->items[index->count].clip_name = clip_name;
   index->items[index->count].next_target = SIZE_MAX;
   index->items[index->count].clip_index = clip_index;
   index->count++;
   return 1;
+}
+
+static int
+akb_animation_index_push_channel(AkbAnimationIndex *index,
+                                 AkChannel *channel,
+                                 AkContext *context,
+                                 AkAnimationClip *clip,
+                                 uint32_t clip_index,
+                                 const char *clip_name) {
+  AkResolvedTarget  local[1];
+  AkResolvedTarget *targets;
+  size_t            count, confirmed, i;
+  int               ok;
+
+  count = ak_channelResolvedTargets(context, channel, NULL, 0);
+  if (count == SIZE_MAX)
+    return 0;
+  if (!count)
+    return 1;
+
+  if (count == 1) {
+    targets = local;
+  } else {
+    if (count > SIZE_MAX / sizeof(*targets))
+      return 0;
+    targets = (AkResolvedTarget *)malloc(count * sizeof(*targets));
+    if (!targets)
+      return 0;
+  }
+
+  confirmed = ak_channelResolvedTargets(context, channel, targets, count);
+  if (confirmed != count) {
+    if (targets != local)
+      free(targets);
+    return 0;
+  }
+
+  ok = 1;
+  for (i = 0; i < count; i++) {
+    if (!akb_animation_index_push(index,
+                                  channel,
+                                  &targets[i],
+                                  clip,
+                                  clip_index,
+                                  clip_name)) {
+      ok = 0;
+      break;
+    }
+  }
+  if (targets != local)
+    free(targets);
+  return ok;
 }
 
 static size_t
@@ -2030,6 +2356,7 @@ static int
 akb_animation_index_collect_list(AkbAnimationIndex *index,
                                  AkAnimation *source,
                                  AkContext *context,
+                                 AkAnimationClip *clip,
                                  uint32_t clip_index,
                                  const char *clip_name);
 
@@ -2037,19 +2364,21 @@ static int
 akb_animation_index_collect_tree(AkbAnimationIndex *index,
                                  AkAnimation *source,
                                  AkContext *context,
+                                 AkAnimationClip *clip,
                                  uint32_t clip_index,
                                  const char *clip_name) {
   AkChannel *channel;
-  AkResolvedTarget resolved;
 
   if (!source)
     return 1;
 
   for (channel = source->channel; channel; channel = channel->next) {
-    resolved = ak_channelTarget(context, channel);
-    if (!resolved.target)
-      continue;
-    if (!akb_animation_index_push(index, channel, &resolved, clip_index, clip_name))
+    if (!akb_animation_index_push_channel(index,
+                                          channel,
+                                          context,
+                                          clip,
+                                          clip_index,
+                                          clip_name))
       return 0;
   }
 
@@ -2057,6 +2386,7 @@ akb_animation_index_collect_tree(AkbAnimationIndex *index,
       && !akb_animation_index_collect_list(index,
                                            source->animation,
                                            context,
+                                           clip,
                                            clip_index,
                                            clip_name))
     return 0;
@@ -2068,12 +2398,14 @@ static int
 akb_animation_index_collect_list(AkbAnimationIndex *index,
                                  AkAnimation *source,
                                  AkContext *context,
+                                 AkAnimationClip *clip,
                                  uint32_t clip_index,
                                  const char *clip_name) {
   while (source) {
     if (!akb_animation_index_collect_tree(index,
                                           source,
                                           context,
+                                          clip,
                                           clip_index,
                                           clip_name))
       return 0;
@@ -2087,16 +2419,129 @@ static int
 akb_animation_index_build_collada(AkbAnimationIndex *index,
                                   AkDoc *doc,
                                   AkContext *context) {
-  AkAnimation *animation;
+  AkAnimationClip       *clip;
+  AkAnimationClipMember *member;
+  AkAnimation           *animation;
+  uint32_t               clip_index;
 
-  for (animation = doc->lib.animations.first; animation; animation = animation->next) {
-    if (!akb_animation_index_collect_tree(index,
-                                          animation,
-                                          context,
-                                          0,
-                                          NULL)) {
-      return 0;
+  clip_index = 0;
+  for (clip = doc->animationClips.first;
+       clip;
+       clip = clip->next, clip_index++) {
+    for (member = clip->members; member; member = member->next) {
+      if (!akb_animation_index_collect_tree(index,
+                                            member->animation,
+                                            context,
+                                            clip,
+                                            clip_index,
+                                            clip->name))
+        return 0;
     }
+  }
+
+  /* COLLADA files without <animation_clip> traditionally treat all sibling
+   * animations as one implicit clip.  When explicit clips exist, retain the
+   * same grouping for every channel not owned by one of them. */
+  {
+    AkAnimation **pending = NULL;
+    AkAnimation **seen = NULL;
+    size_t pending_count = 0, pending_capacity = 0;
+    size_t seen_count = 0, seen_capacity = 0;
+
+#define AKB_PUSH_ANIMATION(ARRAY, COUNT, CAPACITY, VALUE)                     \
+    do {                                                                      \
+      if ((COUNT) == (CAPACITY)) {                                            \
+        size_t new_capacity = (CAPACITY) ? (CAPACITY) * 2u : 64u;             \
+        AkAnimation **grown;                                                  \
+        if (new_capacity < (CAPACITY)                                         \
+            || new_capacity > SIZE_MAX / sizeof(*(ARRAY))) {                  \
+          free(pending);                                                      \
+          free(seen);                                                         \
+          return 0;                                                           \
+        }                                                                     \
+        grown = (AkAnimation **)realloc((ARRAY),                              \
+                                        new_capacity * sizeof(*(ARRAY)));     \
+        if (!grown) {                                                         \
+          free(pending);                                                      \
+          free(seen);                                                         \
+          return 0;                                                           \
+        }                                                                     \
+        (ARRAY) = grown;                                                      \
+        (CAPACITY) = new_capacity;                                            \
+      }                                                                       \
+      (ARRAY)[(COUNT)++] = (VALUE);                                           \
+    } while (0)
+
+    for (animation = doc->lib.animations.first;
+         animation;
+         animation = animation->next)
+      AKB_PUSH_ANIMATION(pending, pending_count, pending_capacity, animation);
+    {
+      size_t i;
+      for (i = 0; i < pending_count / 2u; i++) {
+        AkAnimation *swap = pending[i];
+        pending[i] = pending[pending_count - 1u - i];
+        pending[pending_count - 1u - i] = swap;
+      }
+    }
+
+    while (pending_count) {
+      AkAnimation *item = pending[--pending_count];
+      AkAnimation *child;
+      AkChannel *channel;
+      AkAnimationClip *owner;
+      AkAnimationClipMember *owner_member;
+      size_t i, child_start;
+      int exact_member = 0;
+
+      for (i = 0; i < seen_count; i++)
+        if (seen[i] == item)
+          break;
+      if (i < seen_count)
+        continue;
+      AKB_PUSH_ANIMATION(seen, seen_count, seen_capacity, item);
+
+      for (owner = doc->animationClips.first;
+           owner && !exact_member;
+           owner = owner->next) {
+        for (owner_member = owner->members;
+             owner_member;
+             owner_member = owner_member->next) {
+          if (owner_member->animation == item) {
+            exact_member = 1;
+            break;
+          }
+        }
+      }
+      if (exact_member)
+        continue;
+
+      for (channel = item->channel; channel; channel = channel->next) {
+        if (!akb_animation_index_push_channel(index,
+                                              channel,
+                                              context,
+                                              NULL,
+                                              clip_index,
+                                              NULL)) {
+          free(pending);
+          free(seen);
+          return 0;
+        }
+      }
+
+      child_start = pending_count;
+      for (child = item->animation; child; child = child->next)
+        AKB_PUSH_ANIMATION(pending, pending_count, pending_capacity, child);
+      for (i = 0; i < (pending_count - child_start) / 2u; i++) {
+        AkAnimation *swap = pending[child_start + i];
+        pending[child_start + i] = pending[pending_count - 1u - i];
+        pending[pending_count - 1u - i] = swap;
+      }
+    }
+
+#undef AKB_PUSH_ANIMATION
+    free(pending);
+    free(seen);
   }
 
   return 1;
@@ -2129,6 +2574,7 @@ akb_animation_index_build(AkbAnimationIndex *index, AkDoc *doc) {
     if (!akb_animation_index_collect_tree(index,
                                           animation,
                                           &context,
+                                          NULL,
                                           clip_index,
                                           animation->name)) {
       akb_animation_index_free(index);
@@ -2193,6 +2639,7 @@ akb_animation_collect_index(AkbAnimation *animation,
                                        &resolved,
                                        &bindings[selected_binding],
                                        coord,
+                                       item->clip,
                                        item->clip_index,
                                        item->clip_name))
           return 0;
@@ -2213,6 +2660,7 @@ akb_animation_collect_index(AkbAnimation *animation,
                                        &resolved,
                                        &bindings[i],
                                        coord,
+                                       item->clip,
                                        item->clip_index,
                                        item->clip_name))
           return 0;
@@ -3095,12 +3543,18 @@ akb_animation_prepare_baked_channel(AkbAnimChannel *channel,
                                     uint32_t count,
                                     uint32_t target,
                                     uint32_t width,
+                                    float time_offset,
                                     uint32_t clip_index,
                                     const char *clip_name) {
   size_t time_bytes;
   size_t value_bytes;
+  uint32_t i;
 
-  if (!channel || !times || !count || !target || !width)
+  if (!channel || !times || !count || !target || !width
+      || !isfinite(time_offset)
+      || (size_t)count > SIZE_MAX / sizeof(float)
+      || (size_t)count > SIZE_MAX / width
+      || (size_t)count * width > SIZE_MAX / sizeof(float))
     return 0;
 
   memset(channel, 0, sizeof(*channel));
@@ -3117,7 +3571,15 @@ akb_animation_prepare_baked_channel(AkbAnimChannel *channel,
     return 0;
   }
 
-  memcpy(channel->times, times, time_bytes);
+  for (i = 0; i < count; i++) {
+    channel->times[i] = times[i] - time_offset;
+    if (!isfinite(channel->times[i])) {
+      free(channel->times);
+      free(channel->values);
+      memset(channel, 0, sizeof(*channel));
+      return 0;
+    }
+  }
 
   channel->target = target;
   channel->value_width = width;
@@ -3131,6 +3593,7 @@ akb_animation_prepare_baked_channel(AkbAnimChannel *channel,
 static int
 akb_animation_append_baked_clip(AkbAnimation *animation,
                                AkBakedAnimation *baked,
+                               float time_offset,
                                uint32_t clip_index,
                                const char *clip_name) {
   AkbAnimChannel channels[3];
@@ -3147,6 +3610,7 @@ akb_animation_append_baked_clip(AkbAnimation *animation,
                                            baked->count,
                                            AKB_ANIM_TRANSLATION,
                                            3,
+                                           time_offset,
                                            clip_index,
                                            clip_name)
       || !akb_animation_prepare_baked_channel(&channels[1],
@@ -3154,6 +3618,7 @@ akb_animation_append_baked_clip(AkbAnimation *animation,
                                              baked->count,
                                              AKB_ANIM_ROTATION_QUAT,
                                              4,
+                                             time_offset,
                                              clip_index,
                                              clip_name)
       || !akb_animation_prepare_baked_channel(&channels[2],
@@ -3161,6 +3626,7 @@ akb_animation_append_baked_clip(AkbAnimation *animation,
                                              baked->count,
                                              AKB_ANIM_SCALE,
                                              3,
+                                             time_offset,
                                              clip_index,
                                              clip_name)) {
     for (i = 0; i < 3; i++) {
@@ -3231,6 +3697,7 @@ akb_animation_new_baked_indexed(AkDoc *doc,
                                               &clip_name);
     if (!akb_animation_append_baked_clip(animation,
                                         baked,
+                                        0.0f,
                                         clip_index,
                                         clip_name)) {
       ak_free(baked);
@@ -3239,6 +3706,82 @@ akb_animation_new_baked_indexed(AkDoc *doc,
       return NULL;
     }
 
+    ak_free(baked);
+  }
+
+  if (!animation->count) {
+    akb_animation_release(animation);
+    return NULL;
+  }
+
+  return animation;
+}
+
+static AkbAnimation *
+akb_animation_new_baked_collada(AkDoc *doc,
+                                AkbSharedDoc *doc_owner,
+                                AkNode *node,
+                                int *ok) {
+  AkbAnimation *animation;
+  AkAnimationClip *clip;
+  AkBakedAnimation *baked;
+  float clip_start;
+  float clip_end;
+  uint32_t clip_index;
+
+  if (!doc || !doc->lib.animations.first || !node)
+    return NULL;
+
+  animation = (AkbAnimation *)calloc(1, sizeof(*animation));
+  if (!animation) {
+    *ok = 0;
+    return NULL;
+  }
+
+  animation->refcount = 1;
+  animation->doc_owner = doc_owner;
+  akb_shared_doc_retain(doc_owner);
+
+  clip_index = 0;
+  for (clip = doc->animationClips.first;
+       clip;
+       clip = clip->next, clip_index++) {
+    baked = ak_nodeBakeAnimationForClip(doc, node, clip);
+    if (!baked)
+      continue;
+    if (!ak_animationClipTimeRange(clip, &clip_start, &clip_end)
+        || !isfinite(clip_start) || !isfinite(clip_end)
+        || clip_end < clip_start) {
+      ak_free(baked);
+      akb_animation_release(animation);
+      *ok = 0;
+      return NULL;
+    }
+    if (!akb_animation_append_baked_clip(animation,
+                                         baked,
+                                         clip_start,
+                                         clip_index,
+                                         clip->name)) {
+      ak_free(baked);
+      akb_animation_release(animation);
+      *ok = 0;
+      return NULL;
+    }
+    ak_free(baked);
+  }
+
+  baked = ak_nodeBakeUnclippedAnimation(doc, node);
+  if (baked) {
+    if (!akb_animation_append_baked_clip(animation,
+                                         baked,
+                                         0.0f,
+                                         clip_index,
+                                         NULL)) {
+      ak_free(baked);
+      akb_animation_release(animation);
+      *ok = 0;
+      return NULL;
+    }
     ak_free(baked);
   }
 
@@ -3263,6 +3806,7 @@ akb_animation_new(AkDoc *doc,
   AkContext context;
   uint32_t clip_index;
   int binding_count;
+  int is_collada;
   int needs_bake;
   int is_gltf;
 
@@ -3274,12 +3818,18 @@ akb_animation_new(AkDoc *doc,
             && doc->inf
             && (doc->inf->ftype == AK_FILE_TYPE_GLTF
                 || doc->inf->ftype == AK_FILE_TYPE_GLB);
+  is_collada = doc
+               && doc->inf
+               && doc->inf->ftype == AK_FILE_TYPE_COLLADA;
   needs_bake = ak_nodeNeedsBaking(node) || (!is_gltf && akb_node_has_rotate(node));
 
   if (needs_bake) {
-    animation = index
-      ? akb_animation_new_baked_indexed(doc, doc_owner, index, node, ok)
-      : akb_animation_new_baked(doc, doc_owner, node, ok);
+    if (is_collada)
+      animation = akb_animation_new_baked_collada(doc, doc_owner, node, ok);
+    else if (index)
+      animation = akb_animation_new_baked_indexed(doc, doc_owner, index, node, ok);
+    else
+      animation = akb_animation_new_baked(doc, doc_owner, node, ok);
     if (!animation || !*ok)
       return animation;
     binding_count = akb_node_visibility_bindings(node, bindings, 64);

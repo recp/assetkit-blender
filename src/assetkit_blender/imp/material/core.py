@@ -1007,7 +1007,7 @@ def _can_defer_base_color_texture_material(
     base_color: tuple[float, float, float, float],
 ) -> bool:
     return (
-        _textures.ACTIVE_LOAD_MODE == "DEFERRED"
+        _should_defer_texture_image(data.base_color_texture)
         and abs(float(data.ior) - 1.5) <= 1.0e-6
         and _can_use_base_color_texture_fast_material(data, color_attr, base_color)
     )
@@ -1088,7 +1088,13 @@ def _configure_base_color_texture_fast_material(
     if image:
         tex.image = image
     else:
-        _queue_deferred_texture_image(tex, path, colorspace, store_props=False)
+        _queue_deferred_texture_image(
+            tex,
+            path,
+            colorspace,
+            store_props=False,
+            fallback_kind=_textures._texture_fallback_kind(tex_info),
+        )
 
     color_socket = bsdf_inputs.get("Base Color")
     color_output = tex.outputs.get("Color")
@@ -1429,7 +1435,13 @@ def _new_fast_image_texture_node(tree, path: str, tex_info: TextureRefData | Non
     if image:
         tex.image = image
     else:
-        _queue_deferred_texture_image(tex, path, colorspace, store_props=False)
+        _queue_deferred_texture_image(
+            tex,
+            path,
+            colorspace,
+            store_props=False,
+            fallback_kind=_textures._texture_fallback_kind(tex_info),
+        )
     return tex
 
 
@@ -1728,7 +1740,13 @@ def _apply_deferred_base_color_texture_material(
     if image:
         tex.image = image
     else:
-        _queue_deferred_texture_image(tex, path, colorspace, store_props=False)
+        _queue_deferred_texture_image(
+            tex,
+            path,
+            colorspace,
+            store_props=False,
+            fallback_kind=_textures._texture_fallback_kind(tex_info),
+        )
 
     color_output = tex.outputs.get("Color")
     if color_socket and color_output:

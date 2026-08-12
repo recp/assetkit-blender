@@ -19,14 +19,21 @@ ACTIVE_VALIDATED_IMAGE_KEYS: set[tuple[str, str]] | None = None
 
 _TEXTURE_IMAGE_CACHE: dict[tuple[str, str], object] = {}
 _TEXTURE_PATH_CACHE: dict[str, str] = {}
-_DEFERRED_TEXTURE_WAITERS: dict[tuple[str, str], list[object]] = {}
+_DEFERRED_TEXTURE_WAITERS: dict[tuple[str, str], list[tuple[object, str]]] = {}
 _DEFERRED_TEXTURE_KEYS: deque[tuple[str, str]] = deque()
 _DEFERRED_TEXTURE_TIMER_ACTIVE = False
+_DEFERRED_TEXTURE_FALLBACK_IMAGES: dict[tuple[str, str], object] = {}
 _DEFERRED_TEXTURE_TIME_BUDGET = 0.006
 _TEXTURE_WRAP_DEFAULT = 1
 _TEXTURE_FILTER_DEFAULT = 0
 _TEXTURE_EXTENSION_DEFAULT = "REPEAT"
 _TEXTURE_INTERPOLATION_DEFAULT = "Linear"
+_AK_MINFILTER_NONE = 1
+_AK_MINFILTER_NEAREST = 2
+_AK_MINFILTER_NEAREST_MIPMAP_NEAREST = 5
+_AK_MINFILTER_NEAREST_MIPMAP_LINEAR = 7
+_AK_MAGFILTER_NONE = 1
+_AK_MAGFILTER_NEAREST = 2
 
 
 def has_deferred_work() -> bool:
@@ -53,7 +60,11 @@ def _image_texture_node(
             _append_texture_node_role(tex, tex_info)
             return tex
 
-    defer_image = _should_defer_texture_image(path)
+    fallback_kind = _texture_fallback_kind(tex_info)
+    defer_image = (
+        fallback_kind is not None
+        and _should_defer_texture_image(path)
+    )
     image = _cached_texture_image(path, colorspace) if defer_image else _load_texture_image(path, colorspace)
     if not image and not defer_image:
         return None
@@ -63,7 +74,12 @@ def _image_texture_node(
     if image:
         tex.image = image
     elif defer_image:
-        _queue_deferred_texture_image(tex, path, colorspace)
+        _queue_deferred_texture_image(
+            tex,
+            path,
+            colorspace,
+            fallback_kind=fallback_kind,
+        )
     if tex_info and tex_info.role:
         tex.label = f"AssetKit {tex_info.role}"
         tex["assetkit_texture_role"] = tex_info.role
@@ -159,10 +175,21 @@ def _socket_cache_key(socket) -> int:
 
 
 def _should_defer_texture_image(path: str) -> bool:
-    return ACTIVE_LOAD_MODE == "DEFERRED" and bool(path)
+    if ACTIVE_LOAD_MODE != "DEFERRED" or not path:
+        return False
+    try:
+        return os.path.isfile(_texture_abs_path(path))
+    except (OSError, TypeError, ValueError):
+        return False
 
 
-def _queue_deferred_texture_image(tex, path: str, colorspace: str, store_props: bool = True) -> None:
+def _queue_deferred_texture_image(
+    tex,
+    path: str,
+    colorspace: str,
+    store_props: bool = True,
+    fallback_kind: str = "COLOR",
+) -> None:
     global _DEFERRED_TEXTURE_TIMER_ACTIVE
     key = _texture_image_cache_key(path, colorspace)
     image = _cached_texture_image_by_key(key)
@@ -172,10 +199,10 @@ def _queue_deferred_texture_image(tex, path: str, colorspace: str, store_props: 
 
     waiters = _DEFERRED_TEXTURE_WAITERS.get(key)
     if waiters is None:
-        _DEFERRED_TEXTURE_WAITERS[key] = [tex]
+        _DEFERRED_TEXTURE_WAITERS[key] = [(tex, fallback_kind)]
         _DEFERRED_TEXTURE_KEYS.append(key)
     else:
-        waiters.append(tex)
+        waiters.append((tex, fallback_kind))
 
     if store_props:
         try:
@@ -195,13 +222,32 @@ def _deferred_texture_timer() -> float | None:
     while _DEFERRED_TEXTURE_KEYS:
         key = _DEFERRED_TEXTURE_KEYS.popleft()
         waiters = _DEFERRED_TEXTURE_WAITERS.pop(key, [])
-        live_waiters = [node for node in waiters if _node_ref_alive(node)]
+        live_waiters = [
+            (node, fallback_kind)
+            for node, fallback_kind in waiters
+            if _node_ref_alive(node)
+        ]
         if live_waiters:
             image = _load_texture_image_immediate(key[0], key[1])
             if image:
-                for node in live_waiters:
+                for node, _fallback_kind in live_waiters:
                     _assign_texture_image(node, image)
-        if time.perf_counter() - started_at >= _DEFERRED_TEXTURE_TIME_BUDGET:
+            else:
+                fallback_images = {}
+                for node, fallback_kind in live_waiters:
+                    fallback = fallback_images.get(fallback_kind)
+                    if fallback is None:
+                        fallback = _deferred_texture_fallback_image(
+                            fallback_kind,
+                            key[1],
+                        )
+                        fallback_images[fallback_kind] = fallback
+                    if fallback is not None:
+                        _assign_texture_image(node, fallback)
+        if (
+            _DEFERRED_TEXTURE_KEYS
+            and time.perf_counter() - started_at >= _DEFERRED_TEXTURE_TIME_BUDGET
+        ):
             return 0.001
 
     _DEFERRED_TEXTURE_TIMER_ACTIVE = False
@@ -219,6 +265,59 @@ def _assign_texture_image(tex, image) -> None:
             del tex["assetkit_texture_pending_colorspace"]
     except Exception:
         pass
+
+
+def _texture_fallback_kind(tex_info: TextureRefData | None) -> str | None:
+    if tex_info and tex_info.role == "transparent":
+        return None
+    if tex_info and tex_info.role in {"normal", "clearcoat_normal"}:
+        return "NORMAL"
+    if tex_info and tex_info.role == "anisotropy":
+        return "ANISOTROPY"
+    return "COLOR"
+
+
+def _deferred_texture_fallback_image(kind: str, colorspace: str):
+    normalized_kind = kind if kind in {"NORMAL", "ANISOTROPY"} else "COLOR"
+    key = (normalized_kind, str(colorspace or ""))
+    cached = _DEFERRED_TEXTURE_FALLBACK_IMAGES.get(key)
+    if cached is not None:
+        try:
+            if bpy.data.images.get(cached.name) == cached:
+                return cached
+        except ReferenceError:
+            pass
+        except Exception:
+            pass
+        _DEFERRED_TEXTURE_FALLBACK_IMAGES.pop(key, None)
+
+    image = None
+    try:
+        label = normalized_kind.title()
+        image = bpy.data.images.new(
+            f".AssetKit Missing Texture {label}",
+            width=1,
+            height=1,
+            alpha=True,
+            float_buffer=True,
+        )
+        pixels = {
+            "NORMAL": (0.5, 0.5, 1.0, 1.0),
+            "ANISOTROPY": (1.0, 0.5, 1.0, 1.0),
+        }.get(normalized_kind, (1.0, 1.0, 1.0, 1.0))
+        image.generated_color = pixels
+        image["assetkit_missing_texture_fallback"] = normalized_kind
+        _set_image_colorspace(image, colorspace)
+        image.update()
+        _DEFERRED_TEXTURE_FALLBACK_IMAGES[key] = image
+        return image
+    except Exception:
+        if image is not None:
+            try:
+                bpy.data.images.remove(image)
+            except Exception:
+                pass
+        return None
 
 
 def _node_ref_alive(node) -> bool:
@@ -258,6 +357,9 @@ def _load_texture_image_immediate(path: str, colorspace: str):
             stats["texture_image_cache_hits"] = int(stats.get("texture_image_cache_hits", 0) or 0) + 1
         return image
 
+    if not os.path.isfile(source_path):
+        return None
+
     if _is_ktx2_path(path):
         image = _decode_ktx2_image(source_path, colorspace)
         if image:
@@ -288,6 +390,13 @@ def _load_texture_image_immediate(path: str, colorspace: str):
             + (time.perf_counter() - load_started_at) * 1000.0
         )
 
+    if image and _is_ktx2_path(path) and not _image_has_size(image):
+        try:
+            bpy.data.images.remove(image)
+        except Exception:
+            pass
+        image = None
+
     if image:
         register_started_at = time.perf_counter() if stats is not None else 0.0
         _register_texture_image(image, source_path, colorspace)
@@ -298,12 +407,6 @@ def _load_texture_image_immediate(path: str, colorspace: str):
             )
             stats["texture_image_loads"] = int(stats.get("texture_image_loads", 0) or 0) + 1
         return image
-
-    if image and _is_ktx2_path(path):
-        try:
-            bpy.data.images.remove(image)
-        except Exception:
-            pass
 
     if _is_ktx2_path(path):
         image = _decode_ktx2_image(source_path, colorspace)
@@ -638,7 +741,12 @@ def _texture_extension(tex_info: TextureRefData | None) -> str:
 def _texture_interpolation(tex_info: TextureRefData | None) -> str:
     if tex_info is None:
         return _TEXTURE_INTERPOLATION_DEFAULT
-    if tex_info.mag_filter == 1 or tex_info.min_filter in {1, 4, 5}:
+    if tex_info.mag_filter in {_AK_MAGFILTER_NONE, _AK_MAGFILTER_NEAREST} or tex_info.min_filter in {
+        _AK_MINFILTER_NONE,
+        _AK_MINFILTER_NEAREST,
+        _AK_MINFILTER_NEAREST_MIPMAP_NEAREST,
+        _AK_MINFILTER_NEAREST_MIPMAP_LINEAR,
+    }:
         return "Closest"
     return "Linear"
 
@@ -649,8 +757,12 @@ def _set_texture_sampler_props(tex, tex_info: TextureRefData) -> None:
     _set_prop_if_nondefault(tex, "assetkit_texture_wrap_s", int(tex_info.wrap_s), _TEXTURE_WRAP_DEFAULT)
     _set_prop_if_nondefault(tex, "assetkit_texture_wrap_t", int(tex_info.wrap_t), _TEXTURE_WRAP_DEFAULT)
     _set_prop_if_nondefault(tex, "assetkit_texture_wrap_p", int(tex_info.wrap_p), _TEXTURE_WRAP_DEFAULT)
-    _set_prop_if_nondefault(tex, "assetkit_texture_min_filter", int(tex_info.min_filter), _TEXTURE_FILTER_DEFAULT)
-    _set_prop_if_nondefault(tex, "assetkit_texture_mag_filter", int(tex_info.mag_filter), _TEXTURE_FILTER_DEFAULT)
-    _set_prop_if_nondefault(tex, "assetkit_texture_mip_filter", int(tex_info.mip_filter), _TEXTURE_FILTER_DEFAULT)
+    # Zero is an authored-state distinction: it means UNSPECIFIED and must
+    # round-trip to omitted glTF filter properties. Keep all three raw enum
+    # values even when zero; otherwise export would infer Blender's visible
+    # Linear setting and turn omitted fields into explicit filters.
+    tex["assetkit_texture_min_filter"] = int(tex_info.min_filter)
+    tex["assetkit_texture_mag_filter"] = int(tex_info.mag_filter)
+    tex["assetkit_texture_mip_filter"] = int(tex_info.mip_filter)
     _set_prop_if_nondefault(tex, "assetkit_texture_extension", extension, _TEXTURE_EXTENSION_DEFAULT)
     _set_prop_if_nondefault(tex, "assetkit_texture_interpolation", interpolation, _TEXTURE_INTERPOLATION_DEFAULT)

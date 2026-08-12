@@ -12,8 +12,11 @@ from ..images import _ExportImageStore
 from .constants import (
     _AK_MAGFILTER_LINEAR,
     _AK_MAGFILTER_NEAREST,
+    _AK_MAGFILTER_UNSPECIFIED,
     _AK_MINFILTER_LINEAR_MIPMAP_LINEAR,
     _AK_MINFILTER_NEAREST_MIPMAP_NEAREST,
+    _AK_MINFILTER_UNSPECIFIED,
+    _AK_MIPFILTER_UNSPECIFIED,
     _AK_WRAP_CLAMP,
     _AK_WRAP_MIRROR,
     _AK_WRAP_REPEAT,
@@ -378,9 +381,9 @@ def _sampler_tuple(node) -> tuple[int, int, int, int, int, int]:
         wrap_s = _node_int_prop(node, "assetkit_texture_wrap_s", _AK_WRAP_REPEAT)
         wrap_t = _node_int_prop(node, "assetkit_texture_wrap_t", _AK_WRAP_REPEAT)
         wrap_p = _node_int_prop(node, "assetkit_texture_wrap_p", wrap_t)
-        min_filter = _node_int_prop(node, "assetkit_texture_min_filter", 0)
-        mag_filter = _node_int_prop(node, "assetkit_texture_mag_filter", _AK_MAGFILTER_LINEAR)
-        mip_filter = _node_int_prop(node, "assetkit_texture_mip_filter", 0)
+        min_filter = _node_int_prop(node, "assetkit_texture_min_filter", _AK_MINFILTER_UNSPECIFIED)
+        mag_filter = _node_int_prop(node, "assetkit_texture_mag_filter", _AK_MAGFILTER_UNSPECIFIED)
+        mip_filter = _node_int_prop(node, "assetkit_texture_mip_filter", _AK_MIPFILTER_UNSPECIFIED)
         return int(wrap_s), int(wrap_t), int(wrap_p), int(min_filter), int(mag_filter), int(mip_filter)
 
     extension = getattr(node, "extension", "REPEAT")
@@ -401,7 +404,14 @@ def _sampler_tuple(node) -> tuple[int, int, int, int, int, int]:
         min_filter = _AK_MINFILTER_LINEAR_MIPMAP_LINEAR
         mag_filter = _AK_MAGFILTER_LINEAR
 
-    return int(wrap_s), int(wrap_t), int(wrap_p), int(min_filter), int(mag_filter), 0
+    return (
+        int(wrap_s),
+        int(wrap_t),
+        int(wrap_p),
+        int(min_filter),
+        int(mag_filter),
+        _AK_MIPFILTER_UNSPECIFIED,
+    )
 
 
 def _texture_transform_tuple(node, slot: int) -> tuple | None:
@@ -571,9 +581,9 @@ def _prop_texture_info_tuple(material: bpy.types.Material, role: str) -> tuple |
     wrap_s = int(_prop_float(material, f"{prefix}_wrap_s", _AK_WRAP_REPEAT))
     wrap_t = int(_prop_float(material, f"{prefix}_wrap_t", _AK_WRAP_REPEAT))
     wrap_p = int(_prop_float(material, f"{prefix}_wrap_p", wrap_t))
-    min_filter = int(_prop_float(material, f"{prefix}_min_filter", 0))
-    mag_filter = int(_prop_float(material, f"{prefix}_mag_filter", _AK_MAGFILTER_LINEAR))
-    mip_filter = int(_prop_float(material, f"{prefix}_mip_filter", 0))
+    min_filter = int(_prop_float(material, f"{prefix}_min_filter", _AK_MINFILTER_UNSPECIFIED))
+    mag_filter = int(_prop_float(material, f"{prefix}_mag_filter", _AK_MAGFILTER_UNSPECIFIED))
+    mip_filter = int(_prop_float(material, f"{prefix}_mip_filter", _AK_MIPFILTER_UNSPECIFIED))
     slot = _prop_texture_slot(material, role)
     transform = None
     if (
@@ -600,9 +610,9 @@ def _prop_texture_info_tuple(material: bpy.types.Material, role: str) -> tuple |
         wrap_s == _AK_WRAP_REPEAT
         and wrap_t == _AK_WRAP_REPEAT
         and wrap_p == _AK_WRAP_REPEAT
-        and min_filter == 0
-        and mag_filter == _AK_MAGFILTER_LINEAR
-        and mip_filter == 0
+        and min_filter == _AK_MINFILTER_UNSPECIFIED
+        and mag_filter == _AK_MAGFILTER_UNSPECIFIED
+        and mip_filter == _AK_MIPFILTER_UNSPECIFIED
         and transform is None
         and texture_extra is None
         and texref_extra is None

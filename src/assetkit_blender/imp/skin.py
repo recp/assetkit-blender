@@ -472,6 +472,7 @@ def _create_skin_armature(
         if not name:
             continue
         bone = edit_bones.new(name)
+        bone.use_deform = node_index in node_to_joint
         matrix = rest_matrices_by_node.get(node_index)
         if matrix is None:
             matrix = _node_rest_matrix(node_index, node_objects, armature)
@@ -481,7 +482,6 @@ def _create_skin_armature(
             _skin_bone_length(node_index, bone_children_by_parent, rest_matrices_by_node),
         )
     create_bones_ms = lap_ms()
-
     for node_index, name in bone_names_by_node.items():
         parent_joint = None
         parent_index = node_data.get(node_index).parent_index if node_data.get(node_index) else -1
@@ -503,16 +503,48 @@ def _create_skin_armature(
         if apply_animation:
             if root_node:
                 _apply_animation(armature, root_node)
-            _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels_by_joint)
+            _apply_bone_animations(
+                armature,
+                joint_names,
+                joint_nodes,
+                node_data,
+                pose_channels_by_joint,
+                bone_names_by_node,
+            )
         elif deferred_skin_animations is not None:
-            deferred_skin_animations.append((armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, True))
+            deferred_skin_animations.append((
+                armature,
+                data,
+                joint_names,
+                joint_nodes,
+                node_data,
+                pose_channels_by_joint,
+                True,
+                bone_names_by_node,
+            ))
     else:
         bound_to_nodes = _bind_bones_to_nodes(armature, bone_names_by_node, node_objects)
         if not bound_to_nodes:
             if apply_animation:
-                _apply_bone_animations(armature, joint_names, joint_nodes, node_data, pose_channels_by_joint)
+                _apply_bone_animations(
+                    armature,
+                    joint_names,
+                    joint_nodes,
+                    node_data,
+                    pose_channels_by_joint,
+                    bone_names_by_node,
+                )
             elif deferred_skin_animations is not None:
-                deferred_skin_animations.append((armature, data, joint_names, joint_nodes, node_data, pose_channels_by_joint, False))
+                deferred_skin_animations.append((
+                    armature,
+                    data,
+                    joint_names,
+                    joint_nodes,
+                    node_data,
+                    pose_channels_by_joint,
+                    False,
+                    bone_names_by_node,
+                ))
     animation_ms = lap_ms()
     _match_skin_armature_space(
         armature,
@@ -551,7 +583,35 @@ def _skin_bone_node_indices(
     node_data: dict[int, SceneNodeData],
 ) -> list[int]:
     joint_indices = [int(joint_nodes[index]) for index in range(len(joint_nodes)) if int(joint_nodes[index]) >= 0]
-    return joint_indices
+    joint_set = set(joint_indices)
+    result = list(joint_indices)
+    included = set(joint_indices)
+    root_index = int(data.skin_root_node_index)
+
+    # Preserve authored non-joint nodes between skin joints as non-deforming
+    # armature bones. Collapsing this chain to the nearest joint drops the
+    # intermediate node's animation (for example root JOINT -> animated NODE
+    # -> child JOINT), shifting the child pose by the full parent motion.
+    for joint_index in joint_indices:
+        node = node_data.get(joint_index)
+        parent_index = int(node.parent_index) if node else -1
+        chain: list[int] = []
+        visited: set[int] = set()
+        while (
+            parent_index >= 0
+            and parent_index != root_index
+            and parent_index not in joint_set
+            and parent_index not in visited
+        ):
+            visited.add(parent_index)
+            chain.append(parent_index)
+            parent = node_data.get(parent_index)
+            parent_index = int(parent.parent_index) if parent else -1
+        for ancestor in reversed(chain):
+            if ancestor not in included:
+                included.add(ancestor)
+                result.append(ancestor)
+    return result
 
 
 def _skin_uses_bind_pose_armature(data: MeshPrimitiveData) -> bool:
@@ -843,17 +903,36 @@ def _apply_bone_animations(
     joint_nodes: memoryview,
     node_data: dict[int, SceneNodeData],
     pose_channels_by_joint: list[list[dict]] | None = None,
+    bone_names_by_node: dict[int, str] | None = None,
 ) -> None:
     profile_detail = _profile_state.stats is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = total_started_at
     animated = False
     channel_count = 0
-    for index, name in enumerate(joint_names):
+    node_to_joint = {
+        int(joint_nodes[index]): index
+        for index in range(min(len(joint_nodes), len(joint_names)))
+        if int(joint_nodes[index]) >= 0
+    }
+    animation_bones = list((bone_names_by_node or {}).items())
+    if not animation_bones:
+        animation_bones = [
+            (int(joint_nodes[index]), name)
+            for index, name in enumerate(joint_names)
+            if index < len(joint_nodes)
+        ]
+
+    for node_index, name in animation_bones:
         pose_bone = armature.pose.bones.get(name)
         if pose_bone:
             pose_bone.rotation_mode = "QUATERNION"
-        channels = _bone_animation_channels(index, joint_nodes, node_data, pose_channels_by_joint)
+        channels = _bone_animation_channels(
+            node_index,
+            node_to_joint,
+            node_data,
+            pose_channels_by_joint,
+        )
         if channels:
             animated = True
             channel_count += len(channels)
@@ -879,9 +958,14 @@ def _apply_bone_animations(
     skipped_default_fcurves = 0
     frame_bounds: tuple[float, float] | None = None
 
-    for index, name in enumerate(joint_names):
+    for node_index, name in animation_bones:
         pose_bone = armature.pose.bones.get(name)
-        channels = _bone_animation_channels(index, joint_nodes, node_data, pose_channels_by_joint)
+        channels = _bone_animation_channels(
+            node_index,
+            node_to_joint,
+            node_data,
+            pose_channels_by_joint,
+        )
         if not pose_bone or not channels:
             continue
 
@@ -1069,13 +1153,18 @@ def _apply_bone_animations(
 
 
 def _bone_animation_channels(
-    joint_index: int,
-    joint_nodes: memoryview,
+    node_index: int,
+    node_to_joint: dict[int, int],
     node_data: dict[int, SceneNodeData],
     pose_channels_by_joint: list[list[dict]] | None = None,
 ) -> list[dict]:
-    if pose_channels_by_joint is not None and joint_index < len(pose_channels_by_joint):
+    joint_index = node_to_joint.get(node_index)
+    if (
+        joint_index is not None
+        and pose_channels_by_joint is not None
+        and joint_index < len(pose_channels_by_joint)
+    ):
         return pose_channels_by_joint[joint_index] or []
 
-    node = node_data.get(int(joint_nodes[joint_index]) if joint_index < len(joint_nodes) else -1)
+    node = node_data.get(node_index)
     return list(node.anim_channels or []) if node else []

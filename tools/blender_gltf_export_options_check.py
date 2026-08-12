@@ -9,7 +9,9 @@ Run with:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -23,6 +25,7 @@ if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
 from assetkit_blender.enums import AK_FILE_TYPE_GLTF  # noqa: E402
+from assetkit_blender.assetkit import native_load_meshes  # noqa: E402
 from assetkit_blender.exp.exporter import export_scene  # noqa: E402
 from assetkit_blender.importer import import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
@@ -30,6 +33,101 @@ from assetkit_blender.load_options import make_load_options  # noqa: E402
 
 def reset_scene() -> None:
     bpy.ops.wm.read_factory_settings(use_empty=True)
+
+
+def assert_absent_sampler_filters_stay_unspecified(root: Path) -> None:
+    image_name = "unspecified-sampler.png"
+    (root / image_name).write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    document = {
+        "asset": {"version": "2.0"},
+        "images": [{"uri": image_name}],
+        "samplers": [{}],
+        "textures": [{"sampler": 0, "source": 0}],
+        "materials": [{
+            "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}
+        }],
+        "buffers": [{
+            "byteLength": 36,
+            "uri": "data:application/octet-stream;base64,"
+                   + base64.b64encode(
+                       b"\x00\x00\x00\x00" * 9
+                   ).decode("ascii"),
+        }],
+        "bufferViews": [{"buffer": 0, "byteLength": 36}],
+        "accessors": [{
+            "bufferView": 0,
+            "componentType": 5126,
+            "count": 3,
+            "type": "VEC3",
+        }],
+        "meshes": [{
+            "primitives": [{"attributes": {"POSITION": 0}, "material": 0}]
+        }],
+        "nodes": [{"mesh": 0}],
+        "scenes": [{"nodes": [0]}],
+        "scene": 0,
+    }
+    path = root / "unspecified-sampler.gltf"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    loaded = native_load_meshes(
+        os.fspath(path),
+        make_load_options(
+            coordinate_system="Y_UP",
+            coordinate_conversion="TRANSFORM",
+            generate_normals=False,
+            texture_loading="DEFERRED",
+        ),
+    )
+    if loaded is None or not loaded.meshes:
+        raise AssertionError("failed to load absent-filter sampler fixture")
+    info = (loaded.meshes[0].texture_infos or {}).get("base_color")
+    if info is None or (info.min_filter, info.mag_filter, info.mip_filter) != (0, 0, 0):
+        raise AssertionError(
+            "absent glTF sampler filters became authored values: "
+            f"{None if info is None else (info.min_filter, info.mag_filter, info.mip_filter)}"
+        )
+
+    reset_scene()
+    imported = import_assetkit_file(
+        os.fspath(path),
+        load_options=make_load_options(texture_loading="IMMEDIATE"),
+        collection=bpy.context.collection,
+        focus_mode="NEVER",
+        placement_mode="AS_AUTHORED",
+        scene_was_empty=True,
+        select_imported=False,
+        set_viewport_shading=False,
+        clean_viewport_overlays=False,
+    )
+    if not imported:
+        raise AssertionError("absent-filter fixture did not import into Blender")
+    image_nodes = [
+        node
+        for material in bpy.data.materials
+        if material.node_tree
+        for node in material.node_tree.nodes
+        if node.type == "TEX_IMAGE"
+    ]
+    if len(image_nodes) != 1 or any(
+        int(image_nodes[0].get(key, -1)) != 0
+        for key in (
+            "assetkit_texture_min_filter",
+            "assetkit_texture_mag_filter",
+            "assetkit_texture_mip_filter",
+        )
+    ):
+        raise AssertionError("Blender did not retain UNSPECIFIED sampler metadata")
+
+    exported_path = root / "unspecified-sampler-roundtrip.gltf"
+    result = export_scene(bpy.context, exported_path, AK_FILE_TYPE_GLTF)
+    if result < 0:
+        raise AssertionError(f"absent-filter round-trip export failed: {result}")
+    exported = json.loads(exported_path.read_text(encoding="utf-8"))
+    for sampler in exported.get("samplers", []):
+        if "minFilter" in sampler or "magFilter" in sampler:
+            raise AssertionError(f"absent filters became explicit on round-trip: {sampler}")
 
 
 def make_material() -> bpy.types.Material:
@@ -224,6 +322,7 @@ def assert_ior_roundtrip(path: Path, texture_loading: str) -> None:
 
 def run_checks(out_root: Path) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
+    assert_absent_sampler_filters_stay_unspecified(out_root)
 
     data = export_case(out_root, "default")
     attrs = first_attributes(data)

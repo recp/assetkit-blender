@@ -925,6 +925,7 @@ typedef struct AkbAnimBinding {
 
 typedef struct AkbResolvedAnimChannel {
   AkChannel        *channel;
+  AkAnimationClip  *clip;
   AkResolvedTarget resolved;
   const char      *clip_name;
   size_t           next_target;
