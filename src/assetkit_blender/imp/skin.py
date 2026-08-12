@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from array import array
 
@@ -230,13 +231,29 @@ def _skin_helper_node_indices(
 def _apply_skin_bind_shape(mesh: bpy.types.Mesh, data: MeshPrimitiveData) -> None:
     if not data.has_skin:
         return
+    if data.skin_mesh_in_bind_pose:
+        # The native bind-pose bake already includes bind_shape_matrix in the
+        # per-joint COLLADA transform product.
+        return
 
     matrix = _matrix_from_buffer(data.skin_bind_shape_matrix_f32)
-    if matrix is None or _matrix_is_identity(matrix):
+    if (
+        matrix is None
+        or not _matrix_is_finite(matrix)
+        or _matrix_is_identity(matrix)
+    ):
         return
 
     mesh.transform(matrix)
     mesh.update(calc_edges=False)
+
+
+def _matrix_is_finite(matrix: Matrix) -> bool:
+    return all(
+        math.isfinite(float(matrix[row][col]))
+        for row in range(4)
+        for col in range(4)
+    )
 
 
 def _matrix_is_identity(matrix: Matrix, epsilon: float = 1.0e-6) -> bool:

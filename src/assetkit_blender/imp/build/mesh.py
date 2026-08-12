@@ -874,7 +874,11 @@ def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiv
 
         group = [primitive]
         index += 1
-        while index < count and _mesh_group_key(primitives[index]) == key:
+        while (
+            index < count
+            and _mesh_group_key(primitives[index]) == key
+            and _mesh_group_skin_data_equal(primitive, primitives[index])
+        ):
             group.append(primitives[index])
             index += 1
         if (
@@ -886,6 +890,22 @@ def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiv
         units.append(group if len(group) > 1 else primitive)
 
     return units
+
+
+def _mesh_group_skin_data_equal(
+    first: MeshPrimitiveData, candidate: MeshPrimitiveData
+) -> bool:
+    if not first.has_skin:
+        return True
+
+    return all(
+        _buffer_bytes_equal(getattr(first, name), getattr(candidate, name), format_code)
+        for name, format_code in (
+            ("skin_joint_nodes_i32", "i"),
+            ("skin_inverse_bind_matrices_f32", "f"),
+            ("skin_bind_shape_matrix_f32", "f"),
+        )
+    )
 
 
 def _mesh_import_unit_sort_key(

@@ -585,39 +585,173 @@ akb_skin_vertex_matrix(const AkbPrimitive *out,
     glm_vec4_scale(AKB_VEC4(matrix + 8),  weight, AKB_VEC4(matrix + 8));
     glm_vec4_scale(AKB_VEC4(matrix + 12), weight, AKB_VEC4(matrix + 12));
   } else {
-    glm_mat4_copy(AKB_MAT4(joint_mats), AKB_MAT4(matrix));
+    /* Blender leaves vertices without a valid group assignment unchanged. */
+    glm_mat4_identity(AKB_MAT4(matrix));
   }
 }
 
+typedef enum AkbSkinBindPoseMatrixResult {
+  AKB_SKIN_BIND_POSE_MATRIX_ERROR = 0,
+  AKB_SKIN_BIND_POSE_MATRIX_OK,
+  AKB_SKIN_BIND_POSE_MATRIX_SKIP
+} AkbSkinBindPoseMatrixResult;
+
 static int
+akb_mat4_is_finite(const float matrix[16]) {
+  uint32_t i;
+
+  if (!matrix)
+    return 0;
+
+  for (i = 0; i < 16; i++)
+    if (!isfinite(matrix[i]))
+      return 0;
+
+  return 1;
+}
+
+static int
+akb_mat4_inverse_checked(const float matrix[16], float inverse[16]) {
+  float determinant;
+
+  if (!matrix || !inverse || !akb_mat4_is_finite(matrix))
+    return 0;
+
+  determinant = glm_mat4_det(AKB_MAT4(matrix));
+  if (!isfinite(determinant) || determinant == 0.0f)
+    return 0;
+
+  glm_mat4_inv(AKB_MAT4(matrix), AKB_MAT4(inverse));
+  return akb_mat4_is_finite(inverse);
+}
+
+static float
+akb_mat4_linear_determinant(const float matrix[16]) {
+  return matrix[0] * (matrix[5] * matrix[10] - matrix[6] * matrix[9])
+         + matrix[1] * (matrix[6] * matrix[8] - matrix[4] * matrix[10])
+         + matrix[2] * (matrix[4] * matrix[9] - matrix[5] * matrix[8]);
+}
+
+static void
+akb_skin_transform_normal(const float matrix[16], float normal[3]) {
+  float cofactor0[3], cofactor1[3], cofactor2[3];
+  float transformed[3];
+  float determinant;
+  float length_squared;
+  float x, y, z;
+
+  if (!matrix || !normal)
+    return;
+
+  x = normal[0];
+  y = normal[1];
+  z = normal[2];
+
+  /* The inverse-transpose is the cofactor matrix divided by det.  The
+   * division can be omitted before normalization, except that a reflected
+   * transform must retain the determinant's sign. */
+  cofactor0[0] = matrix[5] * matrix[10] - matrix[6] * matrix[9];
+  cofactor0[1] = matrix[6] * matrix[8]  - matrix[4] * matrix[10];
+  cofactor0[2] = matrix[4] * matrix[9]  - matrix[5] * matrix[8];
+  cofactor1[0] = matrix[9] * matrix[2]  - matrix[10] * matrix[1];
+  cofactor1[1] = matrix[10] * matrix[0] - matrix[8] * matrix[2];
+  cofactor1[2] = matrix[8] * matrix[1]  - matrix[9] * matrix[0];
+  cofactor2[0] = matrix[1] * matrix[6]  - matrix[2] * matrix[5];
+  cofactor2[1] = matrix[2] * matrix[4]  - matrix[0] * matrix[6];
+  cofactor2[2] = matrix[0] * matrix[5]  - matrix[1] * matrix[4];
+  determinant = akb_mat4_linear_determinant(matrix);
+
+  if (isfinite(determinant) && determinant != 0.0f) {
+    transformed[0] = cofactor0[0] * x + cofactor1[0] * y + cofactor2[0] * z;
+    transformed[1] = cofactor0[1] * x + cofactor1[1] * y + cofactor2[1] * z;
+    transformed[2] = cofactor0[2] * x + cofactor1[2] * y + cofactor2[2] * z;
+    if (determinant < 0.0f)
+      glm_vec3_negate(AKB_VEC3(transformed));
+  } else {
+    /* There is no defined normal transform for a singular matrix.  Keep the
+     * previous tolerant linear behavior if it still produces a direction. */
+    transformed[0] = matrix[0] * x + matrix[4] * y + matrix[8]  * z;
+    transformed[1] = matrix[1] * x + matrix[5] * y + matrix[9]  * z;
+    transformed[2] = matrix[2] * x + matrix[6] * y + matrix[10] * z;
+  }
+
+  length_squared = glm_vec3_norm2(AKB_VEC3(transformed));
+  if (isfinite(length_squared) && length_squared > 0.0f)
+    glm_vec3_copy(AKB_VEC3(transformed), AKB_VEC3(normal));
+  glm_vec3_normalize(AKB_VEC3(normal));
+}
+
+static void
+akb_skin_transform_tangent(const float matrix[16], float tangent[4]) {
+  float determinant;
+
+  if (!matrix || !tangent)
+    return;
+
+  glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(tangent), 0.0f, AKB_VEC3(tangent));
+  glm_vec3_normalize(AKB_VEC3(tangent));
+
+  /* A reflected linear transform reverses the tangent frame's handedness. */
+  determinant = akb_mat4_linear_determinant(matrix);
+  if (isfinite(determinant) && determinant < 0.0f)
+    tangent[3] = -tangent[3];
+}
+
+static AkbSkinBindPoseMatrixResult
 akb_skin_bind_pose_joint_matrices(AkbPrimitive *out, float **joint_mats_out) {
   float *joint_mats;
+  const float *inverse_bind;
   float root_world[16];
   float root_inv[16];
   float bind_world[16];
   float bind_arma[16];
+  float bind_with_shape[16];
+  float inverse_bind_check[16];
+  float fallback_inverse_bind[16];
   uint32_t i;
 
   if (!out || !out->skin_joint_count || !joint_mats_out)
-    return 0;
+    return AKB_SKIN_BIND_POSE_MATRIX_ERROR;
+
+  *joint_mats_out = NULL;
+
+  akb_node_world_matrix(out->skin_root_source, root_world);
+  if (!akb_mat4_inverse_checked(root_world, root_inv))
+    return AKB_SKIN_BIND_POSE_MATRIX_SKIP;
 
   joint_mats = (float *)malloc((size_t)out->skin_joint_count * 16 * sizeof(*joint_mats));
   if (!joint_mats)
-    return 0;
-
-  akb_node_world_matrix(out->skin_root_source, root_world);
-  glm_mat4_inv(AKB_MAT4(root_world), AKB_MAT4(root_inv));
+    return AKB_SKIN_BIND_POSE_MATRIX_ERROR;
 
   for (i = 0; i < out->skin_joint_count; i++) {
     if (out->skin_inverse_bind_matrices) {
-      if (out->skin_joint_sources && out->skin_joint_sources[i])
+      inverse_bind = out->skin_inverse_bind_matrices + (size_t)i * 16;
+      if (!akb_mat4_inverse_checked(inverse_bind, inverse_bind_check)) {
+        if (!out->skin_joint_sources || !out->skin_joint_sources[i]) {
+          free(joint_mats);
+          return AKB_SKIN_BIND_POSE_MATRIX_SKIP;
+        }
+
         akb_node_world_matrix(out->skin_joint_sources[i], bind_world);
-      else
-        glm_mat4_inv(AKB_MAT4(out->skin_inverse_bind_matrices + (size_t)i * 16),
-                     AKB_MAT4(bind_world));
+        if (!akb_mat4_inverse_checked(bind_world, fallback_inverse_bind)) {
+          free(joint_mats);
+          return AKB_SKIN_BIND_POSE_MATRIX_SKIP;
+        }
+        inverse_bind = fallback_inverse_bind;
+      }
+
+      if (out->skin_joint_sources && out->skin_joint_sources[i]) {
+        akb_node_world_matrix(out->skin_joint_sources[i], bind_world);
+        if (!akb_mat4_is_finite(bind_world)) {
+          free(joint_mats);
+          return AKB_SKIN_BIND_POSE_MATRIX_SKIP;
+        }
+      } else {
+        glm_mat4_copy(AKB_MAT4(inverse_bind_check), AKB_MAT4(bind_world));
+      }
       glm_mul(AKB_MAT4(root_inv), AKB_MAT4(bind_world), AKB_MAT4(bind_arma));
       glm_mul(AKB_MAT4(bind_arma),
-              AKB_MAT4(out->skin_inverse_bind_matrices + (size_t)i * 16),
+              AKB_MAT4(inverse_bind),
               AKB_MAT4(joint_mats + (size_t)i * 16));
     } else {
       akb_node_world_matrix(out->skin_joint_sources ? out->skin_joint_sources[i] : NULL,
@@ -626,10 +760,21 @@ akb_skin_bind_pose_joint_matrices(AkbPrimitive *out, float **joint_mats_out) {
               AKB_MAT4(bind_world),
               AKB_MAT4(joint_mats + (size_t)i * 16));
     }
+
+    /* COLLADA skins vertices as joint * inverse_bind * bind_shape * position. */
+    glm_mul(AKB_MAT4(joint_mats + (size_t)i * 16),
+            AKB_MAT4(out->skin_bind_shape_matrix),
+            AKB_MAT4(bind_with_shape));
+    glm_mat4_copy(AKB_MAT4(bind_with_shape),
+                  AKB_MAT4(joint_mats + (size_t)i * 16));
+    if (!akb_mat4_is_finite(joint_mats + (size_t)i * 16)) {
+      free(joint_mats);
+      return AKB_SKIN_BIND_POSE_MATRIX_SKIP;
+    }
   }
 
   *joint_mats_out = joint_mats;
-  return 1;
+  return AKB_SKIN_BIND_POSE_MATRIX_OK;
 }
 
 static void
@@ -649,8 +794,7 @@ akb_skin_bind_pose_apply_loop_vectors(AkbPrimitive *out, const float *vertex_mat
         continue;
       matrix = vertex_mats + (size_t)vertex_index * 16;
       vector = out->normals + (size_t)loop_index * 3;
-      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
-      glm_vec3_normalize(AKB_VEC3(vector));
+      akb_skin_transform_normal(matrix, vector);
     }
   }
 
@@ -661,8 +805,7 @@ akb_skin_bind_pose_apply_loop_vectors(AkbPrimitive *out, const float *vertex_mat
         continue;
       matrix = vertex_mats + (size_t)vertex_index * 16;
       vector = out->tangents + (size_t)loop_index * 4;
-      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
-      glm_vec3_normalize(AKB_VEC3(vector));
+      akb_skin_transform_tangent(matrix, vector);
     }
   }
 }
@@ -686,8 +829,7 @@ akb_skin_bind_pose_apply_loop_vectors_rigid(AkbPrimitive *out,
         continue;
       matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
       vector = out->normals + (size_t)loop_index * 3;
-      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
-      glm_vec3_normalize(AKB_VEC3(vector));
+      akb_skin_transform_normal(matrix, vector);
     }
   }
 
@@ -698,8 +840,7 @@ akb_skin_bind_pose_apply_loop_vectors_rigid(AkbPrimitive *out,
         continue;
       matrix = joint_mats + (size_t)vertex_joints[vertex_index] * 16;
       vector = out->tangents + (size_t)loop_index * 4;
-      glm_mat4_mulv3(AKB_MAT4(matrix), AKB_VEC3(vector), 0.0f, AKB_VEC3(vector));
-      glm_vec3_normalize(AKB_VEC3(vector));
+      akb_skin_transform_tangent(matrix, vector);
     }
   }
 }
@@ -743,6 +884,7 @@ akb_skin_into_bind_pose(AkbPrimitive *out) {
   float *position;
   uint16_t *rigid_vertex_joints;
   AkbMorphTarget *target;
+  AkbSkinBindPoseMatrixResult joint_matrix_result;
   uint32_t vertex_index;
   uint32_t target_index;
 
@@ -756,7 +898,10 @@ akb_skin_into_bind_pose(AkbPrimitive *out) {
 
   if (!akb_ensure_owned_vertices(out))
     return 0;
-  if (!akb_skin_bind_pose_joint_matrices(out, &joint_mats))
+  joint_matrix_result = akb_skin_bind_pose_joint_matrices(out, &joint_mats);
+  if (joint_matrix_result == AKB_SKIN_BIND_POSE_MATRIX_SKIP)
+    return 1;
+  if (joint_matrix_result != AKB_SKIN_BIND_POSE_MATRIX_OK)
     return 0;
 
   rigid_vertex_joints = akb_skin_rigid_vertex_joints(out);

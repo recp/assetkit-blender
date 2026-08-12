@@ -319,6 +319,7 @@ def main() -> int:
                 [
                     f"-DASSETKIT_ROOT={assetkit_root}",
                     f"-DASSETKIT_BUILD_DIR={assetkit_build_dir}",
+                    f"-DASSETKIT_BLENDER_PACKAGE_DIR={PACKAGE_DIR}",
                     f"-DASSETKIT_BLENDER_STATIC_ASSETKIT={'ON' if static_assetkit else 'OFF'}",
                     f"-DPython3_EXECUTABLE={python}",
                     *([f"-DPython3_INCLUDE_DIR={python_include}"] if python_include else []),

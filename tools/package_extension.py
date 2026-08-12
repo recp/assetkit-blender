@@ -165,7 +165,7 @@ def is_core_runtime(path: Path, platform_tag: str) -> bool:
         return bool(re.fullmatch(r"libassetkit(?:\.\d+(?:\.\d+)*)?\.dylib", name))
     if platform_tag.startswith("linux"):
         return name == "libassetkit.so" or bool(re.fullmatch(r"libassetkit\.so(?:\.\d+)*", name))
-    return name in {"assetkit.dll", "libassetkit.dll"}
+    return name.casefold() in {"assetkit.dll", "libassetkit.dll"}
 
 
 def core_runtime_files(root: Path, platform_tag: str) -> list[Path]:
@@ -312,15 +312,108 @@ def zip_write_file_recorded(
     records.append((arcname, wheel_hash(data), len(data)))
 
 
-def native_support_files() -> list[Path]:
+def native_support_files(platform_tag: str) -> list[Path]:
     files: list[Path] = []
     for pattern in NATIVE_ARTIFACT_PATTERNS:
         files.extend(
             path
             for path in PACKAGE_DIR.glob(pattern)
-            if path.is_file() and not path.name.startswith("_assetkit_blender")
+            if (
+                path.is_file()
+                and not path.name.startswith("_assetkit_blender")
+                and not is_core_runtime(path, platform_tag)
+            )
         )
     return sorted(set(files))
+
+
+def native_module_core_dependency(module_path: Path, platform_tag: str) -> str | None:
+    data = module_path.read_bytes()
+    if platform_tag.startswith("macos"):
+        pattern = rb"(?:@rpath/)?(libassetkit(?:\.\d+(?:\.\d+)*)?\.dylib)\x00"
+    elif platform_tag.startswith("linux"):
+        pattern = rb"(libassetkit\.so(?:\.\d+)*)\x00"
+    else:
+        pattern = rb"(?i)(?<![A-Za-z0-9_])((?:lib)?assetkit\.dll)\x00"
+
+    match = re.search(pattern, data)
+    return match.group(1).decode("ascii") if match else None
+
+
+def packaged_core_runtime(
+    platform_tag: str,
+    dependency_name: str,
+) -> Path | None:
+    runtimes = core_runtime_files(PACKAGE_DIR, platform_tag)
+    if platform_tag.startswith("windows"):
+        matching = [
+            path
+            for path in runtimes
+            if path.name.casefold() == dependency_name.casefold()
+        ]
+        if matching:
+            return matching[0]
+        return runtimes[0] if len(runtimes) == 1 else None
+
+    versioned = [
+        path for path in runtimes if re.search(r"\d", path.name)
+    ]
+    if not versioned:
+        return None
+    return max(
+        versioned,
+        key=lambda path: tuple(int(part) for part in re.findall(r"\d+", path.name)),
+    )
+
+
+def validate_native_wheel_core_runtime(
+    wheel_path: Path,
+    platform_tag: str,
+    dependency_name: str | None,
+) -> None:
+    with zipfile.ZipFile(wheel_path) as zf:
+        names = [
+            name
+            for name in zf.namelist()
+            if "/" not in name and is_core_runtime(Path(name), platform_tag)
+        ]
+        if dependency_name is None:
+            if names:
+                raise SystemExit(
+                    f"Static native wheel unexpectedly contains AssetKit runtimes: "
+                    f"{sorted(names)}"
+                )
+            return
+        if not names:
+            raise SystemExit(f"Native wheel has no AssetKit runtime: {wheel_path}")
+
+        real_name = max(
+            names,
+            key=lambda name: tuple(int(part) for part in re.findall(r"\d+", name)),
+        )
+        expected = set(runtime_alias_names(real_name, platform_tag))
+        if set(names) != expected:
+            raise SystemExit(
+                f"Native wheel has inconsistent AssetKit runtime aliases: "
+                f"expected {sorted(expected)}, got {sorted(names)}"
+            )
+        dependency_present = (
+            any(name.casefold() == dependency_name.casefold() for name in names)
+            if platform_tag.startswith("windows")
+            else dependency_name in names
+        )
+        if not dependency_present:
+            raise SystemExit(
+                f"Native wheel does not contain required runtime "
+                f"{dependency_name}: {wheel_path}"
+            )
+
+        hashes = {hashlib.sha256(zf.read(name)).digest() for name in names}
+        if len(hashes) != 1:
+            raise SystemExit(
+                f"Native wheel AssetKit runtime aliases do not contain the same binary: "
+                f"{wheel_path}"
+            )
 
 
 def build_native_wheel(
@@ -338,10 +431,27 @@ def build_native_wheel(
     wheel_path = wheel_dir / wheel_name
     wheel_dir.mkdir(parents=True, exist_ok=True)
 
+    dependency_name = native_module_core_dependency(module_path, platform_tag)
+    core_runtime = (
+        packaged_core_runtime(platform_tag, dependency_name)
+        if dependency_name
+        else None
+    )
+    if dependency_name and not core_runtime:
+        raise SystemExit(
+            f"Native module requires {dependency_name}, but no matching AssetKit "
+            "runtime was built into the package directory"
+        )
+    if core_runtime and core_runtime.is_symlink():
+        core_runtime = core_runtime.resolve()
+
     records: list[tuple[str, str, int]] = []
     with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zip_write_file_recorded(zf, records, module_path)
-        for support_file in native_support_files():
+        if core_runtime:
+            for alias in runtime_alias_names(core_runtime.name, platform_tag):
+                zip_write_file_recorded(zf, records, core_runtime, alias)
+        for support_file in native_support_files(platform_tag):
             zip_write_file_recorded(zf, records, support_file)
 
         metadata = (
@@ -366,6 +476,11 @@ def build_native_wheel(
         record_lines.append(f"{record_name},,")
         zf.writestr(record_name, "\n".join(record_lines).encode("utf-8"))
 
+    validate_native_wheel_core_runtime(
+        wheel_path,
+        platform_tag,
+        dependency_name,
+    )
     return wheel_path
 
 
