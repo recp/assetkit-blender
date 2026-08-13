@@ -3416,6 +3416,47 @@ akb_node_has_rotate(AkNode *node) {
   return 0;
 }
 
+static int
+akb_animation_index_has_target(const AkbAnimationIndex *index,
+                               const void *target) {
+  size_t i;
+
+  if (!index || !target)
+    return 0;
+  if (index->target_buckets)
+    return akb_animation_index_target_item(index, target, SIZE_MAX) != SIZE_MAX;
+
+  for (i = 0; i < index->count; i++)
+    if (index->items[i].resolved.target == target)
+      return 1;
+
+  return 0;
+}
+
+static int
+akb_node_has_animated_transform_type(const AkbAnimationIndex *index,
+                                     AkNode *node,
+                                     AkTypeId type) {
+  AkObject *object;
+
+  if (!index || !node || !node->transform)
+    return 0;
+
+  for (object = node->transform->base; object; object = object->next) {
+    if ((AkTypeId)object->type == type
+        && akb_animation_index_has_target(index, object))
+      return 1;
+  }
+
+  for (object = node->transform->item; object; object = object->next) {
+    if ((AkTypeId)object->type == type
+        && akb_animation_index_has_target(index, object))
+      return 1;
+  }
+
+  return 0;
+}
+
 static void
 akb_baked_matrix_to_trs(const float m[16],
                         float *translation,
@@ -3821,7 +3862,12 @@ akb_animation_new(AkDoc *doc,
   is_collada = doc
                && doc->inf
                && doc->inf->ftype == AK_FILE_TYPE_COLLADA;
-  needs_bake = ak_nodeNeedsBaking(node) || (!is_gltf && akb_node_has_rotate(node));
+  needs_bake = ak_nodeNeedsBaking(node)
+               || (!is_gltf && akb_node_has_rotate(node))
+               || (is_collada
+                   && akb_node_has_animated_transform_type(index,
+                                                           node,
+                                                           AKT_MATRIX));
 
   if (needs_bake) {
     if (is_collada)
