@@ -98,10 +98,10 @@ INSTANCE_SKELETON_FIXTURE = f"""<?xml version="1.0" encoding="utf-8"?>
   <library_controllers>{_controller_xml("skinShared", "joint", IDENTITY)}</library_controllers>
   <library_visual_scenes><visual_scene id="Scene">
     <node id="rigA" name="rigA"><translate sid="translation">0 0 0</translate>
-      <node id="jointA" sid="joint" name="jointA" type="JOINT"><matrix>{IDENTITY}</matrix></node>
+      <node id="jointA" sid="joint" name="sharedJoint" type="JOINT"><matrix>{IDENTITY}</matrix></node>
     </node>
     <node id="rigB" name="rigB"><translate sid="translation">100 0 0</translate>
-      <node id="jointB" sid="joint" name="jointB" type="JOINT"><matrix>{IDENTITY}</matrix></node>
+      <node id="jointB" sid="joint" name="sharedJoint" type="JOINT"><matrix>{IDENTITY}</matrix></node>
     </node>
     <node id="meshA" name="meshA"><matrix>{IDENTITY}</matrix><instance_controller url="#skinShared"><skeleton>#rigA</skeleton></instance_controller></node>
     <node id="meshB" name="meshB"><matrix>{IDENTITY}</matrix><instance_controller url="#skinShared"><skeleton>#rigB</skeleton></instance_controller></node>
@@ -134,13 +134,22 @@ def _assert_instance_skeleton_roots(path: Path, options: object) -> None:
         for primitive in loaded.meshes
         if int(primitive.skin_root_node_index) >= 0
     }
-    joint_palettes = {
-        tuple(loaded.nodes[index].name for index in _i32_values(primitive.skin_joint_nodes_i32))
+    joint_palette_indices = {
+        tuple(_i32_values(primitive.skin_joint_nodes_i32))
         for primitive in loaded.meshes
     }
-    if roots != {"rigA", "rigB"} or joint_palettes != {("jointA",), ("jointB",)}:
+    joint_palettes = {
+        tuple(loaded.nodes[index].name for index in indices)
+        for indices in joint_palette_indices
+    }
+    if (
+        roots != {"rigA", "rigB"}
+        or len(joint_palette_indices) != 2
+        or joint_palettes != {("sharedJoint",)}
+    ):
         raise AssertionError(
-            f"instance_controller skeleton override was shared: roots={roots}, joints={joint_palettes}"
+            "instance_controller skeleton override was shared: "
+            f"roots={roots}, joint_indices={joint_palette_indices}, joints={joint_palettes}"
         )
 
     objects = import_assetkit_file(
@@ -168,6 +177,25 @@ def _assert_instance_skeleton_roots(path: Path, options: object) -> None:
     root_x = sorted(round(float(armature.matrix_world.translation.x), 5) for armature in armatures)
     if root_x != [0.0, 100.0]:
         raise AssertionError(f"armatures used the wrong instance roots: {root_x}")
+    expected_names = {
+        f"sharedJoint [AssetKit {indices[0]}]"
+        for indices in joint_palette_indices
+    }
+    group_names = {
+        group.name
+        for mesh in meshes
+        for group in mesh.vertex_groups
+    }
+    bone_names = {
+        bone.name
+        for armature in armatures
+        for bone in armature.data.bones
+    }
+    if group_names != expected_names or bone_names != expected_names:
+        raise AssertionError(
+            "duplicate authored joint names were not mapped deterministically: "
+            f"expected={expected_names}, groups={group_names}, bones={bone_names}"
+        )
 
 
 def main() -> None:
@@ -239,12 +267,25 @@ def main() -> None:
             raise AssertionError(
                 f"shared controller or distinct palette was lost: {group_counts}"
             )
+        if set(group_counts) != {"jointA", "jointB"}:
+            raise AssertionError(
+                f"authored joint names were not preserved: {set(group_counts)}"
+            )
         if len({armature.as_pointer() for armature in armatures}) != 1:
             raise AssertionError("skins with the same skeleton root did not share an armature")
         bone_names = {bone.name for bone in armatures[0].data.bones}
         if bone_names != set(group_counts):
             raise AssertionError(
                 f"armature palette mismatch: bones={bone_names}, groups={set(group_counts)}"
+            )
+        bone_lengths = [float(bone.length) for bone in armatures[0].data.bones]
+        if (
+            not bone_lengths
+            or max(bone_lengths) > 0.050001
+            or max(bone_lengths) - min(bone_lengths) > 1.0e-6
+        ):
+            raise AssertionError(
+                f"rig display bone lengths were not uniformly bounded: {bone_lengths}"
             )
 
         bpy.context.scene.frame_set(0)

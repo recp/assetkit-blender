@@ -109,7 +109,17 @@ def _apply_skin(
 
     width = max(1, int(data.skin_joint_width or 4))
     vertex_count = min(data.skin_vertex_count, len(obj.data.vertices))
-    joint_names = _create_skin_vertex_groups(obj, data, joints, weights, vertex_count, width, joint_nodes, node_objects)
+    joint_names = _create_skin_vertex_groups(
+        obj,
+        data,
+        joints,
+        weights,
+        vertex_count,
+        width,
+        joint_nodes,
+        node_objects,
+        node_data,
+    )
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"vertex_groups={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -292,14 +302,49 @@ def _skin_joint_name(
     joint_index: int,
     joint_nodes: memoryview,
     node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+    source_name_counts: dict[str, int],
 ) -> str:
     node_index = int(joint_nodes[joint_index]) if joint_index < len(joint_nodes) else -1
+    if node_index >= 0:
+        return _skin_node_name(
+            node_index,
+            node_objects,
+            node_data,
+            source_name_counts,
+            "AssetKit Joint",
+        )
+    return f"AssetKit Joint {joint_index}"
+
+
+def _skin_source_name_counts(
+    node_data: dict[int, SceneNodeData],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for node in node_data.values():
+        name = str(node.name or "")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _skin_node_name(
+    node_index: int,
+    node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
+    source_name_counts: dict[str, int],
+    fallback_prefix: str,
+) -> str:
+    source_node = node_data.get(node_index)
+    source_name = str(source_node.name or "") if source_node else ""
+    if source_name:
+        if source_name_counts.get(source_name, 0) > 1:
+            return f"{source_name} [AssetKit {node_index}]"
+        return source_name
     node = node_objects.get(node_index)
     if node:
         return node.name
-    if node_index >= 0:
-        return f"AssetKit Joint {node_index}"
-    return f"AssetKit Joint {joint_index}"
+    return f"{fallback_prefix} {node_index}"
 
 
 def _create_skin_vertex_groups(
@@ -311,13 +356,23 @@ def _create_skin_vertex_groups(
     width: int,
     joint_nodes: memoryview,
     node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
 ) -> list[str]:
     profile_detail = _profile_state.stats is not None
     total_started_at = time.perf_counter() if profile_detail else 0.0
     phase_started_at = total_started_at
     groups = []
+    source_name_counts = _skin_source_name_counts(node_data)
     for joint_index in range(data.skin_joint_count):
-        group = obj.vertex_groups.new(name=_skin_joint_name(joint_index, joint_nodes, node_objects))
+        group = obj.vertex_groups.new(
+            name=_skin_joint_name(
+                joint_index,
+                joint_nodes,
+                node_objects,
+                node_data,
+                source_name_counts,
+            )
+        )
         groups.append(group)
     if profile_detail:
         now = time.perf_counter()
@@ -456,7 +511,13 @@ def _create_skin_armature(
         for index in range(min(len(joint_nodes), len(joint_names)))
         if int(joint_nodes[index]) >= 0
     }
-    bone_names_by_node = _skin_bone_names_by_node(bone_node_indices, node_objects, node_to_joint, joint_names)
+    bone_names_by_node = _skin_bone_names_by_node(
+        bone_node_indices,
+        node_objects,
+        node_data,
+        node_to_joint,
+        joint_names,
+    )
     rest_matrices_by_node = _skin_rest_matrices_by_node(
         data,
         joint_nodes,
@@ -465,7 +526,7 @@ def _create_skin_armature(
         armature,
         bone_node_indices,
     )
-    bone_children_by_parent = _skin_bone_children_by_parent(bone_node_indices, node_data)
+    display_bone_length = _skin_display_bone_length(rest_matrices_by_node)
 
     for node_index in bone_node_indices:
         name = bone_names_by_node.get(node_index)
@@ -479,7 +540,7 @@ def _create_skin_armature(
         _set_bone_from_rest_matrix(
             bone,
             matrix,
-            _skin_bone_length(node_index, bone_children_by_parent, rest_matrices_by_node),
+            display_bone_length,
         )
     create_bones_ms = lap_ms()
     for node_index, name in bone_names_by_node.items():
@@ -670,17 +731,24 @@ def _parent_skinned_mesh_to_armature(
 def _skin_bone_names_by_node(
     bone_node_indices: list[int],
     node_objects: dict[int, bpy.types.Object],
+    node_data: dict[int, SceneNodeData],
     node_to_joint: dict[int, int],
     joint_names: list[str],
 ) -> dict[int, str]:
     names: dict[int, str] = {}
+    source_name_counts = _skin_source_name_counts(node_data)
     for node_index in bone_node_indices:
         joint_index = node_to_joint.get(node_index)
         if joint_index is not None and joint_index < len(joint_names):
             names[node_index] = joint_names[joint_index]
             continue
-        node = node_objects.get(node_index)
-        names[node_index] = node.name if node else f"AssetKit Bone {node_index}"
+        names[node_index] = _skin_node_name(
+            node_index,
+            node_objects,
+            node_data,
+            source_name_counts,
+            "AssetKit Bone",
+        )
     return names
 
 
@@ -763,34 +831,18 @@ def _node_rest_matrix(
     return armature.matrix_world.inverted_safe() @ node.matrix_world
 
 
-def _skin_bone_length(
-    node_index: int,
-    bone_children_by_parent: dict[int, list[int]],
+def _skin_display_bone_length(
     rest_matrices_by_node: dict[int, Matrix],
 ) -> float:
-    matrix = rest_matrices_by_node.get(node_index)
-    if matrix is None:
+    heads = [matrix.to_translation() for matrix in rest_matrices_by_node.values()]
+    if len(heads) < 2:
         return 0.05
-    head = matrix.to_translation()
-    for child_index in bone_children_by_parent.get(node_index, ()):
-        child_matrix = rest_matrices_by_node.get(child_index)
-        if child_matrix:
-            length = (child_matrix.to_translation() - head).length
-            if length > 1.0e-5:
-                return length
-    return 0.05
-
-
-def _skin_bone_children_by_parent(
-    bone_node_indices: list[int],
-    node_data: dict[int, SceneNodeData],
-) -> dict[int, list[int]]:
-    children_by_parent: dict[int, list[int]] = {}
-    for child_index in bone_node_indices:
-        child = node_data.get(child_index)
-        if child:
-            children_by_parent.setdefault(child.parent_index, []).append(child_index)
-    return children_by_parent
+    lower = Vector(tuple(min(head[axis] for head in heads) for axis in range(3)))
+    upper = Vector(tuple(max(head[axis] for head in heads) for axis in range(3)))
+    rig_diagonal = (upper - lower).length
+    if not math.isfinite(rig_diagonal) or rig_diagonal <= 1.0e-5:
+        return 0.05
+    return min(0.05, max(0.004, rig_diagonal * 0.025))
 
 
 def _set_bone_from_rest_matrix(

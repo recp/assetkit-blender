@@ -29,8 +29,7 @@ from ..skin import (
     _match_skin_armature_space,
     _parent_skinned_mesh_to_armature,
     _set_bone_from_rest_matrix,
-    _skin_bone_children_by_parent,
-    _skin_bone_length,
+    _skin_display_bone_length,
     _skin_bone_names_by_node,
     _skin_bone_node_indices,
     _skin_rest_matrices_from_assetkit_nodes,
@@ -781,7 +780,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
         deform_node_indices = record["deform_node_indices"]
         rest_matrices_by_node = record["rest_matrices_by_node"]
         node_data = record["node_data"]
-        bone_children_by_parent = _skin_bone_children_by_parent(bone_node_indices, node_data)
+        display_bone_length = _skin_display_bone_length(rest_matrices_by_node)
         for node_index in bone_node_indices:
             name = bone_names_by_node.get(node_index)
             if not name:
@@ -792,7 +791,7 @@ def _create_bind_pose_skin_armature_groups(groups: list[list[tuple]]) -> int:
             _set_bone_from_rest_matrix(
                 bone,
                 matrix,
-                _skin_bone_length(node_index, bone_children_by_parent, rest_matrices_by_node),
+                display_bone_length,
             )
             total_bones += 1
     create_bones_ms = lap_ms()
@@ -940,6 +939,7 @@ def _bind_pose_group_bone_names(items: list[tuple]) -> dict[int, str]:
         item_names = _skin_bone_names_by_node(
             _skin_bone_node_indices(data, joint_nodes, node_data),
             node_objects,
+            node_data,
             node_to_joint,
             joint_names,
         )
