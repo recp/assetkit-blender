@@ -150,6 +150,13 @@ jobs:
           "$BLENDER_BIN" --background --factory-startup --python-exit-code 1 \
             --python tools/blender_dae_matrix_animation_check.py
 
+      - name: Check COLLADA light attenuation
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: |
+          "$BLENDER_BIN" --background --factory-startup --python-exit-code 1 \
+            --python tools/blender_dae_light_check.py
+
       - name: Check mesh data reuse
         if: matrix.platform == 'linux-x64'
         shell: bash

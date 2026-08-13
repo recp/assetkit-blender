@@ -256,9 +256,14 @@ class SceneNodeData:
     light_type: int = 0
     light_name: str = ""
     light_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    light_values: tuple[float, float, float, float, float] = (
+    light_values: tuple[float, ...] = (
         0.0,
         0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0,
+        1.0,
         0.0,
         0.0,
         0.0,

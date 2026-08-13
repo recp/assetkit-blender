@@ -37,57 +37,19 @@ akb_extract_node_camera(AkbSceneNode *out, AkNode *node) {
   }
 }
 
-static float
-akb_matrix_axis_len(const float matrix[16], int offset) {
-  float x;
-  float y;
-  float z;
-
-  x = matrix[offset];
-  y = matrix[offset + 1];
-  z = matrix[offset + 2];
-  return sqrtf(x * x + y * y + z * z);
-}
-
-static float
-akb_node_light_preview_energy(const AkDoc *doc,
-                              const AkbSceneNode *node,
-                              const AkResolvedLight *light) {
-  float energy;
-  float scale;
-  float preview_scale;
-
-  energy = light->intensity;
-  if (!doc || !doc->inf || doc->inf->ftype != AK_FILE_TYPE_COLLADA)
-    return energy;
-  if (light->attenuationFalloffExponent > 0.001f || light->range > 0.001f)
-    return energy;
-
-  scale = (akb_matrix_axis_len(node->matrix, 0)
-           + akb_matrix_axis_len(node->matrix, 4)
-           + akb_matrix_axis_len(node->matrix, 8)) / 3.0f;
-  if (!isfinite(scale) || scale <= 1.0f)
-    return energy;
-  if (scale > 64.0f)
-    scale = 64.0f;
-
-  preview_scale = 1.0f + (sqrtf(scale) - 1.0f) * 2.0f;
-  if (preview_scale > 16.0f)
-    preview_scale = 16.0f;
-
-  return energy * preview_scale;
-}
-
 static void
 akb_extract_node_light(AkbSceneNode *out, AkDoc *doc, AkNode *node) {
   AkLight *light;
   AkResolvedLight resolved;
+  AkResolvedLight authored;
 
   if (!out || !node || !node->light)
     return;
 
   light = (AkLight *)ak_instanceObject(node->light);
   if (!ak_lightResolve(doc, light, AK_LIGHT_RESOLVE_PREVIEW, &resolved))
+    return;
+  if (!ak_lightResolve(doc, light, AK_LIGHT_RESOLVE_RAW, &authored))
     return;
 
   out->light_extra = ak_extra(light);
@@ -96,8 +58,13 @@ akb_extract_node_light(AkbSceneNode *out, AkDoc *doc, AkNode *node) {
   out->light_color[0] = resolved.color.rgba.R;
   out->light_color[1] = resolved.color.rgba.G;
   out->light_color[2] = resolved.color.rgba.B;
-  out->light_values[0] = akb_node_light_preview_energy(doc, out, &resolved);
+  out->light_values[0] = resolved.intensity;
   out->light_values[1] = resolved.range;
+  out->light_values[5] = resolved.attenuationFalloffExponent;
+  out->light_values[6] = authored.attenuation.constant;
+  out->light_values[7] = authored.attenuation.linear;
+  out->light_values[8] = authored.attenuation.quadratic;
+  out->light_values[9] = authored.intensity;
 
   if (resolved.type == AK_LIGHT_TYPE_SPOT) {
     out->light_values[2] = resolved.innerConeAngle;

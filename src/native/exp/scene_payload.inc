@@ -548,6 +548,9 @@ akb_export_add_light_object_to_node(AkDoc       *doc,
   double     inner;
   double     outer;
   double     falloff;
+  double     attenuation_constant;
+  double     attenuation_linear;
+  double     attenuation_quadratic;
   PyObject  *extra_obj;
   Py_ssize_t payload_size;
 
@@ -556,8 +559,26 @@ akb_export_add_light_object_to_node(AkDoc       *doc,
 
   memset(&color_view, 0, sizeof(color_view));
   extra_obj = Py_None;
+  attenuation_constant  = 1.0;
+  attenuation_linear    = 0.0;
+  attenuation_quadratic = 0.0;
   payload_size = PyTuple_Check(payload_obj) ? PyTuple_Size(payload_obj) : -1;
-  if (payload_size == 8) {
+  if (payload_size == 11) {
+    if (!PyArg_ParseTuple(payload_obj,
+                          "iOdddddOddd",
+                          &light_type,
+                          &color_obj,
+                          &intensity,
+                          &range,
+                          &inner,
+                          &outer,
+                          &falloff,
+                          &extra_obj,
+                          &attenuation_constant,
+                          &attenuation_linear,
+                          &attenuation_quadratic))
+      return 0;
+  } else if (payload_size == 8) {
     if (!PyArg_ParseTuple(payload_obj,
                           "iOdddddO",
                           &light_type,
@@ -581,7 +602,7 @@ akb_export_add_light_object_to_node(AkDoc       *doc,
                           &falloff))
       return 0;
   } else {
-    PyErr_SetString(PyExc_ValueError, "light payload must have seven or eight fields");
+    PyErr_SetString(PyExc_ValueError, "light payload must have seven, eight, or eleven fields");
     return 0;
   }
 
@@ -615,9 +636,19 @@ akb_export_add_light_object_to_node(AkDoc       *doc,
       AkSpotLight *spot;
 
       spot = (AkSpotLight *)light->data;
+      spot->attenuation.constant = (float)attenuation_constant;
+      spot->attenuation.linear = (float)attenuation_linear;
+      spot->attenuation.quadratic = (float)attenuation_quadratic;
       spot->innerConeAngle = (float)inner;
       spot->outerConeAngle = (float)outer;
       spot->coneFalloffExponent = (float)falloff;
+    } else if (light->data->type == AK_LIGHT_TYPE_POINT) {
+      AkPointLight *point;
+
+      point = (AkPointLight *)light->data;
+      point->attenuation.constant = (float)attenuation_constant;
+      point->attenuation.linear = (float)attenuation_linear;
+      point->attenuation.quadratic = (float)attenuation_quadratic;
     }
   }
 

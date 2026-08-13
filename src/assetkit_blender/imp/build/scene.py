@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from array import array
+import math
 import time
 
 import bpy
@@ -1152,8 +1153,110 @@ def _configure_light(light: bpy.types.Light, node: SceneNodeData) -> None:
         light.cutoff_distance = values[1]
     if light.type == "SPOT" and values[3] > 0.0:
         light.spot_size = values[3] * 2.0
-        if values[2] > 0.0 and values[3] > values[2]:
+        if values[2] >= 0.0 and values[3] > values[2]:
             light.spot_blend = max(0.0, min(1.0, 1.0 - values[2] / values[3]))
+    if len(values) < 10:
+        return
+
+    falloff_exponent = float(values[5])
+    light["assetkit_light_attenuation_falloff_exponent"] = falloff_exponent
+    light["assetkit_light_attenuation_constant"] = float(values[6])
+    light["assetkit_light_attenuation_linear"] = float(values[7])
+    light["assetkit_light_attenuation_quadratic"] = float(values[8])
+    light["assetkit_light_source_intensity"] = float(values[9])
+    light["assetkit_light_preview_intensity"] = float(values[0])
+    if light.type == "SPOT":
+        light["assetkit_light_cone_falloff_exponent"] = float(values[4])
+    _configure_light_falloff(
+        light,
+        float(values[6]),
+        float(values[7]),
+        float(values[8]),
+    )
+
+
+def _configure_light_falloff(
+    light: bpy.types.Light,
+    constant: float,
+    linear: float,
+    quadratic: float,
+) -> None:
+    """Preserve authored DAE attenuation in the Cycles light shader.
+
+    Blender's viewport and Eevee do not evaluate light shader nodes; they keep
+    using ``light.energy`` as a stable preview approximation.  Cycles evaluates
+    this graph exactly as ``1 / (c + l*d + q*d^2)``.
+    """
+    coefficients = (constant, linear, quadratic)
+    if light.type not in {"POINT", "SPOT"} or not all(
+        math.isfinite(value) and value >= 0.0 for value in coefficients
+    ):
+        return
+    if math.isclose(constant, 0.0, abs_tol=1.0e-9) and math.isclose(
+        linear, 0.0, abs_tol=1.0e-9
+    ) and math.isclose(quadratic, 1.0, rel_tol=1.0e-6, abs_tol=1.0e-9):
+        # Blender's native point/spot falloff is the glTF inverse-square case.
+        return
+    if not hasattr(light, "use_nodes") or not any(value > 0.0 for value in coefficients):
+        return
+
+    light.use_nodes = True
+    tree = light.node_tree
+    if tree is None:
+        return
+    emission = next((item for item in tree.nodes if item.type == "EMISSION"), None)
+    if emission is None:
+        return
+    falloff = tree.nodes.get("AssetKit Light Falloff")
+    if falloff is None or falloff.type != "LIGHT_FALLOFF":
+        falloff = tree.nodes.new("ShaderNodeLightFalloff")
+        falloff.name = "AssetKit Light Falloff"
+        falloff.label = "AssetKit Authored Falloff"
+
+    active = [("Constant", constant), ("Linear", linear), ("Quadratic", quadratic)]
+    active = [(name, value) for name, value in active if value > 0.0]
+    if len(active) == 1:
+        name, coefficient = active[0]
+        falloff.inputs["Strength"].default_value = 1.0 / coefficient
+        tree.links.new(falloff.outputs[name], emission.inputs["Strength"])
+        return
+
+    falloff.inputs["Strength"].default_value = 1.0
+    terms = []
+    if constant > 0.0:
+        constant_node = tree.nodes.new("ShaderNodeValue")
+        constant_node.name = "AssetKit Attenuation Constant"
+        constant_node.label = "Constant Coefficient"
+        constant_node.outputs[0].default_value = constant
+        terms.append(constant_node.outputs[0])
+    for name, coefficient in (("Linear", linear), ("Quadratic", quadratic)):
+        if coefficient <= 0.0:
+            continue
+        term = tree.nodes.new("ShaderNodeMath")
+        term.name = f"AssetKit Attenuation {name} Term"
+        term.label = f"{name} Coefficient"
+        term.operation = "DIVIDE"
+        term.inputs[0].default_value = coefficient
+        tree.links.new(falloff.outputs[name], term.inputs[1])
+        terms.append(term.outputs[0])
+
+    denominator = terms[0]
+    for index, term in enumerate(terms[1:], start=1):
+        add = tree.nodes.new("ShaderNodeMath")
+        add.name = f"AssetKit Attenuation Sum {index}"
+        add.label = "Attenuation Denominator"
+        add.operation = "ADD"
+        tree.links.new(denominator, add.inputs[0])
+        tree.links.new(term, add.inputs[1])
+        denominator = add.outputs[0]
+
+    reciprocal = tree.nodes.new("ShaderNodeMath")
+    reciprocal.name = "AssetKit Attenuation Reciprocal"
+    reciprocal.label = "1 / (c + l·d + q·d²)"
+    reciprocal.operation = "DIVIDE"
+    reciprocal.inputs[0].default_value = 1.0
+    tree.links.new(denominator, reciprocal.inputs[1])
+    tree.links.new(reciprocal.outputs[0], emission.inputs["Strength"])
 
 
 def _create_coord_root(

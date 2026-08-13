@@ -539,7 +539,7 @@ typedef struct AkbSceneNode {
   float    world_matrix[16];
   float    camera_values[6];
   float    light_color[3];
-  float    light_values[5];
+  float    light_values[10];
   int32_t  parent_index;
   int32_t  prototype_root_index;
   int32_t  instance_target_index;

@@ -1623,12 +1623,17 @@ akb_scene_node_to_py(AkbSceneNode *node, PyObject *owner) {
                    : akb_none());
   AKB_NODE_SET_OBJ(AKB_PY_NODE_LIGHT_VALUES,
                    node->light_type
-                   ? Py_BuildValue("(fffff)",
+                   ? Py_BuildValue("(ffffffffff)",
                                    node->light_values[0],
                                    node->light_values[1],
                                    node->light_values[2],
                                    node->light_values[3],
-                                   node->light_values[4])
+                                   node->light_values[4],
+                                   node->light_values[5],
+                                   node->light_values[6],
+                                   node->light_values[7],
+                                   node->light_values[8],
+                                   node->light_values[9])
                    : akb_none());
   AKB_NODE_SET_OBJ(AKB_PY_NODE_MATRIX_F32,
                    akb_memoryview_or_empty(node->matrix,

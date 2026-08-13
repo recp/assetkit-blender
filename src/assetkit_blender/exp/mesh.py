@@ -529,6 +529,22 @@ def _light_payload(obj: bpy.types.Object) -> tuple | None:
 
     color = array("f", (float(light.color[0]), float(light.color[1]), float(light.color[2])))
     intensity = float(light.energy)
+    source_intensity = light.get("assetkit_light_source_intensity")
+    preview_intensity = light.get("assetkit_light_preview_intensity")
+    if source_intensity is not None and preview_intensity is not None:
+        try:
+            source_value = float(source_intensity)
+            preview_value = float(preview_intensity)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if math.isfinite(source_value) and math.isclose(
+                intensity,
+                preview_value,
+                rel_tol=1.0e-6,
+                abs_tol=1.0e-6,
+            ):
+                intensity = source_value
     light_range = float(light.cutoff_distance) if getattr(light, "use_custom_distance", False) else 0.0
     inner = 0.0
     outer = 0.0
@@ -537,6 +553,7 @@ def _light_payload(obj: bpy.types.Object) -> tuple | None:
     if light.type == "SPOT":
         outer = float(light.spot_size) * 0.5
         inner = outer - outer * float(light.spot_blend)
+        falloff = float(light.get("assetkit_light_cone_falloff_exponent", 1.0))
 
     payload = (
         light_type,
@@ -547,6 +564,9 @@ def _light_payload(obj: bpy.types.Object) -> tuple | None:
         outer,
         falloff,
         _assetkit_json_prop(light, "assetkit_light_extra_json"),
+        float(light.get("assetkit_light_attenuation_constant", 1.0)),
+        float(light.get("assetkit_light_attenuation_linear", 0.0)),
+        float(light.get("assetkit_light_attenuation_quadratic", 0.0)),
     )
     return payload
 
