@@ -136,7 +136,7 @@ def assert_lights() -> None:
         assert_close(light["assetkit_light_source_intensity"], 1.0, f"{color} source intensity")
 
     constant = lights[(1.0, 0.0, 0.0)]
-    assert_close(math.degrees(constant.spot_size), 80.0, "COLLADA half-angle to Blender full cone")
+    assert_close(math.degrees(constant.spot_size), 40.0, "COLLADA full cone angle")
     assert_close(constant.spot_blend, 1.0, "zero inner cone maps to a fully soft Blender spot")
     assert_close(constant["assetkit_light_cone_falloff_exponent"], 3.0, "spot cone exponent")
     falloff = constant.node_tree.nodes.get("AssetKit Light Falloff") if constant.node_tree else None
