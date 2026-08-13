@@ -114,6 +114,23 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         ),
         default="AUTO",
     )
+    hierarchy_mode: bpy.props.EnumProperty(
+        name="Scene Hierarchy",
+        description="How source scene nodes are represented in Blender",
+        items=(
+            (
+                "FULL",
+                "Full Source Hierarchy",
+                "Create Blender objects for all source nodes so the authored hierarchy is available in the Outliner",
+            ),
+            (
+                "COMPACT",
+                "Compact Instances",
+                "Batch repeated static instances to reduce Blender object and dependency graph overhead",
+            ),
+        ),
+        default="FULL",
+    )
     progressive_batch_size: bpy.props.IntProperty(
         name="Batch Size",
         description="Maximum mesh groups to create per progressive UI step",
@@ -217,6 +234,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                     set_viewport_shading=self.set_viewport_shading,
                     clean_viewport_overlays=self.clean_viewport_overlays,
                     fit_timeline=self.fit_timeline,
+                    preserve_hierarchy=self.hierarchy_mode == "FULL",
                 )
                 self.report({"INFO"}, "AssetKit import scheduled")
                 return {"FINISHED"}
@@ -236,6 +254,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 set_viewport_shading=self.set_viewport_shading,
                 clean_viewport_overlays=self.clean_viewport_overlays,
                 fit_timeline=self.fit_timeline,
+                preserve_hierarchy=self.hierarchy_mode == "FULL",
             )
             self.report({"INFO"}, "AssetKit progressive import scheduled")
             return {"FINISHED"}
@@ -255,6 +274,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 set_viewport_shading=self.set_viewport_shading,
                 clean_viewport_overlays=self.clean_viewport_overlays,
                 fit_timeline=self.fit_timeline,
+                preserve_hierarchy=self.hierarchy_mode == "FULL",
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
@@ -298,6 +318,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         load_box.label(text="Loading")
         load_box.prop(self, "scene_index")
         load_box.prop(self, "build_mode")
+        load_box.prop(self, "hierarchy_mode")
         if self.build_mode != "BLOCKING":
             load_box.prop(self, "progressive_batch_size")
         load_box.prop(self, "texture_loading")
@@ -350,6 +371,7 @@ def _schedule_progressive_import(
     set_viewport_shading: bool,
     clean_viewport_overlays: bool,
     fit_timeline: bool,
+    preserve_hierarchy: bool,
 ) -> None:
     _set_status("AssetKit import scheduled")
 
@@ -384,6 +406,7 @@ def _schedule_progressive_import(
             set_viewport_shading=set_viewport_shading,
             clean_viewport_overlays=clean_viewport_overlays,
             fit_timeline=fit_timeline,
+            preserve_hierarchy=preserve_hierarchy,
             on_complete=_finish,
             on_error=_fail,
         )
@@ -407,6 +430,7 @@ def _schedule_blocking_import(
     set_viewport_shading: bool,
     clean_viewport_overlays: bool,
     fit_timeline: bool,
+    preserve_hierarchy: bool,
 ) -> None:
     _set_status("AssetKit import scheduled")
 
@@ -429,6 +453,7 @@ def _schedule_blocking_import(
                 set_viewport_shading=set_viewport_shading,
                 clean_viewport_overlays=clean_viewport_overlays,
                 fit_timeline=fit_timeline,
+                preserve_hierarchy=preserve_hierarchy,
             )
         except (AssetKitError, OSError) as exc:
             _set_status(None)

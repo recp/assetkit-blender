@@ -117,6 +117,7 @@ def import_assetkit_file(
     set_viewport_shading: bool = True,
     clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
+    preserve_hierarchy: bool = False,
 ) -> list[bpy.types.Object]:
     shading_mode = str(shading_mode or "AUTO").upper()
     _reset_action_cache()
@@ -125,7 +126,11 @@ def import_assetkit_file(
 
     _animation.ACTIVE_SCOPE = _new_import_animation_scope(filepath)
 
-    load_options               = _compact_content_key_options(load_options)
+    load_options               = (
+        load_options
+        if preserve_hierarchy
+        else _compact_content_key_options(load_options)
+    )
     load_options               = _scene_bounds_options(
         load_options,
         focus_mode,
@@ -175,6 +180,7 @@ def import_assetkit_file(
         curves=curves,
         defer_custom_normals=defer_custom_normals,
         preserve_tangents=preserve_tangents,
+        create_all_nodes=preserve_hierarchy,
         defer_scene_nodes=(
             staging_collection is not None
             and _can_defer_scene_nodes(primitives, curves)
@@ -385,6 +391,7 @@ def import_assetkit_file_progressive(
     fit_timeline: bool = False,
     on_complete=None,
     on_error=None,
+    preserve_hierarchy: bool = False,
 ) -> object:
     job = _ProgressiveImportJob(
         filepath,
@@ -404,6 +411,7 @@ def import_assetkit_file_progressive(
         fit_timeline,
         on_complete,
         on_error,
+        preserve_hierarchy,
     )
     _ACTIVE_IMPORT_JOBS.append(job)
     job.start()
@@ -430,11 +438,16 @@ class _ProgressiveImportJob:
         fit_timeline: bool,
         on_complete,
         on_error,
+        preserve_hierarchy: bool,
     ) -> None:
         self.filepath                = filepath
         self.library_path            = library_path
         self.load_options            = _scene_bounds_options(
-            _compact_content_key_options(load_options),
+            (
+                load_options
+                if preserve_hierarchy
+                else _compact_content_key_options(load_options)
+            ),
             focus_mode,
             placement_mode,
             scene_was_empty,
@@ -451,6 +464,7 @@ class _ProgressiveImportJob:
         self.set_viewport_shading    = set_viewport_shading
         self.clean_viewport_overlays = clean_viewport_overlays
         self.fit_timeline            = fit_timeline
+        self.preserve_hierarchy      = preserve_hierarchy
         self.on_complete             = on_complete
         self.on_error                = on_error
 
@@ -647,6 +661,7 @@ class _ProgressiveImportJob:
             curves=curves,
             defer_custom_normals=self.defer_custom_normals,
             preserve_tangents=self.preserve_tangents,
+            create_all_nodes=self.preserve_hierarchy,
             defer_scene_nodes=(
                 len(primitives) >= _PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD
                 and _can_defer_scene_nodes(primitives, curves)

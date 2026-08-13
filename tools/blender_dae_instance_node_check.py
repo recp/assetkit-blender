@@ -28,6 +28,7 @@ from assetkit_blender.enums import AK_FILE_TYPE_DAE, AK_FILE_TYPE_GLTF  # noqa: 
 from assetkit_blender.exp.core import export_scene  # noqa: E402
 from assetkit_blender.importer import _object_bounds, import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
+from assetkit_blender.operators import ASSETKIT_OT_import_assetkit  # noqa: E402
 
 
 FIXTURE = """<?xml version="1.0" encoding="utf-8"?>
@@ -117,6 +118,18 @@ def _evaluated_mesh_bounds() -> tuple[int, list[float], list[float]]:
 
 
 def main() -> None:
+    bpy.utils.register_class(ASSETKIT_OT_import_assetkit)
+    try:
+        hierarchy_property = bpy.ops.assetkit.import_assetkit.get_rna_type().properties[
+            "hierarchy_mode"
+        ]
+        if hierarchy_property.default != "FULL":
+            raise AssertionError(
+                "interactive imports must preserve the full source hierarchy by default"
+            )
+    finally:
+        bpy.utils.unregister_class(ASSETKIT_OT_import_assetkit)
+
     bpy.ops.wm.read_factory_settings(use_empty=True)
     with tempfile.TemporaryDirectory(prefix="assetkit-dae-instance-node-") as temp_dir:
         path = Path(temp_dir) / "nested-instance-node.dae"
@@ -255,7 +268,54 @@ def main() -> None:
                 os.environ.pop("ASSETKIT_BLENDER_COMPACT_STATIC_INSTANCES", None)
             else:
                 os.environ["ASSETKIT_BLENDER_COMPACT_STATIC_INSTANCES"] = previous_mode
-    print("DAE compact instance_node check passed")
+
+    with tempfile.TemporaryDirectory(prefix="assetkit-dae-full-hierarchy-") as temp_dir:
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        path = Path(temp_dir) / "nested-instance-node.dae"
+        path.write_text(FIXTURE, encoding="utf-8")
+        import_assetkit_file(
+            str(path),
+            load_options=make_load_options(
+                coordinate_system="Z_UP",
+                coordinate_conversion="TRANSFORM",
+                texture_loading="DEFERRED",
+            ),
+            collection=bpy.context.collection,
+            focus_mode="NEVER",
+            placement_mode="AS_AUTHORED",
+            select_imported=False,
+            set_viewport_shading=False,
+            clean_viewport_overlays=False,
+            preserve_hierarchy=True,
+        )
+        bpy.context.view_layer.update()
+
+    if any(
+        obj.get("assetkit_compact_instance_batch")
+        for obj in bpy.data.objects
+    ):
+        raise AssertionError("full hierarchy import unexpectedly created a compact batch")
+    for name in ("Instance A", "Instance B"):
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.parent is None or obj.parent.name != "AssetKit Node":
+            raise AssertionError(f"missing authored hierarchy object {name}")
+        if not obj.get("assetkit_helper_hidden") or not obj.hide_viewport:
+            raise AssertionError(f"transform-only hierarchy object {name} is visible")
+    hierarchy_instances = [
+        obj
+        for obj in bpy.data.objects
+        if obj.get("assetkit_instance_node")
+    ]
+    if len(hierarchy_instances) != 3:
+        raise AssertionError(
+            f"expected 3 explicit hierarchy instances, got {len(hierarchy_instances)}"
+        )
+    count, minimum, maximum = _evaluated_mesh_bounds()
+    if count != 2:
+        raise AssertionError(f"expected 2 full-hierarchy mesh instances, got {count}")
+    _assert_close(minimum, [11.0, 12.0, 3.0], "full hierarchy minimum")
+    _assert_close(maximum, [22.0, 14.0, 3.0], "full hierarchy maximum")
+    print("DAE instance_node hierarchy check passed")
 
 
 if __name__ == "__main__":

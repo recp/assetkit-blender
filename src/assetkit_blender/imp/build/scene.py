@@ -88,6 +88,7 @@ def _create_scene_nodes(
     skip_animation_nodes: set[int] | None = None,
     required_indices: set[int] | None = None,
     has_visibility_animation: bool = False,
+    hide_helper_empties: bool = False,
 ) -> dict[int, bpy.types.Object]:
     objects: dict[int, bpy.types.Object] = {}
     skip_animation_nodes = skip_animation_nodes or set()
@@ -164,7 +165,13 @@ def _create_scene_nodes(
                 if profile_detail:
                     visibility_anim_ms += (time.perf_counter() - vis_started_at) * 1000.0
         if obj.type == "EMPTY" and instance_target_index < 0:
-            _hide_helper_object(obj)
+            _hide_helper_object(
+                obj,
+                hide_empty=(
+                    hide_helper_empties
+                    and int(node.prototype_root_index) < 0
+                ),
+            )
 
     if profile_detail:
         _profile_log(
