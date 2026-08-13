@@ -11,6 +11,9 @@ from .data import (
 )
 
 _EMPTY_SEQUENCE: tuple = ()
+_AK_MINFILTER_UNSPECIFIED = 6
+_AK_MAGFILTER_UNSPECIFIED = 2
+_AK_MIPFILTER_UNSPECIFIED = 3
 
 _NATIVE_SIMPLE_MESH_COMPLEX_KEYS = (
     "uv_sets",
@@ -897,9 +900,21 @@ def _native_texture_infos_from_raw(
             wrap_s=int(info.get("wrap_s") or 1),
             wrap_t=int(info.get("wrap_t") or 1),
             wrap_p=int(info.get("wrap_p") or 1),
-            min_filter=int(info.get("min_filter") or 0),
-            mag_filter=int(info.get("mag_filter") or 0),
-            mip_filter=int(info.get("mip_filter") or 0),
+            min_filter=int(
+                info["min_filter"]
+                if info.get("min_filter") is not None
+                else _AK_MINFILTER_UNSPECIFIED
+            ),
+            mag_filter=int(
+                info["mag_filter"]
+                if info.get("mag_filter") is not None
+                else _AK_MAGFILTER_UNSPECIFIED
+            ),
+            mip_filter=int(
+                info["mip_filter"]
+                if info.get("mip_filter") is not None
+                else _AK_MIPFILTER_UNSPECIFIED
+            ),
             has_transform=bool(info.get("has_transform")),
             transform_offset=tuple(info.get("transform_offset") or (0.0, 0.0)),
             transform_scale=tuple(info.get("transform_scale") or (1.0, 1.0)),
@@ -946,9 +961,21 @@ def _native_simple_texture_info_from_raw(
         wrap_p=int(
             raw_info[_ST_WRAP_P] if raw_info[_ST_WRAP_P] is not None else 1
         ),
-        min_filter=int(raw_info[_ST_MIN_FILTER] or 0),
-        mag_filter=int(raw_info[_ST_MAG_FILTER] or 0),
-        mip_filter=int(raw_info[_ST_MIP_FILTER] or 0),
+        min_filter=int(
+            raw_info[_ST_MIN_FILTER]
+            if raw_info[_ST_MIN_FILTER] is not None
+            else _AK_MINFILTER_UNSPECIFIED
+        ),
+        mag_filter=int(
+            raw_info[_ST_MAG_FILTER]
+            if raw_info[_ST_MAG_FILTER] is not None
+            else _AK_MAGFILTER_UNSPECIFIED
+        ),
+        mip_filter=int(
+            raw_info[_ST_MIP_FILTER]
+            if raw_info[_ST_MIP_FILTER] is not None
+            else _AK_MIPFILTER_UNSPECIFIED
+        ),
         has_transform=False,
         transform_slot=int(
             raw_info[_ST_TRANSFORM_SLOT]

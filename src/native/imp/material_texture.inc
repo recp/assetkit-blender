@@ -1018,14 +1018,13 @@ akb_extract_material(AkbSharedDoc *doc_owner,
       akb_material_input_color3(classic->emission, 0.0f, 0.0f, 0.0f, out->emissive_color);
       AKB_COPY_TEX("emissive", classic->emission, out->emissive_texture);
     }
-    out->specular_strength = classic->shininess;
     out->roughness = akb_classic_roughness(classic->shininess);
     if (classic->ior > 0.0f)
       out->ior = classic->ior;
   }
 
-  /* Preserve classic shininess in roughness before the modern specular
-     feature supplies its independent factor. */
+  /* Classic shininess controls lobe roughness only.  A modern specular
+     feature, when present, supplies its independent level. */
   specular = (void*)ak_materialFeature(surface, AK_MATERIAL_FEATURE_SPECULAR);
   if (specular) {
     if (specular->factor) {

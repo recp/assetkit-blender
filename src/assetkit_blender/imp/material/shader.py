@@ -36,7 +36,9 @@ from .constants import (
     _GLTF_SETTINGS_GROUP_NAME,
     _GLTF_SETTINGS_SOCKETS,
     _TEXTURE_EXTENSION_DEFAULT,
-    _TEXTURE_FILTER_DEFAULT,
+    _TEXTURE_MAG_FILTER_DEFAULT,
+    _TEXTURE_MIN_FILTER_DEFAULT,
+    _TEXTURE_MIP_FILTER_DEFAULT,
     _TEXTURE_INTERPOLATION_DEFAULT,
     _TEXTURE_WRAP_DEFAULT,
 )
@@ -136,9 +138,9 @@ def _set_assetkit_material_props(mat: bpy.types.Material, data: MeshPrimitiveDat
         _set_prop_if_nondefault(mat, f"{prefix}_wrap_s", int(info.wrap_s), _TEXTURE_WRAP_DEFAULT)
         _set_prop_if_nondefault(mat, f"{prefix}_wrap_t", int(info.wrap_t), _TEXTURE_WRAP_DEFAULT)
         _set_prop_if_nondefault(mat, f"{prefix}_wrap_p", int(info.wrap_p), _TEXTURE_WRAP_DEFAULT)
-        _set_prop_if_nondefault(mat, f"{prefix}_min_filter", int(info.min_filter), _TEXTURE_FILTER_DEFAULT)
-        _set_prop_if_nondefault(mat, f"{prefix}_mag_filter", int(info.mag_filter), _TEXTURE_FILTER_DEFAULT)
-        _set_prop_if_nondefault(mat, f"{prefix}_mip_filter", int(info.mip_filter), _TEXTURE_FILTER_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_min_filter", int(info.min_filter), _TEXTURE_MIN_FILTER_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_mag_filter", int(info.mag_filter), _TEXTURE_MAG_FILTER_DEFAULT)
+        _set_prop_if_nondefault(mat, f"{prefix}_mip_filter", int(info.mip_filter), _TEXTURE_MIP_FILTER_DEFAULT)
         _set_prop_if_nondefault(mat, f"{prefix}_extension", _texture_extension(info), _TEXTURE_EXTENSION_DEFAULT)
         _set_prop_if_nondefault(mat, f"{prefix}_interpolation", _texture_interpolation(info), _TEXTURE_INTERPOLATION_DEFAULT)
         _set_assetkit_json_prop(mat, f"{prefix}_texture_extra_json", info.texture_extra)

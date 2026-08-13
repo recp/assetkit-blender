@@ -35,9 +35,9 @@ class TextureRefData:
     wrap_s: int = 1
     wrap_t: int = 1
     wrap_p: int = 1
-    min_filter: int = 0
-    mag_filter: int = 0
-    mip_filter: int = 0
+    min_filter: int = 6
+    mag_filter: int = 2
+    mip_filter: int = 3
     has_transform: bool = False
     transform_offset: tuple[float, float] = (0.0, 0.0)
     transform_scale: tuple[float, float] = (1.0, 1.0)

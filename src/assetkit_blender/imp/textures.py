@@ -25,15 +25,17 @@ _DEFERRED_TEXTURE_TIMER_ACTIVE = False
 _DEFERRED_TEXTURE_FALLBACK_IMAGES: dict[tuple[str, str], object] = {}
 _DEFERRED_TEXTURE_TIME_BUDGET = 0.006
 _TEXTURE_WRAP_DEFAULT = 1
-_TEXTURE_FILTER_DEFAULT = 0
+_AK_MINFILTER_UNSPECIFIED = 6
+_AK_MAGFILTER_UNSPECIFIED = 2
+_AK_MIPFILTER_UNSPECIFIED = 3
 _TEXTURE_EXTENSION_DEFAULT = "REPEAT"
 _TEXTURE_INTERPOLATION_DEFAULT = "Linear"
-_AK_MINFILTER_NONE = 1
-_AK_MINFILTER_NEAREST = 2
-_AK_MINFILTER_NEAREST_MIPMAP_NEAREST = 5
-_AK_MINFILTER_NEAREST_MIPMAP_LINEAR = 7
-_AK_MAGFILTER_NONE = 1
-_AK_MAGFILTER_NEAREST = 2
+_AK_MINFILTER_NONE = 7
+_AK_MINFILTER_NEAREST = 1
+_AK_MINFILTER_NEAREST_MIPMAP_NEAREST = 4
+_AK_MINFILTER_NEAREST_MIPMAP_LINEAR = 5
+_AK_MAGFILTER_NONE = 3
+_AK_MAGFILTER_NEAREST = 1
 
 
 def has_deferred_work() -> bool:
@@ -757,10 +759,9 @@ def _set_texture_sampler_props(tex, tex_info: TextureRefData) -> None:
     _set_prop_if_nondefault(tex, "assetkit_texture_wrap_s", int(tex_info.wrap_s), _TEXTURE_WRAP_DEFAULT)
     _set_prop_if_nondefault(tex, "assetkit_texture_wrap_t", int(tex_info.wrap_t), _TEXTURE_WRAP_DEFAULT)
     _set_prop_if_nondefault(tex, "assetkit_texture_wrap_p", int(tex_info.wrap_p), _TEXTURE_WRAP_DEFAULT)
-    # Zero is an authored-state distinction: it means UNSPECIFIED and must
-    # round-trip to omitted glTF filter properties. Keep all three raw enum
-    # values even when zero; otherwise export would infer Blender's visible
-    # Linear setting and turn omitted fields into explicit filters.
+    # Keep all three raw enum values, including authored LINEAR (zero), so an
+    # omitted filter remains distinguishable from Blender's visible Linear
+    # interpolation and round-trips as an omitted glTF sampler property.
     tex["assetkit_texture_min_filter"] = int(tex_info.min_filter)
     tex["assetkit_texture_mag_filter"] = int(tex_info.mag_filter)
     tex["assetkit_texture_mip_filter"] = int(tex_info.mip_filter)

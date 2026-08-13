@@ -30,6 +30,15 @@ from assetkit_blender.exp.exporter import export_scene  # noqa: E402
 from assetkit_blender.importer import import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
+_AK_MINFILTER_UNSPECIFIED = 6
+_AK_MAGFILTER_UNSPECIFIED = 2
+_AK_MIPFILTER_UNSPECIFIED = 3
+_UNSPECIFIED_FILTERS = (
+    _AK_MINFILTER_UNSPECIFIED,
+    _AK_MAGFILTER_UNSPECIFIED,
+    _AK_MIPFILTER_UNSPECIFIED,
+)
+
 
 def reset_scene() -> None:
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -83,7 +92,7 @@ def assert_absent_sampler_filters_stay_unspecified(root: Path) -> None:
     if loaded is None or not loaded.meshes:
         raise AssertionError("failed to load absent-filter sampler fixture")
     info = (loaded.meshes[0].texture_infos or {}).get("base_color")
-    if info is None or (info.min_filter, info.mag_filter, info.mip_filter) != (0, 0, 0):
+    if info is None or (info.min_filter, info.mag_filter, info.mip_filter) != _UNSPECIFIED_FILTERS:
         raise AssertionError(
             "absent glTF sampler filters became authored values: "
             f"{None if info is None else (info.min_filter, info.mag_filter, info.mip_filter)}"
@@ -110,14 +119,14 @@ def assert_absent_sampler_filters_stay_unspecified(root: Path) -> None:
         for node in material.node_tree.nodes
         if node.type == "TEX_IMAGE"
     ]
-    if len(image_nodes) != 1 or any(
-        int(image_nodes[0].get(key, -1)) != 0
-        for key in (
-            "assetkit_texture_min_filter",
-            "assetkit_texture_mag_filter",
-            "assetkit_texture_mip_filter",
-        )
-    ):
+    filter_keys = (
+        "assetkit_texture_min_filter",
+        "assetkit_texture_mag_filter",
+        "assetkit_texture_mip_filter",
+    )
+    if len(image_nodes) != 1 or tuple(
+        int(image_nodes[0].get(key, -1)) for key in filter_keys
+    ) != _UNSPECIFIED_FILTERS:
         raise AssertionError("Blender did not retain UNSPECIFIED sampler metadata")
 
     exported_path = root / "unspecified-sampler-roundtrip.gltf"
