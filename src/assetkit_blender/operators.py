@@ -115,17 +115,17 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         default="AUTO",
     )
     hierarchy_mode: bpy.props.EnumProperty(
-        name="Scene Hierarchy",
+        name="Hierarchy",
         description="How source scene nodes are represented in Blender",
         items=(
             (
                 "FULL",
-                "Full Source Hierarchy",
+                "Full",
                 "Create Blender objects for all source nodes so the authored hierarchy is available in the Outliner",
             ),
             (
                 "COMPACT",
-                "Compact Instances",
+                "Compact",
                 "Batch repeated static instances to reduce Blender object and dependency graph overhead",
             ),
         ),

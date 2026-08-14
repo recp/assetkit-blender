@@ -306,8 +306,8 @@ def main() -> None:
         obj = bpy.data.objects.get(name)
         if obj is None or obj.parent is None or obj.parent.name != "AssetKit Node":
             raise AssertionError(f"missing authored hierarchy object {name}")
-        if not obj.get("assetkit_helper_hidden") or not obj.hide_viewport:
-            raise AssertionError(f"transform-only hierarchy object {name} is visible")
+        if obj.get("assetkit_helper_hidden") or obj.hide_viewport or obj.hide_get():
+            raise AssertionError(f"authored hierarchy object {name} is unexpectedly hidden")
     active_objects = list(bpy.context.view_layer.objects)
     collection_instances = [
         obj

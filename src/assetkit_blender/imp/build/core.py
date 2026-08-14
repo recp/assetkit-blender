@@ -140,7 +140,7 @@ def _begin_scene_build(
             "skip_animation_nodes": node_animation_skip_indices,
             "required_indices": required_node_indices,
             "has_visibility_animation": node_visibility_animation,
-            "hide_helper_empties": create_all_nodes,
+            "hide_helper_empties": False,
         }
     else:
         node_objects = _create_scene_nodes(
@@ -154,7 +154,7 @@ def _begin_scene_build(
             skip_animation_nodes=node_animation_skip_indices,
             required_indices=required_node_indices,
             has_visibility_animation=node_visibility_animation,
-            hide_helper_empties=create_all_nodes,
+            hide_helper_empties=False,
         )
     nodes_ms = (time.perf_counter() - phase_started_at) * 1000.0 if profile_detail else 0.0
     if profile_detail:
