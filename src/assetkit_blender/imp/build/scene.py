@@ -198,6 +198,97 @@ def _apply_deferred_collection_instances(state: ImportState | None) -> None:
     pending.clear()
 
 
+def _realize_full_hierarchy_instances(state: ImportState | None) -> None:
+    if not state or not state.preserve_hierarchy:
+        return
+
+    bpy.context.view_layer.update()
+    node_data = state.node_data or {}
+    candidates = [
+        obj
+        for index, obj in (state.node_objects or {}).items()
+        if int(getattr(node_data.get(index), "prototype_root_index", -1)) < 0
+        and bool(obj.get("assetkit_instance_node"))
+        and obj.instance_type == "COLLECTION"
+        and obj.instance_collection is not None
+        and obj.name in bpy.context.view_layer.objects
+    ]
+    if not candidates:
+        return
+
+    started_at = time.perf_counter() if _profile_enabled() else 0.0
+    previous_selected = list(bpy.context.selected_objects)
+    previous_active = bpy.context.view_layer.objects.active
+    before = {obj.as_pointer() for obj in bpy.data.objects}
+    visibility = []
+    try:
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for obj in candidates:
+            visibility.append(
+                (
+                    obj,
+                    bool(obj.hide_viewport),
+                    bool(obj.hide_select),
+                    bool(obj.hide_get()),
+                )
+            )
+            obj.hide_viewport = False
+            obj.hide_select = False
+            obj.hide_set(False)
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = candidates[0]
+        if not bpy.ops.object.duplicates_make_real.poll():
+            raise RuntimeError(
+                "Blender cannot realize the imported AssetKit hierarchy in the current context"
+            )
+        result = bpy.ops.object.duplicates_make_real(
+            use_base_parent=True,
+            use_hierarchy=True,
+        )
+        if "FINISHED" not in result:
+            raise RuntimeError("Blender failed to realize the imported AssetKit hierarchy")
+
+        realized = [
+            obj
+            for obj in bpy.data.objects
+            if obj.as_pointer() not in before
+        ]
+        for obj in realized:
+            obj["assetkit_realized_instance_object"] = True
+        for obj in candidates:
+            obj["assetkit_instance_realized"] = True
+        state.realized_instance_objects.extend(realized)
+    finally:
+        for obj, hide_viewport, hide_select, hide_get in visibility:
+            if obj.name not in bpy.data.objects:
+                continue
+            obj.hide_viewport = hide_viewport
+            obj.hide_select = hide_select
+            obj.hide_set(hide_get)
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for obj in previous_selected:
+            if obj.name in bpy.context.view_layer.objects and not obj.hide_select:
+                try:
+                    obj.select_set(True)
+                except RuntimeError:
+                    pass
+        if (
+            previous_active is not None
+            and previous_active.name in bpy.context.view_layer.objects
+        ):
+            bpy.context.view_layer.objects.active = previous_active
+
+    if _profile_enabled():
+        _profile_log(
+            "realize_full_hierarchy_instances "
+            f"instances={len(candidates)} "
+            f"objects={len(state.realized_instance_objects)} "
+            f"elapsed={(time.perf_counter() - started_at) * 1000.0:.3f}ms"
+        )
+
+
 def _finish_compact_static_instances(state: ImportState | None) -> None:
     if not state:
         return

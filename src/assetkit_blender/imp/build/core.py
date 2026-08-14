@@ -189,6 +189,8 @@ def _begin_scene_build(
         preserve_tangents              = preserve_tangents,
         prototype_collections          = prototype_collections,
         deferred_collection_instances = deferred_collection_instances,
+        preserve_hierarchy             = create_all_nodes,
+        realized_instance_objects      = [],
         deferred_scene_node_build      = deferred_scene_node_build,
         compact_instance_plan          = compact_instance_plan,
         compact_instance_objects       = [],
@@ -814,6 +816,7 @@ def _import_result_objects(mesh_objects: list[bpy.types.Object], state: ImportSt
         for obj in (state.compact_instance_objects or ())
         if obj.as_pointer() not in prototype_object_pointers
     )
+    result.extend(state.realized_instance_objects or ())
     return _unique_objects(result)
 
 

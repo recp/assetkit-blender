@@ -26,6 +26,8 @@ class ImportState:
     preserve_tangents:              bool
     prototype_collections:          dict
     deferred_collection_instances: list
+    preserve_hierarchy:             bool
+    realized_instance_objects:      list
     deferred_scene_node_build:      dict | None
     compact_instance_plan:          dict | None
     compact_instance_objects:       list

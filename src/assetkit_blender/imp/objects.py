@@ -46,10 +46,11 @@ def _hide_empty_helper_object(obj: bpy.types.Object) -> None:
     if not obj.get("assetkit_helper_object"):
         obj["assetkit_helper_object"] = True
     obj.hide_select = True
-    try:
-        obj.hide_set(True)
-    except Exception:
-        pass
+    if obj.name in bpy.context.view_layer.objects:
+        try:
+            obj.hide_set(True)
+        except Exception:
+            pass
     obj.hide_viewport = True
     obj.hide_render = True
     obj["assetkit_helper_hidden"] = True

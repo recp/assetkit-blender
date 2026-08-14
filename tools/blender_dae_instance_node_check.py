@@ -13,7 +13,9 @@ import math
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import bpy
 from mathutils import Vector
@@ -26,7 +28,12 @@ if str(PYTHON_ROOT) not in sys.path:
 
 from assetkit_blender.enums import AK_FILE_TYPE_DAE, AK_FILE_TYPE_GLTF  # noqa: E402
 from assetkit_blender.exp.core import export_scene  # noqa: E402
-from assetkit_blender.importer import _object_bounds, import_assetkit_file  # noqa: E402
+from assetkit_blender.importer import (  # noqa: E402
+    _object_bounds,
+    import_assetkit_file,
+    import_assetkit_file_progressive,
+)
+from assetkit_blender.imp.build.scene import _realize_full_hierarchy_instances  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 from assetkit_blender.operators import ASSETKIT_OT_import_assetkit  # noqa: E402
 
@@ -301,20 +308,133 @@ def main() -> None:
             raise AssertionError(f"missing authored hierarchy object {name}")
         if not obj.get("assetkit_helper_hidden") or not obj.hide_viewport:
             raise AssertionError(f"transform-only hierarchy object {name} is visible")
-    hierarchy_instances = [
+    active_objects = list(bpy.context.view_layer.objects)
+    collection_instances = [
         obj
-        for obj in bpy.data.objects
-        if obj.get("assetkit_instance_node")
+        for obj in active_objects
+        if obj.instance_type == "COLLECTION"
     ]
-    if len(hierarchy_instances) != 3:
+    if collection_instances:
         raise AssertionError(
-            f"expected 3 explicit hierarchy instances, got {len(hierarchy_instances)}"
+            "full hierarchy import left non-expandable collection instances: "
+            + ", ".join(obj.name for obj in collection_instances)
         )
+    realized_roots = [
+        obj
+        for obj in active_objects
+        if obj.get("assetkit_instance_realized")
+    ]
+    if len(realized_roots) != 2:
+        raise AssertionError(
+            f"expected 2 realized top-level instances, got {len(realized_roots)}"
+        )
+    active_surface_meshes = [
+        obj
+        for obj in active_objects
+        if obj.type == "MESH" and len(obj.data.polygons) > 0
+    ]
+    if len(active_surface_meshes) != 2:
+        raise AssertionError(
+            f"expected 2 editable mesh objects, got {len(active_surface_meshes)}"
+        )
+    if len({obj.data.as_pointer() for obj in active_surface_meshes}) != 1:
+        raise AssertionError("full hierarchy duplicated rather than shared mesh data")
+    for obj in active_surface_meshes:
+        if obj.parent is None:
+            raise AssertionError(f"editable mesh {obj.name} is missing its source parent")
     count, minimum, maximum = _evaluated_mesh_bounds()
     if count != 2:
         raise AssertionError(f"expected 2 full-hierarchy mesh instances, got {count}")
     _assert_close(minimum, [11.0, 12.0, 3.0], "full hierarchy minimum")
     _assert_close(maximum, [22.0, 14.0, 3.0], "full hierarchy maximum")
+
+    prototype = bpy.data.collections.new("Hierarchy Skin Prototype")
+    armature_data = bpy.data.armatures.new("Hierarchy Skin Armature")
+    armature = bpy.data.objects.new("Hierarchy Skin Armature", armature_data)
+    mesh_data = bpy.data.meshes.new("Hierarchy Skin Mesh")
+    mesh_data.vertices.add(1)
+    mesh = bpy.data.objects.new("Hierarchy Skin Mesh", mesh_data)
+    modifier = mesh.modifiers.new("Hierarchy Skin", "ARMATURE")
+    modifier.object = armature
+    mesh.parent = armature
+    prototype.objects.link(armature)
+    prototype.objects.link(mesh)
+    instance = bpy.data.objects.new("Hierarchy Skin Instance", None)
+    instance.instance_type = "COLLECTION"
+    instance.instance_collection = prototype
+    instance["assetkit_instance_node"] = True
+    bpy.context.scene.collection.objects.link(instance)
+    bpy.context.view_layer.update()
+    state = SimpleNamespace(
+        preserve_hierarchy=True,
+        node_data={0: SimpleNamespace(prototype_root_index=-1)},
+        node_objects={0: instance},
+        realized_instance_objects=[],
+    )
+    _realize_full_hierarchy_instances(state)
+    active_objects = list(bpy.context.view_layer.objects)
+    realized_armatures = [obj for obj in active_objects if obj.data == armature_data]
+    realized_meshes = [obj for obj in active_objects if obj.data == mesh_data]
+    if len(realized_armatures) != 1 or len(realized_meshes) != 1:
+        raise AssertionError("full hierarchy did not realize the skinned prototype once")
+    realized_armature = realized_armatures[0]
+    realized_mesh = realized_meshes[0]
+    if realized_mesh.parent is not realized_armature:
+        raise AssertionError("full hierarchy did not preserve the skin object hierarchy")
+    realized_modifier = realized_mesh.modifiers.get("Hierarchy Skin")
+    if realized_modifier is None or realized_modifier.object is not realized_armature:
+        raise AssertionError("full hierarchy did not remap the skin armature reference")
+
+    with tempfile.TemporaryDirectory(prefix="assetkit-dae-progressive-hierarchy-") as temp_dir:
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        path = Path(temp_dir) / "nested-instance-node.dae"
+        path.write_text(FIXTURE, encoding="utf-8")
+        completed = []
+        errors = []
+        job = import_assetkit_file_progressive(
+            str(path),
+            load_options=make_load_options(
+                coordinate_system="Z_UP",
+                coordinate_conversion="TRANSFORM",
+                texture_loading="DEFERRED",
+            ),
+            collection=bpy.context.collection,
+            focus_mode="NEVER",
+            placement_mode="AS_AUTHORED",
+            select_imported=False,
+            set_viewport_shading=False,
+            clean_viewport_overlays=False,
+            preserve_hierarchy=True,
+            on_complete=completed.append,
+            on_error=errors.append,
+        )
+        try:
+            if bpy.app.timers.is_registered(job._timer):
+                bpy.app.timers.unregister(job._timer)
+        except ValueError:
+            pass
+        deadline = time.monotonic() + 10.0
+        while not job.done and time.monotonic() < deadline:
+            job._timer()
+        if not job.done or errors or not completed:
+            raise AssertionError(
+                f"progressive full hierarchy failed: done={job.done} errors={errors}"
+            )
+        bpy.context.view_layer.update()
+        active_objects = list(bpy.context.view_layer.objects)
+        if any(obj.instance_type == "COLLECTION" for obj in active_objects):
+            raise AssertionError("progressive full hierarchy left collection instances")
+        if len([obj for obj in active_objects if obj.type == "MESH"]) != 2:
+            raise AssertionError("progressive full hierarchy did not expose two meshes")
+        blend_path = Path(temp_dir) / "full-hierarchy.blend"
+        bpy.ops.wm.save_as_mainfile(filepath=str(blend_path), check_existing=False)
+        bpy.ops.wm.open_mainfile(filepath=str(blend_path))
+        bpy.context.view_layer.update()
+        active_objects = list(bpy.context.view_layer.objects)
+        if any(obj.instance_type == "COLLECTION" for obj in active_objects):
+            raise AssertionError("saved full hierarchy restored collection instances")
+        if len([obj for obj in active_objects if obj.type == "MESH"]) != 2:
+            raise AssertionError("saved full hierarchy lost editable meshes")
     print("DAE instance_node hierarchy check passed")
 
 

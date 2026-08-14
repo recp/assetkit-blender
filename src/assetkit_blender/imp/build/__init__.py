@@ -19,4 +19,5 @@ from .scene import (
     _apply_deferred_collection_instances,
     _create_curve_objects,
     _finish_compact_static_instances,
+    _realize_full_hierarchy_instances,
 )

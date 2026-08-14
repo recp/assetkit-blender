@@ -38,6 +38,7 @@ from .imp.build import (
     _import_result_objects,
     _mesh_import_units,
     _prebuild_material_cache,
+    _realize_full_hierarchy_instances,
     _scene_has_timeline_content,
     _scene_info_from_loaded,
     _snapshot_actions,
@@ -283,6 +284,10 @@ def import_assetkit_file(
                 staging_collection,
             )
         publish_ms = _elapsed_ms(phase_started_at) if profile_detail else 0.0
+
+        phase_started_at = time.perf_counter() if profile_detail else 0.0
+        _realize_full_hierarchy_instances(state)
+        realize_hierarchy_ms = _elapsed_ms(phase_started_at) if profile_detail else 0.0
     finally:
         _textures.ACTIVE_LOAD_MODE                    = previous_texture_load_mode
         _textures.ACTIVE_VALIDATED_IMAGE_KEYS         = previous_validated_image_keys
@@ -310,7 +315,8 @@ def import_assetkit_file(
             f"compact_instances={compact_instances_ms:.3f}ms "
             f"collection_instances={collection_instances_ms:.3f}ms "
             f"bind_pose_skins={bind_pose_skins_ms:.3f}ms "
-            f"publish={publish_ms:.3f}ms"
+            f"publish={publish_ms:.3f}ms "
+            f"realize_hierarchy={realize_hierarchy_ms:.3f}ms"
         )
         _profile_log(
             "blocking create_units_detail "
@@ -753,6 +759,10 @@ class _ProgressiveImportJob:
                 deferred_ms = 0.0
                 publish_ms  = 0.0
 
+            phase_started_at = time.perf_counter() if profile_detail else 0.0
+            _realize_full_hierarchy_instances(self.state)
+            realize_hierarchy_ms = _elapsed_ms(phase_started_at) if profile_detail else 0.0
+
             _reset_material_template_cache()
 
             result           = _import_result_objects(self.objects, self.state)
@@ -784,6 +794,7 @@ class _ProgressiveImportJob:
                     f"scene_nodes={node_finish_ms:.3f}ms "
                     f"instances={instances_ms:.3f}ms skins={skins_ms:.3f}ms "
                     f"deferred={deferred_ms:.3f}ms publish={publish_ms:.3f}ms "
+                    f"realize_hierarchy={realize_hierarchy_ms:.3f}ms "
                     f"finish_import={_elapsed_ms(phase_started_at):.3f}ms"
                 )
 
