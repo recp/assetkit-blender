@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from array import array
+from dataclasses import dataclass, field
 import math
 import time
 
@@ -192,17 +193,276 @@ def _apply_deferred_collection_instances(state: ImportState | None) -> None:
     if not state:
         return
     pending = state.deferred_collection_instances or []
+    pending_targets = {
+        obj.as_pointer(): target_collection
+        for obj, target_collection in pending
+    }
+    validated: set[int] = set()
+    for _obj, target_collection in pending:
+        _validate_instance_collection_tree(
+            target_collection,
+            set(),
+            validated,
+            pending_targets,
+        )
     for obj, target_collection in pending:
         obj.instance_type = "COLLECTION"
         obj.instance_collection = target_collection
     pending.clear()
 
 
+def _validate_instance_collection_tree(
+    collection: bpy.types.Collection,
+    stack: set[int],
+    validated: set[int],
+    pending_targets: dict[int, bpy.types.Collection] | None = None,
+) -> None:
+    pointer = collection.as_pointer()
+    if pointer in stack:
+        raise RuntimeError("AssetKit cannot realize a cyclic collection instance hierarchy")
+    if pointer in validated:
+        return
+
+    stack.add(pointer)
+    try:
+        for obj in collection.objects:
+            target = (
+                pending_targets.get(obj.as_pointer())
+                if pending_targets is not None
+                else None
+            )
+            if (
+                target is None
+                and obj.instance_type == "COLLECTION"
+                and obj.instance_collection is not None
+            ):
+                target = obj.instance_collection
+            if target is not None:
+                _validate_instance_collection_tree(
+                    target,
+                    stack,
+                    validated,
+                    pending_targets,
+                )
+    finally:
+        stack.remove(pointer)
+    validated.add(pointer)
+
+
+@dataclass(slots=True)
+class _RealizedCollectionOccurrence:
+    instancer: bpy.types.Object
+    target: bpy.types.Collection
+    parent: _RealizedCollectionOccurrence | None
+    copies: dict[int, bpy.types.Object] = field(default_factory=dict)
+    pairs: list[tuple[bpy.types.Object, bpy.types.Object]] = field(default_factory=list)
+    children: list[_RealizedCollectionOccurrence] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _RealizedCollectionRoot:
+    occurrence: _RealizedCollectionOccurrence
+    by_source: dict[int, list[tuple[_RealizedCollectionOccurrence, bpy.types.Object]]]
+
+
+def _occurrence_contains(
+    ancestor: _RealizedCollectionOccurrence,
+    candidate: _RealizedCollectionOccurrence,
+) -> bool:
+    current = candidate
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = current.parent
+    return False
+
+
+def _resolve_realized_object(
+    owner: _RealizedCollectionOccurrence,
+    target: bpy.types.Object,
+    root: _RealizedCollectionRoot,
+) -> bpy.types.Object | None:
+    pointer = target.as_pointer()
+    current = owner
+    while current is not None:
+        replacement = current.copies.get(pointer)
+        if replacement is not None:
+            return replacement
+        current = current.parent
+
+    candidates = root.by_source.get(pointer)
+    if not candidates:
+        return None
+
+    scope = owner
+    while scope is not None:
+        scoped = [
+            copied
+            for occurrence, copied in candidates
+            if _occurrence_contains(scope, occurrence)
+        ]
+        if len(scoped) == 1:
+            return scoped[0]
+        if len(scoped) > 1:
+            raise RuntimeError(
+                "AssetKit cannot unambiguously realize a repeated cross-instance object reference"
+            )
+        scope = scope.parent
+    return None
+
+
+def _remap_realized_object_pointers(
+    owner: object,
+    occurrence: _RealizedCollectionOccurrence,
+    root: _RealizedCollectionRoot,
+) -> None:
+    rna = getattr(owner, "bl_rna", None)
+    for prop in getattr(rna, "properties", ()):
+        if prop.type != "POINTER" or prop.identifier == "rna_type" or prop.is_readonly:
+            continue
+        try:
+            target = getattr(owner, prop.identifier)
+        except (AttributeError, RuntimeError, TypeError):
+            continue
+        if not isinstance(target, bpy.types.Object):
+            continue
+        replacement = _resolve_realized_object(occurrence, target, root)
+        if replacement is None:
+            continue
+        try:
+            setattr(owner, prop.identifier, replacement)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+
+def _remap_realized_object_references(
+    obj: bpy.types.Object,
+    occurrence: _RealizedCollectionOccurrence,
+    root: _RealizedCollectionRoot,
+) -> None:
+    for modifier in obj.modifiers:
+        _remap_realized_object_pointers(modifier, occurrence, root)
+    for constraint in obj.constraints:
+        _remap_realized_object_pointers(constraint, occurrence, root)
+    if obj.pose is not None:
+        for pose_bone in obj.pose.bones:
+            for constraint in pose_bone.constraints:
+                _remap_realized_object_pointers(constraint, occurrence, root)
+
+    animation_data = obj.animation_data
+    if animation_data is not None:
+        for fcurve in animation_data.drivers:
+            for variable in fcurve.driver.variables:
+                for target in variable.targets:
+                    target_id = target.id
+                    if not isinstance(target_id, bpy.types.Object):
+                        continue
+                    replacement = _resolve_realized_object(
+                        occurrence,
+                        target_id,
+                        root,
+                    )
+                    if replacement is not None:
+                        target.id = replacement
+
+    for key in obj.keys():
+        try:
+            target = obj[key]
+        except (KeyError, RuntimeError, TypeError):
+            continue
+        if not isinstance(target, bpy.types.Object):
+            continue
+        replacement = _resolve_realized_object(occurrence, target, root)
+        if replacement is not None:
+            obj[key] = replacement
+
+
+def _build_realized_collection_occurrence(
+    instancer: bpy.types.Object,
+    parent: _RealizedCollectionOccurrence | None,
+    stack: set[int],
+    realized: list[bpy.types.Object],
+    destinations: tuple[bpy.types.Collection, ...],
+    by_source: dict[
+        int,
+        list[tuple[_RealizedCollectionOccurrence, bpy.types.Object]],
+    ],
+) -> _RealizedCollectionOccurrence:
+    target = instancer.instance_collection
+    if target is None:
+        raise RuntimeError("AssetKit collection instance has no target")
+    pointer = target.as_pointer()
+    if pointer in stack:
+        raise RuntimeError("AssetKit cannot realize a cyclic collection instance hierarchy")
+
+    occurrence = _RealizedCollectionOccurrence(instancer, target, parent)
+    for source in target.objects:
+        copied = source.copy()
+        realized.append(copied)
+        for collection in destinations:
+            collection.objects.link(copied)
+        source_pointer = source.as_pointer()
+        occurrence.copies[source_pointer] = copied
+        occurrence.pairs.append((source, copied))
+        by_source.setdefault(source_pointer, []).append((occurrence, copied))
+
+    nested_stack = stack | {pointer}
+    for _source, copied in occurrence.pairs:
+        if copied.instance_type == "COLLECTION" and copied.instance_collection is not None:
+            occurrence.children.append(
+                _build_realized_collection_occurrence(
+                    copied,
+                    occurrence,
+                    nested_stack,
+                    realized,
+                    destinations,
+                    by_source,
+                )
+            )
+    return occurrence
+
+
+def _finish_realized_collection_occurrence(
+    occurrence: _RealizedCollectionOccurrence,
+    root: _RealizedCollectionRoot,
+) -> None:
+    offset = occurrence.target.instance_offset
+    offset_matrix = Matrix.Translation((-offset.x, -offset.y, -offset.z))
+    for source, copied in occurrence.pairs:
+        parent = (
+            _resolve_realized_object(occurrence, source.parent, root)
+            if source.parent is not None
+            else None
+        )
+        copied.parent = parent or occurrence.instancer
+        copied.matrix_parent_inverse = (
+            source.matrix_parent_inverse.copy()
+            if parent is not None
+            else offset_matrix
+        )
+
+    for _source, copied in occurrence.pairs:
+        _remap_realized_object_references(copied, occurrence, root)
+    for child in occurrence.children:
+        _finish_realized_collection_occurrence(child, root)
+
+
+def _commit_realized_collection_occurrence(
+    occurrence: _RealizedCollectionOccurrence,
+    committed: list[tuple[bpy.types.Object, bpy.types.Collection]],
+) -> None:
+    for child in occurrence.children:
+        _commit_realized_collection_occurrence(child, committed)
+
+    committed.append((occurrence.instancer, occurrence.target))
+    occurrence.instancer.instance_type = "NONE"
+    occurrence.instancer.instance_collection = None
+
+
 def _realize_full_hierarchy_instances(state: ImportState | None) -> None:
     if not state or not state.preserve_hierarchy:
         return
 
-    bpy.context.view_layer.update()
     node_data = state.node_data or {}
     candidates = [
         obj
@@ -211,74 +471,59 @@ def _realize_full_hierarchy_instances(state: ImportState | None) -> None:
         and bool(obj.get("assetkit_instance_node"))
         and obj.instance_type == "COLLECTION"
         and obj.instance_collection is not None
-        and obj.name in bpy.context.view_layer.objects
     ]
     if not candidates:
         return
 
     started_at = time.perf_counter() if _profile_enabled() else 0.0
-    previous_selected = list(bpy.context.selected_objects)
-    previous_active = bpy.context.view_layer.objects.active
-    before = {obj.as_pointer() for obj in bpy.data.objects}
-    visibility = []
-    try:
-        for obj in bpy.context.selected_objects:
-            obj.select_set(False)
-        for obj in candidates:
-            visibility.append(
-                (
-                    obj,
-                    bool(obj.hide_viewport),
-                    bool(obj.hide_select),
-                    bool(obj.hide_get()),
-                )
-            )
-            obj.hide_viewport = False
-            obj.hide_select = False
-            obj.hide_set(False)
-            obj.select_set(True)
-        bpy.context.view_layer.objects.active = candidates[0]
-        if not bpy.ops.object.duplicates_make_real.poll():
-            raise RuntimeError(
-                "Blender cannot realize the imported AssetKit hierarchy in the current context"
-            )
-        result = bpy.ops.object.duplicates_make_real(
-            use_base_parent=True,
-            use_hierarchy=True,
+    validated: set[int] = set()
+    for candidate in candidates:
+        _validate_instance_collection_tree(
+            candidate.instance_collection,
+            set(),
+            validated,
         )
-        if "FINISHED" not in result:
-            raise RuntimeError("Blender failed to realize the imported AssetKit hierarchy")
 
-        realized = [
-            obj
-            for obj in bpy.data.objects
-            if obj.as_pointer() not in before
-        ]
-        for obj in realized:
-            obj["assetkit_realized_instance_object"] = True
+    realized: list[bpy.types.Object] = []
+    roots: list[_RealizedCollectionRoot] = []
+    committed: list[tuple[bpy.types.Object, bpy.types.Collection]] = []
+    try:
+        for obj in candidates:
+            by_source: dict[
+                int,
+                list[tuple[_RealizedCollectionOccurrence, bpy.types.Object]],
+            ] = {}
+            occurrence = _build_realized_collection_occurrence(
+                obj,
+                None,
+                set(),
+                realized,
+                tuple(obj.users_collection) or (bpy.context.collection,),
+                by_source,
+            )
+            roots.append(_RealizedCollectionRoot(occurrence, by_source))
+
+        for root in roots:
+            _finish_realized_collection_occurrence(root.occurrence, root)
+        for root in roots:
+            _commit_realized_collection_occurrence(root.occurrence, committed)
+
         for obj in candidates:
             obj["assetkit_instance_realized"] = True
+        for obj in realized:
+            obj["assetkit_realized_instance_object"] = True
         state.realized_instance_objects.extend(realized)
-    finally:
-        for obj, hide_viewport, hide_select, hide_get in visibility:
-            if obj.name not in bpy.data.objects:
-                continue
-            obj.hide_viewport = hide_viewport
-            obj.hide_select = hide_select
-            obj.hide_set(hide_get)
-        for obj in bpy.context.selected_objects:
-            obj.select_set(False)
-        for obj in previous_selected:
-            if obj.name in bpy.context.view_layer.objects and not obj.hide_select:
-                try:
-                    obj.select_set(True)
-                except RuntimeError:
-                    pass
-        if (
-            previous_active is not None
-            and previous_active.name in bpy.context.view_layer.objects
-        ):
-            bpy.context.view_layer.objects.active = previous_active
+    except Exception:
+        for obj, target in reversed(committed):
+            obj.instance_type = "COLLECTION"
+            obj.instance_collection = target
+        for obj in candidates:
+            if "assetkit_instance_realized" in obj:
+                del obj["assetkit_instance_realized"]
+        for obj in reversed(realized):
+            if obj.name in bpy.data.objects:
+                bpy.data.objects.remove(obj, do_unlink=True)
+        raise
 
     if _profile_enabled():
         _profile_log(
@@ -1179,7 +1424,8 @@ def _new_scene_node_object(
         _set_assetkit_json_prop(camera, "assetkit_camera_extra_json", node.camera_extra)
         _set_assetkit_json_prop(camera, "assetkit_camera_imager_extra_json", node.camera_imager_extra)
         obj = bpy.data.objects.new(name, camera)
-        _set_node_visibility(obj, visible)
+        if not visible:
+            _set_node_visibility(obj, False)
         _set_assetkit_node_props(obj, node)
         return obj
 
@@ -1188,14 +1434,16 @@ def _new_scene_node_object(
         _configure_light(light, node)
         _set_assetkit_json_prop(light, "assetkit_light_extra_json", node.light_extra)
         obj = bpy.data.objects.new(name, light)
-        _set_node_visibility(obj, visible)
+        if not visible:
+            _set_node_visibility(obj, False)
         _set_assetkit_node_props(obj, node)
         return obj
 
     obj = bpy.data.objects.new(name, None)
     obj.empty_display_type = "PLAIN_AXES"
     obj.empty_display_size = 0.0001
-    _set_node_visibility(obj, visible)
+    if not visible:
+        _set_node_visibility(obj, False)
     _set_assetkit_node_props(obj, node)
     return obj
 
