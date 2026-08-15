@@ -928,6 +928,15 @@ def main() -> None:
             )
         bpy.context.view_layer.update()
         active_objects = list(bpy.context.view_layer.objects)
+        import_collection = bpy.data.collections.get(path.stem)
+        if (
+            import_collection is None
+            or bpy.context.scene.collection.children.get(path.stem) is not import_collection
+            or bpy.data.collections.get("AssetKit Import") is not None
+        ):
+            raise AssertionError(
+                "progressive import did not publish the source filename collection"
+            )
         if any(obj.instance_type == "COLLECTION" for obj in active_objects):
             raise AssertionError("progressive full hierarchy left collection instances")
         if len([obj for obj in active_objects if obj.type == "MESH"]) != 2:
@@ -937,6 +946,8 @@ def main() -> None:
         bpy.ops.wm.open_mainfile(filepath=str(blend_path))
         bpy.context.view_layer.update()
         active_objects = list(bpy.context.view_layer.objects)
+        if bpy.context.scene.collection.children.get(path.stem) is None:
+            raise AssertionError("saved full hierarchy lost its source filename collection")
         if any(obj.instance_type == "COLLECTION" for obj in active_objects):
             raise AssertionError("saved full hierarchy restored collection instances")
         if len([obj for obj in active_objects if obj.type == "MESH"]) != 2:

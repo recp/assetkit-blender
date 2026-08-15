@@ -163,7 +163,7 @@ def import_assetkit_file(
 
     destination_collection = collection or bpy.context.collection
     staging_collection     = (
-        _new_progressive_staging_collection()
+        _new_progressive_staging_collection(filepath)
         if len(primitives) >= _PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD
         else None
     )
@@ -361,8 +361,10 @@ def import_assetkit_file(
     return result
 
 
-def _new_progressive_staging_collection() -> bpy.types.Collection:
-    staging = bpy.data.collections.new("AssetKit Import")
+def _new_progressive_staging_collection(filepath: str) -> bpy.types.Collection:
+    filename = os.path.basename(filepath or "")
+    name = os.path.splitext(filename)[0].strip() or "AssetKit Import"
+    staging = bpy.data.collections.new(name)
     staging["assetkit_progressive_staging"] = True
     return staging
 
@@ -655,7 +657,7 @@ class _ProgressiveImportJob:
         # partial batch makes Blender redraw and re-evaluate an increasingly
         # large scene between timer callbacks; collection instances make that
         # cost grow especially quickly. Publish the completed import once.
-        self.staging_collection = _new_progressive_staging_collection()
+        self.staging_collection = _new_progressive_staging_collection(self.filepath)
         self.state = _begin_scene_build(
             primitives,
             scene_nodes,

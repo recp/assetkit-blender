@@ -24,6 +24,7 @@ if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
 from assetkit_blender.assetkit import native_load_meshes  # noqa: E402
+import assetkit_blender.importer as importer_module  # noqa: E402
 from assetkit_blender.importer import import_assetkit_file  # noqa: E402
 from assetkit_blender.load_options import make_load_options  # noqa: E402
 
@@ -226,17 +227,32 @@ def main() -> None:
                 f"expected three two-primitive controller runs, got {native_runs}"
             )
 
-        objects = import_assetkit_file(
-            os.fspath(path),
-            load_options=options,
-            collection=bpy.context.collection,
-            focus_mode="NEVER",
-            placement_mode="AS_AUTHORED",
-            select_imported=False,
-            shading_mode="AUTO",
-            set_viewport_shading=False,
-            clean_viewport_overlays=False,
-        )
+        previous_threshold = importer_module._PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD
+        importer_module._PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD = 0
+        destination = bpy.context.collection
+        try:
+            objects = import_assetkit_file(
+                os.fspath(path),
+                load_options=options,
+                collection=destination,
+                focus_mode="NEVER",
+                placement_mode="AS_AUTHORED",
+                select_imported=False,
+                shading_mode="AUTO",
+                set_viewport_shading=False,
+                clean_viewport_overlays=False,
+            )
+        finally:
+            importer_module._PROGRESSIVE_LARGE_SCENE_UNIT_THRESHOLD = previous_threshold
+        import_collection = destination.children.get(path.stem)
+        if (
+            import_collection is None
+            or bpy.data.collections.get("AssetKit Import") is not None
+            or import_collection.get("assetkit_progressive_staging") is not None
+        ):
+            raise AssertionError(
+                "blocking staged import did not publish the source filename collection"
+            )
         bpy.context.view_layer.update()
         meshes = [obj for obj in objects if obj.type == "MESH" and obj.data]
         if len(meshes) != 3:
