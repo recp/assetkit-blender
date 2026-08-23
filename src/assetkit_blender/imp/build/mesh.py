@@ -890,6 +890,7 @@ def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiv
         ):
             group.append(primitives[index])
             index += 1
+        _mark_explicit_backface_primitives(group)
         if (
             index < count
             and _line_primitive_can_join_surface_group(primitives[index], group)
@@ -899,6 +900,112 @@ def _mesh_import_units(primitives: list[MeshPrimitiveData]) -> list[MeshPrimitiv
         units.append(group if len(group) > 1 else primitive)
 
     return units
+
+
+def _mark_explicit_backface_primitives(
+    primitives: list[MeshPrimitiveData],
+) -> None:
+    """Cull only exact, explicitly authored front/back material pairs.
+
+    Some DAE producers represent different front- and back-face materials as
+    coincident triangles with opposite winding.  DAE's DOUBLE_SIDED flag must
+    not make both copies visible from the same side: doing so changes the
+    authored material and causes z-fighting.  Detecting exact triangle pairs
+    preserves ordinary double-sided geometry and has no render-time cost.
+    """
+    candidates = [
+        primitive
+        for primitive in primitives
+        if (
+            int(primitive.file_type) == AK_FILE_TYPE_COLLADA
+            and int(primitive.primitive_type) == AK_PRIMITIVE_TRIANGLES
+            and bool(primitive.double_sided)
+            and int(primitive.face_count) > 0
+            and int(primitive.loop_count) == int(primitive.face_count) * 3
+        )
+    ]
+    if len(candidates) < 2:
+        return
+
+    material_ids = {
+        _explicit_backface_material_identity(primitive) for primitive in candidates
+    }
+    if len(material_ids) < 2:
+        return
+
+    # canonical triangle -> winding parity -> material/primitive pairs
+    triangles: dict[
+        tuple[tuple[float, float, float], ...],
+        tuple[dict[object, set[int]], dict[object, set[int]]],
+    ] = {}
+    primitive_by_id = {id(primitive): primitive for primitive in candidates}
+    paired_ids: set[int] = set()
+
+    for primitive in candidates:
+        positions = _buffer_view(primitive.vertices_f32, "f")
+        indices = _buffer_view(primitive.indices_u32, "i")
+        if (
+            positions is None
+            or len(positions) != int(primitive.vertex_count) * 3
+            or indices is None
+            or len(indices) != int(primitive.loop_count)
+        ):
+            continue
+
+        material_id = _explicit_backface_material_identity(primitive)
+        primitive_id = id(primitive)
+        for offset in range(0, len(indices), 3):
+            vertex_indices = (
+                int(indices[offset]),
+                int(indices[offset + 1]),
+                int(indices[offset + 2]),
+            )
+            if (
+                min(vertex_indices) < 0
+                or max(vertex_indices) >= int(primitive.vertex_count)
+            ):
+                continue
+            vertices = tuple(
+                (
+                    float(positions[index * 3]),
+                    float(positions[index * 3 + 1]),
+                    float(positions[index * 3 + 2]),
+                )
+                for index in vertex_indices
+            )
+            if len(set(vertices)) < 3:
+                continue
+
+            canonical = tuple(sorted(vertices))
+            parity = int(
+                (vertices[0] > vertices[1])
+                + (vertices[0] > vertices[2])
+                + (vertices[1] > vertices[2])
+            ) & 1
+            sides = triangles.setdefault(canonical, ({}, {}))
+            opposite = sides[1 - parity]
+            for opposite_material, opposite_primitive_ids in opposite.items():
+                if opposite_material == material_id:
+                    continue
+                paired_ids.add(primitive_id)
+                paired_ids.update(opposite_primitive_ids)
+            sides[parity].setdefault(material_id, set()).add(primitive_id)
+
+    for primitive_id in paired_ids:
+        primitive_by_id[primitive_id].force_single_sided = True
+
+
+def _explicit_backface_material_identity(primitive: MeshPrimitiveData) -> object:
+    material_key = int(primitive.material_key or 0)
+    if material_key:
+        return ("native", material_key)
+    return (
+        "visual",
+        primitive.material_name,
+        tuple(float(value) for value in primitive.base_color),
+        primitive.base_color_texture,
+        primitive.transparent_texture,
+    )
 
 
 def _mesh_group_skin_data_equal(

@@ -2040,7 +2040,7 @@ def _apply_material_ior(
 
 
 def _is_double_sided_material(data: MeshPrimitiveData) -> bool:
-    return bool(data.double_sided)
+    return bool(data.double_sided) and not bool(data.force_single_sided)
 
 
 def _set_transparency_overlap(mat: bpy.types.Material, enabled: bool) -> None:
@@ -2164,7 +2164,13 @@ def _material_cache_key(data: MeshPrimitiveData) -> object:
     color_attr = _color_attribute_name(data)
     native_key = int(getattr(data, "material_key", 0) or 0)
     if native_key and _preserve_native_material_identity(data):
-        return ("native", int(data.file_type), native_key, color_attr)
+        return (
+            "native",
+            int(data.file_type),
+            native_key,
+            color_attr,
+            _is_double_sided_material(data),
+        )
     visual_key = _fast_visual_material_cache_key(data, color_attr)
     if visual_key is not None:
         return visual_key
@@ -2264,7 +2270,7 @@ def _fast_simple_native_base_color_texture_key(data: MeshPrimitiveData) -> objec
         data.base_color_texture,
         round(float(data.metallic), 6),
         round(float(data.roughness), 6),
-        bool(data.double_sided),
+        _is_double_sided_material(data),
         _texture_infos_cache_key(data.texture_infos),
     )
 
@@ -2353,7 +2359,7 @@ def _fast_base_color_texture_visual_key(data: MeshPrimitiveData, color_attr: str
         data.base_color_texture,
         round(float(data.metallic), 6),
         round(float(data.roughness), 6),
-        bool(data.double_sided),
+        _is_double_sided_material(data),
     )
 
 

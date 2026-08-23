@@ -872,7 +872,7 @@ def _finish_import(
         else 0.0
     )
     phase_started_at = time.perf_counter() if profile_detail else 0.0
-    if set_viewport_shading and scene_was_empty:
+    if set_viewport_shading:
         _set_viewport_material_preview(clean_viewport_overlays)
     shading_ms = (
         (time.perf_counter() - phase_started_at) * 1000.0
