@@ -46,6 +46,7 @@ from ..mesh import (
     _set_mesh_material_indices,
     _set_mesh_positions,
     _set_render_color_index,
+    _set_mesh_smooth,
     _set_uv_layer_values,
     _triangle_loop_starts,
     _uses_wavefront_smoothing,
@@ -650,15 +651,23 @@ def _create_grouped_mesh_object_bulk(
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
-    if str(shading_mode or "AUTO").upper() == "FLAT":
+    flat_after_update = (
+        str(shading_mode or "AUTO").upper() == "AUTO"
+        and not normals
+        and vertex_normals is None
+        and not _uses_wavefront_smoothing(data)
+    )
+    if flat_after_update:
+        shading_done = True
+    elif str(shading_mode or "AUTO").upper() == "FLAT":
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     elif _apply_wavefront_smoothing(mesh, data, shading_mode, normals, vertex_normals):
-        shading_done = True
-    elif shading_mode != "SMOOTH" and not normals and vertex_normals is None:
         shading_done = True
     else:
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     mesh.update(calc_edges=True)
+    if flat_after_update:
+        _set_mesh_smooth(mesh, False)
     if profile_detail:
         now = time.perf_counter()
         detail_parts.append(f"update={(now - phase_started_at) * 1000.0:.3f}ms")
@@ -1439,17 +1448,25 @@ def _create_mesh_object_bulk(
 
     normals = _buffer_view(data.normals_f32, "f") if data.normals_f32 else None
     vertex_normals = _buffer_view(data.vertex_normals_f32, "f") if data.vertex_normals_f32 else None
-    if str(shading_mode or "AUTO").upper() == "FLAT":
+    flat_after_update = (
+        str(shading_mode or "AUTO").upper() == "AUTO"
+        and not normals
+        and vertex_normals is None
+        and not _uses_wavefront_smoothing(data)
+    )
+    if flat_after_update:
+        shading_done = True
+    elif str(shading_mode or "AUTO").upper() == "FLAT":
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     elif _apply_wavefront_smoothing(mesh, data, shading_mode, normals, vertex_normals):
-        shading_done = True
-    elif shading_mode != "SMOOTH" and not normals and vertex_normals is None:
         shading_done = True
     else:
         shading_done = _apply_shading(mesh, shading_mode, normals, vertex_normals, apply_custom_normals=False)
     # Blender derives polygon edges faster than feeding large edge buffers here;
     # line primitives still use their dedicated edge path.
     mesh.update(calc_edges=False)
+    if flat_after_update:
+        _set_mesh_smooth(mesh, False)
     lap_detail("update")
     if not shading_done and defer_custom_normals:
         shading_done = _queue_deferred_custom_normals(mesh, normals, vertex_normals, data)

@@ -58,7 +58,15 @@ akb_extract_node_light(AkbSceneNode *out, AkDoc *doc, AkNode *node) {
   out->light_color[0] = resolved.color.rgba.R;
   out->light_color[1] = resolved.color.rgba.G;
   out->light_color[2] = resolved.color.rgba.B;
-  out->light_values[0] = resolved.intensity;
+  /* COLLADA intensity is unitless. Map its common small legacy values to
+     Blender's 10 W point/spot convention; preserve explicit high values. */
+  out->light_values[0] = doc
+                         && doc->inf
+                         && doc->inf->ftype == AK_FILE_TYPE_COLLADA
+                         && authored.intensity > 0.0f
+                         && authored.intensity <= 16.0f
+                           ? authored.intensity * 10.0f
+                           : resolved.intensity;
   out->light_values[1] = resolved.range;
   out->light_values[5] = resolved.attenuationFalloffExponent;
   out->light_values[6] = authored.attenuation.constant;
