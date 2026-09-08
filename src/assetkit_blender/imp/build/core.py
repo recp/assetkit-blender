@@ -81,10 +81,12 @@ def _begin_scene_build(
     curves: list[CurveData] | None = None,
     preserve_tangents: bool = False,
     defer_scene_nodes: bool = False,
+    apply_scene_settings: bool = True,
 ) -> ImportState:
     profile_detail = _profile_state.stats is not None
     started_at = time.perf_counter() if profile_detail else 0.0
-    _set_document_extra_props(collection, doc_extra, scene_extra, scene_info, doc_images)
+    _set_document_extra_props(collection, doc_extra, scene_extra, scene_info, doc_images,
+                              apply_scene_settings=apply_scene_settings)
     doc_ms = (time.perf_counter() - started_at) * 1000.0 if profile_detail else 0.0
     phase_started_at = time.perf_counter() if profile_detail else 0.0
     coord_root = _create_coord_root(primitives, collection, curves)
@@ -204,8 +206,11 @@ def _set_document_extra_props(
     scene_extra: object | None = None,
     scene_info: dict | None = None,
     doc_images: list[dict] | None = None,
+    apply_scene_settings: bool = True,
 ) -> None:
-    for target in (collection, bpy.context.scene, getattr(bpy.context.scene, "world", None)):
+    targets = ((collection, bpy.context.scene, getattr(bpy.context.scene, "world", None))
+               if apply_scene_settings else (collection,))
+    for target in targets:
         _clear_assetkit_props(
             target,
             (
@@ -219,10 +224,13 @@ def _set_document_extra_props(
             ),
         )
     _set_assetkit_json_prop(collection, "assetkit_document_extra_json", doc_extra)
-    _set_assetkit_json_prop(bpy.context.scene, "assetkit_document_extra_json", doc_extra)
     _set_assetkit_json_prop(collection, "assetkit_document_images_json", doc_images)
-    _set_assetkit_json_prop(bpy.context.scene, "assetkit_document_images_json", doc_images)
     _set_scene_props(collection, scene_extra, scene_info)
+    if not apply_scene_settings:
+        return
+
+    _set_assetkit_json_prop(bpy.context.scene, "assetkit_document_extra_json", doc_extra)
+    _set_assetkit_json_prop(bpy.context.scene, "assetkit_document_images_json", doc_images)
     _set_scene_props(bpy.context.scene, scene_extra, scene_info)
     world = _assetkit_document_world(doc_extra, doc_images)
     if world:

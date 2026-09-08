@@ -550,9 +550,10 @@ def write_staged_manifest(
 
 
 def copy_metadata(stage_dir: Path) -> None:
-    for name in ("LICENSE", "NOTICE.md", "README.md"):
+    for name in ("LICENSE", "NOTICE.md", "README.md", "docs/geometry-nodes.md"):
         path = ROOT / name
         if path.exists():
+            (stage_dir / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, stage_dir / name)
     licenses = ROOT / "LICENSES"
     if licenses.exists():

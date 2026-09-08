@@ -106,9 +106,13 @@ def register():
     bpy.types.TOPBAR_MT_file_import.prepend(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.prepend(menu_func_export)
     bpy.types.TOPBAR_MT_file.append(menu_func_assetkit)
+    from . import geonodes
+    geonodes.register()
 
 
 def unregister():
+    from . import geonodes
+    geonodes.unregister()
     bpy.types.TOPBAR_MT_file.remove(menu_func_assetkit)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)

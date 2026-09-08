@@ -11,6 +11,12 @@ class AssetKitPreferences(bpy.types.AddonPreferences):
         default="",
     )
 
+    source_cache_mib: bpy.props.IntProperty(
+        name="Geometry Source Cache (MiB)", default=512, min=16, max=32768,
+        description="Estimated source-data budget; active sources stay resident even if larger than the budget",
+    )
+
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "assetkit_library")
+        layout.prop(self, "source_cache_mib")

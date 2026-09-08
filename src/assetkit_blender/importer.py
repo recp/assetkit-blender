@@ -67,6 +67,7 @@ from .load_options import (
     AKB_LOAD_OPT_DEFER_CUSTOM_NORMALS,
     AKB_LOAD_OPT_PRESERVE_TANGENTS,
     AKB_LOAD_OPT_SCENE_BOUNDS,
+    AKB_LOAD_OPT_SCENE_INDEX,
     AKB_LOAD_OPT_TEXTURE_LOADING,
     AKB_LOAD_TEXTURE_AUTO,
     AKB_LOAD_TEXTURE_DEFERRED,
@@ -119,6 +120,7 @@ def import_assetkit_file(
     clean_viewport_overlays: bool = True,
     fit_timeline: bool = False,
     preserve_hierarchy: bool = False,
+    _source_context: dict | None = None,
 ) -> list[bpy.types.Object]:
     shading_mode = str(shading_mode or "AUTO").upper()
     _reset_action_cache()
@@ -154,6 +156,12 @@ def import_assetkit_file(
         load_options,
     )
 
+    if _source_context is not None:
+        if (load_options and len(load_options) > AKB_LOAD_OPT_SCENE_INDEX
+                and load_options[AKB_LOAD_OPT_SCENE_INDEX] >= scene_info.get("count", 0)):
+            raise ValueError("Source scene index is out of range")
+        _source_context.update(scene_info=scene_info, nodes=scene_nodes, objects={})
+
     if profile_detail:
         _profile_log(
             "blocking load "
@@ -182,6 +190,7 @@ def import_assetkit_file(
         defer_custom_normals=defer_custom_normals,
         preserve_tangents=preserve_tangents,
         create_all_nodes=preserve_hierarchy,
+        apply_scene_settings=(_source_context is None),
         defer_scene_nodes=(
             staging_collection is not None
             and _can_defer_scene_nodes(primitives, curves)
@@ -248,7 +257,12 @@ def import_assetkit_file(
                 unit_started_at   = time.perf_counter()
                 cache_hits_before = int(state.mesh_cache_hits)
 
-            objects.extend(_create_import_unit(unit, state, build_collection, shading_mode))
+            unit_objects = _create_import_unit(unit, state, build_collection, shading_mode)
+            objects.extend(unit_objects)
+            if _source_context is not None:
+                primitive = unit[0] if isinstance(unit, list) else unit
+                for obj in unit_objects:
+                    _source_context["objects"][obj.as_pointer()] = primitive.node_index
 
             if profile_detail:
                 cache_hit = int(state.mesh_cache_hits) != cache_hits_before
@@ -286,7 +300,11 @@ def import_assetkit_file(
         publish_ms = _elapsed_ms(phase_started_at) if profile_detail else 0.0
 
         phase_started_at = time.perf_counter() if profile_detail else 0.0
-        _realize_full_hierarchy_instances(state)
+        if _source_context is None:
+            _realize_full_hierarchy_instances(state)
+        else:
+            for index, obj in state.node_objects.items():
+                _source_context["objects"].setdefault(obj.as_pointer(), index)
         realize_hierarchy_ms = _elapsed_ms(phase_started_at) if profile_detail else 0.0
     finally:
         _textures.ACTIVE_LOAD_MODE                    = previous_texture_load_mode

@@ -24,6 +24,18 @@ type use it directly; earlier versions display ordinary points with the same dat
 SPZ uses the optional `assetkit_spz` decoder bundled with the native bridge.
 L-GSC uses AssetKit's built-in C decoder.
 
+## Geometry Nodes
+
+In the Geometry Nodes editor, use **Add > AssetKit** for file sources, existing
+objects, point cropping and splat opacity. File sources output the selected
+scene's geometry as instances; an optional node path selects a subtree.
+The file source is also in **Add > Input > Import > AssetKit File / Sequence**.
+
+Numbered file sequences follow the Blender timeline and share a memory-budgeted
+cache. Helpers are created only when added; ordinary import does not enable them.
+No custom Blender build is needed. See [Geometry Nodes](docs/geometry-nodes.md)
+for selection, sequence and cache settings.
+
 
 ## Install to Blender
 
