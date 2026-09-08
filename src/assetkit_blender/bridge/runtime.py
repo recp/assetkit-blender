@@ -10,6 +10,7 @@ from ..enums import (
     AK_FILE_TYPE_COLLADA,
     AK_FILE_TYPE_GLB,
     AK_FILE_TYPE_GLTF,
+    AK_FILE_TYPE_LGSC,
     AK_FILE_TYPE_PLY,
     AK_FILE_TYPE_SPZ,
     AK_FILE_TYPE_STL,
@@ -69,6 +70,7 @@ def probe_file_type(filepath: str | os.PathLike[str]) -> int:
         ".stl":  AK_FILE_TYPE_STL,
         ".ply":  AK_FILE_TYPE_PLY,
         ".spz":  AK_FILE_TYPE_SPZ,
+        ".lgsc": AK_FILE_TYPE_LGSC,
         ".3mf":  AK_FILE_TYPE_3MF,
     }.get(suffix, AK_FILE_TYPE_AUTO)
 

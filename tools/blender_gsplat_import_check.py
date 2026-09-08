@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Gaussian PLY/SPZ import in Blender, including point attributes.
+"""Check Gaussian PLY/SPZ/L-GSC import in Blender, including point attributes.
 
 blender --background --factory-startup --python tools/blender_gsplat_import_check.py -- --spz capture.spz
 """
@@ -20,6 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--package-root", type=Path, default=Path(__file__).resolve().parents[1] / "src")
     parser.add_argument("--spz", type=Path)
+    parser.add_argument("--lgsc", type=Path)
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else [])
     sys.path.insert(0, str(args.package_root))
 
@@ -78,6 +79,8 @@ def main():
         assert "radiance:sh_23" in cloud.attributes
     if args.spz:
         check(args.spz)
+    if args.lgsc:
+        check(args.lgsc)
 
 
 if __name__ == "__main__":
