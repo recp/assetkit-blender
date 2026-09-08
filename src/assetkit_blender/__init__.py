@@ -108,9 +108,13 @@ def register():
     bpy.types.TOPBAR_MT_file.append(menu_func_assetkit)
     from . import geonodes
     geonodes.register()
+    from . import gsplat_preview
+    gsplat_preview.register()
 
 
 def unregister():
+    from . import gsplat_preview
+    gsplat_preview.unregister()
     from . import geonodes
     geonodes.unregister()
     bpy.types.TOPBAR_MT_file.remove(menu_func_assetkit)

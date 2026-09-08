@@ -36,6 +36,7 @@
 
 
 #include "common/types.inc"
+#include "common/depth_sort.inc"
 #include "imp/import.inc"
 #include "exp/export.inc"
 
@@ -78,6 +79,7 @@ akb_assetkit_cleanup(void) {
 #endif
 
 static PyMethodDef akb_methods[] = {
+  {"sort_depth", akb_sort_depth, METH_O, "Return stable uint32 indices for a native float32 depth buffer."},
   {"probe_file_type", akb_probe_file_type, METH_VARARGS, "Identify an asset or package root format without loading it."},
   {"load_meshes", akb_load_meshes, METH_VARARGS, "Load mesh buffers through AssetKit."},
   {"open_scene", akb_open_scene, METH_VARARGS, "Open an AssetKit scene for batched mesh reads."},

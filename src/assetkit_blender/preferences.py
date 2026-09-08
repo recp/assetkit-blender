@@ -16,7 +16,19 @@ class AssetKitPreferences(bpy.types.AddonPreferences):
         description="Estimated source-data budget; active sources stay resident even if larger than the budget",
     )
 
+    gaussian_preview: bpy.props.BoolProperty(
+        name="Gaussian Preview on Import", default=True,
+        description="Preview imported Gaussian point clouds in Solid shading using the GPU",
+    )
+
+    gaussian_preview_mib: bpy.props.IntProperty(
+        name="Gaussian Preview Budget (MiB)", default=1024, min=64, max=32768,
+        description="Memory budget for Gaussian viewport data and working buffers",
+    )
+
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "assetkit_library")
         layout.prop(self, "source_cache_mib")
+        layout.prop(self, "gaussian_preview")
+        layout.prop(self, "gaussian_preview_mib")

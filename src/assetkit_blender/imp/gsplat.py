@@ -60,6 +60,7 @@ def create_pointcloud(data):
             radius.data.foreach_set("value", np.max(scales, axis=1))
         points["assetkit_gaussian_splat_antialiased"] = bool(data.gsplat_antialiased)
         points["assetkit_gaussian_splat_sh_degree"] = int(data.gsplat_sh_degree)
+        points["assetkit_gaussian_splat_color_space"] = int(data.gsplat_color_space)
         points.update_tag()
         return points
     except Exception:

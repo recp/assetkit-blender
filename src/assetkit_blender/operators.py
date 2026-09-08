@@ -171,7 +171,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     )
     set_viewport_shading: bpy.props.BoolProperty(
         name="Set Viewport Shading",
-        description="Switch 3D viewports to material preview after import",
+        description="Set import shading; Gaussian preview uses Solid, other geometry uses Material Preview",
         default=True,
     )
     clean_viewport_overlays: bpy.props.BoolProperty(

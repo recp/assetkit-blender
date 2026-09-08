@@ -40,6 +40,7 @@ def main():
         assert len(cloud.points) == count
         assert cloud["assetkit_gaussian_splat_sh_degree"] == primitive.gsplat_sh_degree
         assert cloud["assetkit_gaussian_splat_antialiased"] == primitive.gsplat_antialiased
+        assert cloud["assetkit_gaussian_splat_color_space"] == primitive.gsplat_color_space
         source_attrs = {attr.name: np.frombuffer(attr.values_f32, dtype=np.float32).reshape(count, attr.width)
                         for attr in primitive.point_attrs}
 

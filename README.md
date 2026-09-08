@@ -20,7 +20,10 @@ a **fast**, native path for **other formats** like glTF/GLB, OBJ, STL, PLY, and 
 
 Gaussian SPZ, L-GSC, PLY and glTF import preserves scale, rotation, opacity and spherical
 harmonics as PointCloud attributes. Blender builds with the native Gaussian splat
-type use it directly; earlier versions display ordinary points with the same data.
+type use it directly; other builds have an optional GPU preview in Solid shading.
+It draws oriented, transparent splats with view-dependent SH color, without
+creating meshes. See [Gaussian preview](docs/gaussian-preview.md) for controls
+and the distinction from F12 rendering.
 SPZ uses the optional `assetkit_spz` decoder bundled with the native bridge.
 L-GSC uses AssetKit's built-in C decoder.
 
