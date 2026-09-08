@@ -1348,6 +1348,8 @@ akb_primitive_to_py(AkbPrimitive *prim, PyObject *owner) {
               PyLong_FromUnsignedLong(prim->gsplat.sorting_method));
   AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_DECODED_COUNT,
               PyLong_FromUnsignedLong(prim->gsplat.decoded_count));
+  AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_SH_DEGREE, PyLong_FromUnsignedLong(prim->gsplat.sh_degree));
+  AKB_SET_OBJ(AKB_PY_PRIM_GSPLAT_ANTIALIASED, PyBool_FromLong(prim->gsplat.antialiased));
   AKB_SET_OBJ(AKB_PY_PRIM_HAS_SKIN, PyBool_FromLong(prim->has_skin));
   AKB_SET_OBJ(AKB_PY_PRIM_HAS_SHEEN, PyBool_FromLong(prim->has_sheen));
   AKB_SET_OBJ(AKB_PY_PRIM_SKIN_VERTEX_COUNT, PyLong_FromUnsignedLong(prim->skin_vertex_count));

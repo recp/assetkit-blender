@@ -1555,6 +1555,20 @@ def _create_point_mesh_object_bulk(
     collection: bpy.types.Collection | None = None,
     node_visibility_animation: bool = True,
 ) -> list[bpy.types.Object]:
+    if data.has_gsplat:
+        from ..gsplat import create_pointcloud
+
+        if (points := create_pointcloud(data)) is not None:
+            return _finish_mesh_object(
+                points, data, parent,
+                node_objects=node_objects, node_data=node_data,
+                node_visibility=node_visibility, material_cache=material_cache,
+                skin_cache=skin_cache, apply_transform=apply_transform,
+                apply_animation=apply_animation, apply_skin_animation=apply_skin_animation,
+                deferred_skin_animations=deferred_skin_animations,
+                collection=collection, assign_material=False,
+                node_visibility_animation=node_visibility_animation,
+            )
     mesh = bpy.data.meshes.new(data.name)
 
     mesh.vertices.add(data.vertex_count)

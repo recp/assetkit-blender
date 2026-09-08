@@ -14,7 +14,13 @@ a **fast**, native path for **other formats** like glTF/GLB, OBJ, STL, PLY, and 
 - 3MF
 - OBJ
 - STL
-- PLY
+- PLY (including Gaussian splat import)
+- SPZ (import)
+
+Gaussian SPZ, PLY and glTF import preserves scale, rotation, opacity and spherical
+harmonics as PointCloud attributes. Blender builds with the native Gaussian splat
+type use it directly; earlier versions display ordinary points with the same data.
+SPZ uses the optional `assetkit_spz` decoder bundled with the native bridge.
 
 
 ## Install to Blender

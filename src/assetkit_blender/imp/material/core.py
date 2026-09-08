@@ -313,6 +313,8 @@ def _apply_gaussian_splat_props(obj: bpy.types.Object, data: MeshPrimitiveData) 
         data.gsplat_sorting_method
     )
     obj["assetkit_gaussian_splat_decoded_count"] = int(data.gsplat_decoded_count)
+    obj["assetkit_gaussian_splat_sh_degree"] = int(data.gsplat_sh_degree)
+    obj["assetkit_gaussian_splat_antialiased"] = bool(data.gsplat_antialiased)
     obj["assetkit_gaussian_splat_kernel_value"] = int(data.gsplat_kernel)
     obj["assetkit_gaussian_splat_color_space_value"] = int(data.gsplat_color_space)
     obj["assetkit_gaussian_splat_projection_value"] = int(data.gsplat_projection)

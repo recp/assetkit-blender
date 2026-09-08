@@ -287,6 +287,8 @@ typedef struct AkbGaussianSplatInfo {
   uint32_t projection;
   uint32_t sorting_method;
   uint32_t decoded_count;
+  uint8_t sh_degree;
+  uint8_t antialiased;
 } AkbGaussianSplatInfo;
 
 typedef struct AkbPrimitive {
@@ -904,6 +906,8 @@ typedef enum AkbPyPrimitiveField {
   AKB_PY_PRIM_EDGE_COUNT,
   AKB_PY_PRIM_EDGES_U32,
   AKB_PY_PRIM_SMOOTH_SHADING,
+  AKB_PY_PRIM_GSPLAT_SH_DEGREE,
+  AKB_PY_PRIM_GSPLAT_ANTIALIASED,
   AKB_PY_PRIM_FIELD_COUNT
 } AkbPyPrimitiveField;
 

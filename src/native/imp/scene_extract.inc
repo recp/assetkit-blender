@@ -523,6 +523,8 @@ akb_extract_primitive(AkbArena *arena,
       out.gsplat.projection = (uint32_t)prim->gsplat->projection;
       out.gsplat.sorting_method = (uint32_t)prim->gsplat->sortingMethod;
       out.gsplat.decoded_count = prim->gsplat->decodedCount;
+      out.gsplat.sh_degree = prim->gsplat->shDegree;
+      out.gsplat.antialiased = prim->gsplat->antialiased;
     }
     akb_extract_material(doc_owner,
                          doc,

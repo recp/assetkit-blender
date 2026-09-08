@@ -104,6 +104,8 @@ class MeshPrimitiveData:
     gsplat_projection: int = 0
     gsplat_sorting_method: int = 0
     gsplat_decoded_count: int = 0
+    gsplat_sh_degree: int = 0
+    gsplat_antialiased: bool = False
     has_skin: bool = False
     anim_count: int = 0
     morph_target_count: int = 0

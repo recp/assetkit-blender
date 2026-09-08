@@ -989,6 +989,10 @@ akb_point_attr_candidate(AkInput *input, uint32_t primitive_type) {
     return 0;
   if (input->semantic == AK_INPUT_POSITION)
     return 0;
+  if (primitive_type == AKB_PRIMITIVE_POINTS
+      && (input->semantic == AK_INPUT_ROTATION || input->semantic == AK_INPUT_SCALE
+          || input->semantic == AK_INPUT_OPACITY || input->semantic == AK_INPUT_SH))
+    return 1;
   if (!input->semanticRaw)
     return 0;
 
@@ -1096,6 +1100,17 @@ akb_point_attr_name(AkbLoopFloatAttribute *attr, AkInput *input, uint32_t fallba
       snprintf(attr->name, sizeof(attr->name), "Color.%03u", input->set);
   } else if (input->semantic == AK_INPUT_NORMAL) {
     snprintf(attr->name, sizeof(attr->name), "assetkit_normal");
+  } else if (input->semantic == AK_INPUT_SH) {
+    if (input->set == 0)
+      snprintf(attr->name, sizeof(attr->name), "radiance:dc");
+    else
+      snprintf(attr->name, sizeof(attr->name), "radiance:sh_%u", input->set - 1);
+  } else if (input->semantic == AK_INPUT_OPACITY) {
+    snprintf(attr->name, sizeof(attr->name), "opacity");
+  } else if (input->semantic == AK_INPUT_SCALE) {
+    snprintf(attr->name, sizeof(attr->name), "scale");
+  } else if (input->semantic == AK_INPUT_ROTATION) {
+    snprintf(attr->name, sizeof(attr->name), "rotation");
   } else if (raw && strcmp(raw, "OPACITY") == 0) {
     snprintf(attr->name, sizeof(attr->name), "assetkit_opacity");
   } else if (raw && strcmp(raw, "SCALE") == 0) {

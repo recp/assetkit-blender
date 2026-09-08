@@ -660,7 +660,9 @@ class NativeSimpleMeshData:
     _M_EDGE_COUNT,
     _M_EDGES_U32,
     _M_SMOOTH_SHADING,
-) = range(133)
+    _M_GSPLAT_SH_DEGREE,
+    _M_GSPLAT_ANTIALIASED,
+) = range(135)
 
 _M_FIELD_NAMES = (
     "_owner",
@@ -796,6 +798,8 @@ _M_FIELD_NAMES = (
     "edge_count",
     "edges_u32",
     "smooth_shading",
+    "gsplat_sh_degree",
+    "gsplat_antialiased",
 )
 
 
@@ -1095,6 +1099,8 @@ def meshes_from_raw(raw_meshes: Iterable[dict]) -> list[MeshPrimitiveData]:
         data.gsplat_projection = int(get(_M_GSPLAT_PROJECTION) or 0)
         data.gsplat_sorting_method = int(get(_M_GSPLAT_SORTING_METHOD) or 0)
         data.gsplat_decoded_count = int(get(_M_GSPLAT_DECODED_COUNT) or 0)
+        data.gsplat_sh_degree = int(get(_M_GSPLAT_SH_DEGREE) or 0)
+        data.gsplat_antialiased = bool(get(_M_GSPLAT_ANTIALIASED))
         data.has_skin = bool(get(_M_HAS_SKIN))
         data.anim_count = int(get(_M_ANIM_COUNT) or 0)
         data.morph_target_count = int(get(_M_MORPH_TARGET_COUNT) or 0)
