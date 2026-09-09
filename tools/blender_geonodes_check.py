@@ -118,11 +118,13 @@ def main():
             tree.nodes.remove(node)
         CACHE.trim(0)
 
-    def evaluated_mesh(node, group=None, values=None, points=False):
+    def evaluated_mesh(node, group=None, values=None, points=False, instances=False):
         graph = bpy.data.node_groups.new("Source Evaluation", "GeometryNodeTree")
         graph.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
         src = graph.nodes.new("GeometryNodeGroup")
         src.node_tree = node.node_tree
+        for socket in node.inputs:
+            src.inputs[socket.name].default_value = socket.default_value
         previous = src.outputs["Geometry"]
         if group:
             operation = graph.nodes.new("GeometryNodeGroup")
@@ -131,9 +133,10 @@ def main():
             for name, value in (values or {}).items():
                 operation.inputs[name].default_value = value
             previous = operation.outputs["Geometry"]
-        realize = graph.nodes.new("GeometryNodeRealizeInstances")
-        graph.links.new(previous, realize.inputs["Geometry"])
-        previous = realize.outputs["Geometry"]
+        if not instances:
+            realize = graph.nodes.new("GeometryNodeRealizeInstances")
+            graph.links.new(previous, realize.inputs["Geometry"])
+            previous = realize.outputs["Geometry"]
         if points:
             convert = graph.nodes.new("GeometryNodePointsToVertices")
             graph.links.new(previous, convert.inputs["Points"])
@@ -147,15 +150,20 @@ def main():
         bpy.context.view_layer.update()
         depsgraph = bpy.context.evaluated_depsgraph_get()
         evaluated = obj.evaluated_get(depsgraph)
-        result = evaluated.to_mesh()
-        positions = [tuple(vertex.co) for vertex in result.vertices]
-        base = result.attributes.get("radiance:base")
-        colors = [tuple(value.color) for value in base.data] if base else []
-        evaluated.to_mesh_clear()
+        if instances:
+            result = [(item.object.original.data, item.matrix_world.copy())
+                      for item in depsgraph.object_instances
+                      if item.is_instance and item.parent.original == obj]
+        else:
+            result = evaluated.to_mesh()
+            positions = [tuple(vertex.co) for vertex in result.vertices]
+            base = result.attributes.get("radiance:base")
+            colors = [tuple(value.color) for value in base.data] if base else []
+            evaluated.to_mesh_clear()
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh)
         bpy.data.node_groups.remove(graph)
-        return positions, colors
+        return result if instances else (positions, colors)
 
     try:
         for kind in ("OBJECT", "CROP", "OPACITY"):
@@ -189,6 +197,31 @@ def main():
             assert not removed, removed
             assert CACHE.loads == count
             print("Actual node evaluation / opacity / crop OK")
+
+            a.inputs["Translation"].default_value = (10, 20, 30)
+            a.inputs["Rotation"].default_value = (0, 0, math.pi / 2)
+            a.inputs["Scale"].default_value = (2, 3, 4)
+            positions, transformed_colors = evaluated_mesh(a, points=True)
+            x, y, z = original_position
+            expected = (10 - 3 * y, 20 + 2 * x, 30 + 4 * z)
+            assert all(abs(p - q) < 1e-5 for p, q in zip(positions[0], expected)), positions
+            assert transformed_colors == original
+            assert evaluated_mesh(b, points=True)[0] == [original_position]
+            from mathutils import Matrix, Vector
+            instances = evaluated_mesh(a, instances=True)
+            cloud = next(iter(collection(a).objects))
+            assert len(instances) == 1 and instances[0][0] == cloud.data
+            expected_matrix = (Matrix.Translation(Vector((10, 20, 30)))
+                               @ Matrix.Rotation(math.pi / 2, 4, "Z")
+                               @ Matrix.Diagonal(Vector((2, 3, 4, 1))) @ cloud.matrix_world)
+            assert max(abs(p - q) for row, expected_row in zip(instances[0][1], expected_matrix)
+                       for p, q in zip(row, expected_row)) < 1e-5
+            runtime.flush()
+            assert CACHE.loads == count
+            a.inputs["Translation"].default_value = (0, 0, 0)
+            a.inputs["Rotation"].default_value = (0, 0, 0)
+            a.inputs["Scale"].default_value = (1, 1, 1)
+            print("Source transforms / independent instances / no repeated decode OK")
 
             a.filepath = str(folder / "capture_####.ply")
             a.sequence = True

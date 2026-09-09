@@ -38,14 +38,26 @@ class AssetKitGeometrySource(bpy.types.GeometryNodeCustomGroup):
     def init(self, context):
         tree = bpy.data.node_groups.new("AssetKit Source", "GeometryNodeTree")
         tree.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+        translation = tree.interface.new_socket(name="Translation", in_out="INPUT", socket_type="NodeSocketVector")
+        translation.subtype = "TRANSLATION"
+        tree.interface.new_socket(name="Rotation", in_out="INPUT", socket_type="NodeSocketRotation")
+        scale = tree.interface.new_socket(name="Scale", in_out="INPUT", socket_type="NodeSocketVector")
+        scale.default_value = (1, 1, 1)
         source = tree.nodes.new("GeometryNodeCollectionInfo")
         source.name = "Source"
         source.transform_space = "ORIGINAL"
         source.inputs["Separate Children"].default_value = True
         source.inputs["Reset Children"].default_value = False
+        inputs = tree.nodes.new("NodeGroupInput")
+        inputs.location.y = -180
+        transform = tree.nodes.new("GeometryNodeTransform")
+        transform.location.x = 240
+        tree.links.new(source.outputs["Instances"], transform.inputs["Geometry"])
+        for name in ("Translation", "Rotation", "Scale"):
+            tree.links.new(inputs.outputs[name], transform.inputs[name])
         output = tree.nodes.new("NodeGroupOutput")
-        output.location.x = 240
-        tree.links.new(source.outputs["Instances"], output.inputs["Geometry"])
+        output.location.x = 480
+        tree.links.new(transform.outputs["Geometry"], output.inputs["Geometry"])
         self.node_tree = tree
         self.owner_scene = (context or bpy.context).scene
         runtime.changed(self)

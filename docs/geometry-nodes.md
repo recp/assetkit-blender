@@ -27,6 +27,12 @@ native file-reading evaluator. File and sequence settings are node properties,
 not field-driven input sockets. Ordinary Geometry Nodes evaluation reads the
 loaded Blender data without calling AssetKit again.
 
+**Translation**, **Rotation** and **Scale** inputs place the source as a whole,
+after its imported transforms. They operate on instances, leaving shared mesh
+and Gaussian attributes unchanged, and do not reload the file. Rotation can
+adjust the up axis; uniform Scale can adjust units. Existing source nodes saved
+before these inputs were added keep working; add a new source node to use them.
+
 **Object Source** references an existing Blender object through Object Info.
 Use this when the asset is already imported. It adds no file loading or source
 cache. Choose an object other than the host to avoid a dependency cycle.
@@ -72,6 +78,9 @@ incoming instances to edit the geometry. Add them only when needed; the source
 itself keeps instances intact. These helpers do not add a Gaussian renderer or
 convert an ordinary mesh into trained splats. Blender builds without a native
 Gaussian splat type retain the imported attributes on ordinary point clouds.
+On those builds, realizing a rotated or scaled Gaussian instance does not bake
+its custom scale, quaternion or SH attributes. For splats, apply these helpers
+before instance transforms and keep the final placement at the instance level.
 
 ## Memory and updates
 
