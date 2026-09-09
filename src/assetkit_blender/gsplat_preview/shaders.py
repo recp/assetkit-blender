@@ -11,7 +11,8 @@ vec4 load_data(uint address) {
 }
 
 vec4 load_object(uint address) {
-  return texelFetch(objects, ivec2(address % 8u, address / 8u), 0);
+  uint width = uint(textureSize(objects, 0).x);
+  return texelFetch(objects, ivec2(address % width, address / width), 0);
 }
 
 void store_result(uint address, vec4 value) {
@@ -106,7 +107,8 @@ void main() {
   c += 0.3;
   if (filtered <= 0.0 || isinf(filtered) || isnan(filtered)) return;
   float opacity = center.w;
-  if (params.x != 0.0) opacity *= sqrt(determinant/filtered);
+  float aa = load_data(base + 1u).w;
+  if (aa == 0.0 ? params.x != 0.0 : aa == 2.0) opacity *= sqrt(determinant/filtered);
   if (opacity < 1.0/255.0) return;
 
   float mean = 0.5*(a + c);
@@ -127,7 +129,8 @@ void main() {
   vec3 color = evaluate_sh(base + 3u, int(camera.w), ray);
   // Resolve every SH term before decoding sRGB. POST_VIEW is scene-linear;
   // Blender applies its display conversion after the preview has been blended.
-  if (parallel.w != 2.0) {
+  float color_space = load_data(base + 3u).w;
+  if ((color_space == 0.0 ? parallel.w : color_space) != 2.0) {
     color = mix(color/12.92, pow((color + 0.055)/1.055, vec3(2.4)),
                 greaterThan(color, vec3(0.04045)));
   }

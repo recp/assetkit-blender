@@ -2,6 +2,7 @@ import bpy
 from bpy_extras.io_utils import ImportHelper
 
 from . import runtime
+from ..load_options import COORDINATE_CONVERSIONS, COORDINATE_SYSTEMS
 
 
 class AssetKitSourceItem(bpy.types.PropertyGroup):
@@ -16,6 +17,10 @@ class AssetKitGeometrySource(bpy.types.GeometryNodeCustomGroup):
 
     filepath: bpy.props.StringProperty(name="File", subtype="FILE_PATH", update=runtime.changed)
     enabled: bpy.props.BoolProperty(name="Enabled", default=True, update=runtime.changed)
+    coordinate_conversion: bpy.props.EnumProperty(name="Coordinate Mode", items=COORDINATE_CONVERSIONS,
+                                                  default="TRANSFORM", update=runtime.changed)
+    coordinate_system: bpy.props.EnumProperty(name="Target Coordinates", items=COORDINATE_SYSTEMS,
+                                              default="Z_UP", update=runtime.changed)
     scene_index: bpy.props.IntProperty(name="Scene Index", default=-1, min=-1,
                                       description="-1: active/default source scene; otherwise a zero-based scene index",
                                       update=runtime.changed)
@@ -43,6 +48,8 @@ class AssetKitGeometrySource(bpy.types.GeometryNodeCustomGroup):
         tree.interface.new_socket(name="Rotation", in_out="INPUT", socket_type="NodeSocketRotation")
         scale = tree.interface.new_socket(name="Scale", in_out="INPUT", socket_type="NodeSocketVector")
         scale.default_value = (1, 1, 1)
+        uniform = tree.interface.new_socket(name="Global Scale", in_out="INPUT", socket_type="NodeSocketFloat")
+        uniform.default_value, uniform.min_value = 1.0, 0.000001
         source = tree.nodes.new("GeometryNodeCollectionInfo")
         source.name = "Source"
         source.transform_space = "ORIGINAL"
@@ -53,8 +60,14 @@ class AssetKitGeometrySource(bpy.types.GeometryNodeCustomGroup):
         transform = tree.nodes.new("GeometryNodeTransform")
         transform.location.x = 240
         tree.links.new(source.outputs["Instances"], transform.inputs["Geometry"])
-        for name in ("Translation", "Rotation", "Scale"):
+        for name in ("Translation", "Rotation"):
             tree.links.new(inputs.outputs[name], transform.inputs[name])
+        scaled = tree.nodes.new("ShaderNodeVectorMath")
+        scaled.operation = "SCALE"
+        scaled.location = (0, -360)
+        tree.links.new(inputs.outputs["Scale"], scaled.inputs[0])
+        tree.links.new(inputs.outputs["Global Scale"], scaled.inputs["Scale"])
+        tree.links.new(scaled.outputs["Vector"], transform.inputs["Scale"])
         output = tree.nodes.new("NodeGroupOutput")
         output.location.x = 480
         tree.links.new(transform.outputs["Geometry"], output.inputs["Geometry"])
@@ -87,6 +100,8 @@ class AssetKitGeometrySource(bpy.types.GeometryNodeCustomGroup):
         op = row.operator("assetkit.source_file", text="", icon="FILE_FOLDER")
         op.tree_name, op.node_name = self.id_data.name, self.name
         layout.prop(self, "scene_index")
+        layout.prop(self, "coordinate_conversion")
+        layout.prop(self, "coordinate_system")
         if self.scene_names:
             layout.label(text=self.scene_names)
         layout.prop_search(self, "node_path", self, "source_nodes", text="Node")
@@ -143,7 +158,9 @@ class ASSETKIT_OT_add_geometry_group(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
     kind: bpy.props.EnumProperty(items=(("OBJECT", "Object Source", "Use an existing Blender object"),
                                         ("CROP", "Crop Points", "Keep points inside an axis-aligned box"),
-                                        ("OPACITY", "Splat Opacity", "Multiply Gaussian opacity without changing radiance")))
+                                        ("OPACITY", "Splat Opacity", "Multiply Gaussian opacity without changing radiance"),
+                                        ("TO_GAUSSIANS", "Points to Gaussians", "Initialize missing Gaussian attributes; does not train a capture"),
+                                        ("TO_POINTS", "Gaussians to Points", "Use ordinary point display, retaining Gaussian attributes for conversion back")))
 
     @classmethod
     def poll(cls, context):
@@ -168,7 +185,8 @@ class ASSETKIT_MT_geometry_nodes(bpy.types.Menu):
     def draw(self, _context):
         op = self.layout.operator("node.add_node", text="File / Sequence Source")
         op.type, op.use_transform = "AssetKitGeometrySource", True
-        for kind, title in (("OBJECT", "Object Source"), ("CROP", "Crop Points"), ("OPACITY", "Splat Opacity")):
+        for kind, title in (("OBJECT", "Object Source"), ("CROP", "Crop Points"), ("OPACITY", "Splat Opacity"),
+                            ("TO_GAUSSIANS", "Points to Gaussians"), ("TO_POINTS", "Gaussians to Points")):
             self.layout.operator("assetkit.add_geometry_group", text=title).kind = kind
 
 

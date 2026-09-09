@@ -40,6 +40,20 @@ from .enums import (
 
 LoadOptions = tuple[int, ...]
 
+COORDINATE_CONVERSIONS = (
+    ("TRANSFORM", "Root Transform", "Keep mesh data as authored and add a coordinate root"),
+    ("ALL", "Convert Data", "Convert mesh data and node transforms in AssetKit"),
+    ("RAW", "Raw", "Do not convert source coordinates"),
+)
+COORDINATE_SYSTEMS = (
+    ("Z_UP", "Z Up", "Blender default right-handed Z-up coordinates"),
+    ("Y_UP", "Y Up", "Right-handed Y-up coordinates"),
+    ("X_UP", "X Up", "Right-handed X-up coordinates"),
+    ("Z_UP_LH", "Z Up LH", "Left-handed Z-up coordinates"),
+    ("Y_UP_LH", "Y Up LH", "Left-handed Y-up coordinates"),
+    ("X_UP_LH", "X Up LH", "Left-handed X-up coordinates"),
+)
+
 
 def _coord_system_id(value: str) -> int:
     if value == "Y_UP":

@@ -9,7 +9,7 @@ from bpy_extras.io_utils import ImportHelper
 
 from .bridge.runtime import AssetKitError, probe_file_type
 from .enums import AK_FILE_TYPE_COLLADA
-from .load_options import LoadOptions, make_load_options
+from .load_options import COORDINATE_CONVERSIONS, COORDINATE_SYSTEMS, LoadOptions, make_load_options
 
 
 _INTERACTIVE_IMPORT_TIMER_DELAY = 0.001
@@ -28,25 +28,18 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
     coordinate_conversion: bpy.props.EnumProperty(
         name="Coordinate Mode",
         description="How AssetKit should adapt source coordinates for Blender",
-        items=(
-            ("TRANSFORM", "Root Transform", "Keep mesh data as authored and add a coordinate root"),
-            ("ALL", "Convert Data", "Convert mesh data and node transforms in AssetKit"),
-            ("RAW", "Raw", "Do not convert source coordinates"),
-        ),
+        items=COORDINATE_CONVERSIONS,
         default="TRANSFORM",
     )
     coordinate_system: bpy.props.EnumProperty(
         name="Target Coordinates",
         description="Target coordinate system for converted imports",
-        items=(
-            ("Z_UP", "Z Up", "Blender default right-handed Z-up coordinates"),
-            ("Y_UP", "Y Up", "Right-handed Y-up coordinates"),
-            ("X_UP", "X Up", "Right-handed X-up coordinates"),
-            ("Z_UP_LH", "Z Up LH", "Left-handed Z-up coordinates"),
-            ("Y_UP_LH", "Y Up LH", "Left-handed Y-up coordinates"),
-            ("X_UP_LH", "X Up LH", "Left-handed X-up coordinates"),
-        ),
+        items=COORDINATE_SYSTEMS,
         default="Z_UP",
+    )
+    global_scale: bpy.props.FloatProperty(
+        name="Global Scale", default=1.0, min=0.000001, soft_max=1000.0,
+        description="Uniform scene scale after coordinate conversion; keeps geometry and animation data unchanged",
     )
     triangulate: bpy.props.BoolProperty(
         name="Triangulate",
@@ -235,6 +228,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                     clean_viewport_overlays=self.clean_viewport_overlays,
                     fit_timeline=self.fit_timeline,
                     preserve_hierarchy=self.hierarchy_mode == "FULL",
+                    global_scale=self.global_scale,
                 )
                 self.report({"INFO"}, "AssetKit import scheduled")
                 return {"FINISHED"}
@@ -255,6 +249,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 clean_viewport_overlays=self.clean_viewport_overlays,
                 fit_timeline=self.fit_timeline,
                 preserve_hierarchy=self.hierarchy_mode == "FULL",
+                global_scale=self.global_scale,
             )
             self.report({"INFO"}, "AssetKit progressive import scheduled")
             return {"FINISHED"}
@@ -275,6 +270,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
                 clean_viewport_overlays=self.clean_viewport_overlays,
                 fit_timeline=self.fit_timeline,
                 preserve_hierarchy=self.hierarchy_mode == "FULL",
+                global_scale=self.global_scale,
             )
         except AssetKitError as exc:
             self.report({"ERROR"}, str(exc))
@@ -299,6 +295,7 @@ class ASSETKIT_OT_import_assetkit(bpy.types.Operator, ImportHelper):
         coord_box.label(text="Coordinates")
         coord_box.prop(self, "coordinate_conversion")
         coord_box.prop(self, "coordinate_system")
+        coord_box.prop(self, "global_scale")
 
         mesh_box = layout.box()
         mesh_box.use_property_split = False
@@ -372,6 +369,7 @@ def _schedule_progressive_import(
     clean_viewport_overlays: bool,
     fit_timeline: bool,
     preserve_hierarchy: bool,
+    global_scale: float = 1.0,
 ) -> None:
     _set_status("AssetKit import scheduled")
 
@@ -407,6 +405,7 @@ def _schedule_progressive_import(
             clean_viewport_overlays=clean_viewport_overlays,
             fit_timeline=fit_timeline,
             preserve_hierarchy=preserve_hierarchy,
+            global_scale=global_scale,
             on_complete=_finish,
             on_error=_fail,
         )
@@ -431,6 +430,7 @@ def _schedule_blocking_import(
     clean_viewport_overlays: bool,
     fit_timeline: bool,
     preserve_hierarchy: bool,
+    global_scale: float = 1.0,
 ) -> None:
     _set_status("AssetKit import scheduled")
 
@@ -454,6 +454,7 @@ def _schedule_blocking_import(
                 clean_viewport_overlays=clean_viewport_overlays,
                 fit_timeline=fit_timeline,
                 preserve_hierarchy=preserve_hierarchy,
+                global_scale=global_scale,
             )
         except (AssetKitError, OSError) as exc:
             _set_status(None)

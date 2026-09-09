@@ -2,7 +2,8 @@
 
 import bpy
 
-NAMES = {"OBJECT": "AssetKit Object Source", "CROP": "AssetKit Crop Points", "OPACITY": "AssetKit Splat Opacity"}
+NAMES = {"OBJECT": "AssetKit Object Source", "CROP": "AssetKit Crop Points", "OPACITY": "AssetKit Splat Opacity",
+         "TO_GAUSSIANS": "AssetKit Points to Gaussians", "TO_POINTS": "AssetKit Gaussians to Points"}
 
 
 def get_group(kind):
@@ -25,6 +26,10 @@ def get_group(kind):
     source.location = (-600, 0)
     output.location = (600, 0)
     link = tree.links.new
+    if kind in {"TO_GAUSSIANS", "TO_POINTS"}:
+        from .splats import build
+        build(tree, kind, socket, source, output)
+        return tree
     if kind == "OBJECT":
         socket("Object", "INPUT", "NodeSocketObject")
         info = tree.nodes.new("GeometryNodeObjectInfo")

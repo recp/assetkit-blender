@@ -3,6 +3,8 @@
 Gaussian SPZ, L-GSC, PLY and glTF imports keep their positions, per-axis scales,
 quaternions, opacity and spherical harmonics in a Blender PointCloud. The
 preview reads those attributes without replacing the cloud with a mesh.
+It also reads evaluated point-cloud outputs from Geometry Nodes. The conversion
+groups are available under **Add > AssetKit** in the node editor.
 
 ## Viewing a capture
 

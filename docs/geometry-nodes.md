@@ -20,6 +20,8 @@ replace the Blender scene's world, timeline range or import metadata.
   ordinals distinguish duplicate names. Changing this selection reuses the
   loaded scene.
 - **Enabled:** disabling a source disconnects its geometry.
+- **Coordinate Mode / Target Coordinates:** the same options as normal import.
+  Sources loaded with different coordinate settings have separate cache entries.
 - **Reload Sources:** reloads shared sources and their external geometry buffers.
 
 The source is an add-on-managed node group backed by Collection Info, not a
@@ -27,10 +29,12 @@ native file-reading evaluator. File and sequence settings are node properties,
 not field-driven input sockets. Ordinary Geometry Nodes evaluation reads the
 loaded Blender data without calling AssetKit again.
 
-**Translation**, **Rotation** and **Scale** inputs place the source as a whole,
+**Translation**, **Rotation**, **Scale** and **Global Scale** inputs place the source as a whole,
 after its imported transforms. They operate on instances, leaving shared mesh
 and Gaussian attributes unchanged, and do not reload the file. Rotation can
-adjust the up axis; uniform Scale can adjust units. Existing source nodes saved
+adjust the up axis; Global Scale uniformly adjusts units. Normal blocking and
+progressive imports expose the same Global Scale option and apply it through
+an import root, preserving animation channels. Existing source nodes saved
 before these inputs were added keep working; add a new source node to use them.
 
 **Object Source** references an existing Blender object through Object Info.
@@ -81,6 +85,22 @@ Gaussian splat type retain the imported attributes on ordinary point clouds.
 On those builds, realizing a rotated or scaled Gaussian instance does not bake
 its custom scale, quaternion or SH attributes. For splats, apply these helpers
 before instance transforms and keep the final placement at the instance level.
+
+**Points to Gaussians** initializes missing radiance, scale and rotation
+attributes on a point cloud. Color is scene-linear; Opacity, per-axis Scale and
+Rotation set the new splats' appearance. Existing attributes take precedence,
+including authored SH coefficients. This does not reconstruct or train a capture.
+Use Blender's Mesh to Points first if the input is a mesh.
+
+**Gaussians to Points** uses ordinary point display with the chosen Radius.
+It saves `radiance:base` as `assetkit:radiance_base`, keeping scale, rotation
+and higher SH attributes. Points to Gaussians restores the saved radiance.
+These groups operate on direct geometry, not inside instances, and do not
+realize them automatically. Work on the source cloud before instancing it.
+
+In standard Blender these are attribute groups for AssetKit's viewport preview,
+not native EEVEE/Cycles Gaussian types. A Geometry Nodes host with a point-cloud
+output can use **N > AssetKit > Gaussian Preview**, including a mesh host.
 
 ## Memory and updates
 

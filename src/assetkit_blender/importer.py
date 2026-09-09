@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import math
 import os
 import threading
 import time
@@ -121,7 +122,11 @@ def import_assetkit_file(
     fit_timeline: bool = False,
     preserve_hierarchy: bool = False,
     _source_context: dict | None = None,
+    global_scale: float = 1.0,
 ) -> list[bpy.types.Object]:
+    if not math.isfinite(global_scale) or global_scale <= 0:
+        raise ValueError("Global scale must be finite and positive")
+
     shading_mode = str(shading_mode or "AUTO").upper()
     _reset_action_cache()
     _reset_material_template_cache()
@@ -367,6 +372,7 @@ def import_assetkit_file(
             if state.compact_instance_plan is not None
             else None
         ),
+        global_scale=global_scale,
     )
     if profile_detail:
         _profile_log(
@@ -418,7 +424,11 @@ def import_assetkit_file_progressive(
     on_complete=None,
     on_error=None,
     preserve_hierarchy: bool = False,
+    global_scale: float = 1.0,
 ) -> object:
+    if not math.isfinite(global_scale) or global_scale <= 0:
+        raise ValueError("Global scale must be finite and positive")
+
     job = _ProgressiveImportJob(
         filepath,
         library_path,
@@ -438,6 +448,7 @@ def import_assetkit_file_progressive(
         on_complete,
         on_error,
         preserve_hierarchy,
+        global_scale,
     )
     _ACTIVE_IMPORT_JOBS.append(job)
     job.start()
@@ -465,6 +476,7 @@ class _ProgressiveImportJob:
         on_complete,
         on_error,
         preserve_hierarchy: bool,
+        global_scale: float = 1.0,
     ) -> None:
         self.filepath                = filepath
         self.library_path            = library_path
@@ -491,6 +503,7 @@ class _ProgressiveImportJob:
         self.clean_viewport_overlays = clean_viewport_overlays
         self.fit_timeline            = fit_timeline
         self.preserve_hierarchy      = preserve_hierarchy
+        self.global_scale            = global_scale
         self.on_complete             = on_complete
         self.on_error                = on_error
 
@@ -807,6 +820,7 @@ class _ProgressiveImportJob:
                     if self.state.compact_instance_plan is not None
                     else None
                 ),
+                global_scale=self.global_scale,
             )
             if profile_detail:
                 _profile_log(

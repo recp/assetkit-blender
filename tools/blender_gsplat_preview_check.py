@@ -94,7 +94,19 @@ def draw(renderer, view, proj, size=(63, 63), depth=1):
 
 
 def check_math():
-    from assetkit_blender.gsplat_preview.renderer import Renderer, depth_order, pack
+    from assetkit_blender.gsplat_preview.renderer import Renderer, depth_order, dimensions, pack
+    limit = gpu.capabilities.max_texture_size_get()
+    assert dimensions(0) == (1, 1)
+    assert dimensions(limit * limit) == (limit, limit)
+    for count in (1, 2049, min(limit * limit, 2048 * limit + 1)):
+        width, height = dimensions(count)
+        assert width <= limit and height <= limit and width * height >= count
+    try:
+        dimensions(limit * limit + 1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Texture overflow must be rejected before allocation')
     rng = np.random.default_rng(27)
     coefficients = rng.uniform(-.1, .1, (25, 25, 3))
     positions = rng.uniform(-.3, .3, (25, 3)) + [0, 0, -3]
@@ -206,6 +218,18 @@ def check_pixels():
     corrected = read_projected(Renderer([(front,view)]), view, proj, (63,63))[0,0,3]
     a0, c = (.1*1.5*31.5/2)**2, (.1*2*31.5/2)**2
     np.testing.assert_allclose(corrected, .5*math.sqrt(a0*c/((a0+.3)*(c+.3))), atol=2e-6)
+    aa = front.attributes.new('assetkit:antialiased', 'BOOLEAN', 'POINT')
+    aa.data[0].value = False
+    np.testing.assert_allclose(read_projected(Renderer([(front,view)]), view, proj, (63,63))[0,0,3],
+                               .5, atol=2e-6)
+    aa.data[0].value = True
+    front['assetkit_gaussian_splat_antialiased'] = False
+    np.testing.assert_allclose(read_projected(Renderer([(front,view)]), view, proj, (63,63))[0,0,3],
+                               corrected, atol=2e-6)
+    linear['assetkit_gaussian_splat_color_space'] = 1
+    linear.attributes.new('assetkit:color_space', 'INT', 'POINT').data[0].value = 2
+    np.testing.assert_allclose(draw(Renderer([(linear,view)]),view,proj)[31,31,:3],
+                               np.full(3, expected*.8), atol=2e-5)
     edge = cloud('near-offscreen', [[240,240,-.101], [0,0,.1], [0,0,-200]], np.zeros((3,1,3)),
                  scales=[[7,7,7]]*3)
     assert not draw(Renderer([(edge,view)]), view, proj).any(), 'Near/far/frustum rejection failed'
@@ -227,7 +251,9 @@ def check_sample(path, output_dir):
     view = (Matrix.Translation(eye) @ (-eye).to_track_quat('-Z','Y').to_matrix().to_4x4()).inverted()
     proj = Matrix(((1.125,0,0,0),(0,1.5,0,0),(0,0,-1.00002,-.0200002),(0,0,-1,0)))
     pixels = draw(renderer,view,proj,(1024,768))
-    assert np.isfinite(pixels).all() and np.std(pixels[:,:,:3]) > .05
+    assert np.isfinite(pixels).all()
+    covered = pixels[:, :, 3] > .01
+    assert np.count_nonzero(covered) > 100 and np.std(pixels[covered, :3]) > .05
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
         image = bpy.data.images.new('Gaussian Preview', width=1024, height=768, alpha=True, float_buffer=True)
@@ -282,6 +308,22 @@ def start_ui_check(args):
     assert bpy.context.preferences.addons['assetkit_blender'].preferences.gaussian_preview
     imported = import_assetkit_file(str(args.spz), scene_was_empty=True)
     obj = next(o for o in imported if o.type == 'POINTCLOUD')
+    if args.nodes:
+        from assetkit_blender.geonodes.groups import get_group
+        graph = bpy.data.node_groups.new('Preview conversion check', 'GeometryNodeTree')
+        graph.interface.new_socket(name='Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+        graph.interface.new_socket(name='Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+        source = graph.nodes.new('NodeGroupInput')
+        output = graph.nodes.new('NodeGroupOutput')
+        previous = source.outputs['Geometry']
+        for kind in ('TO_POINTS', 'TO_GAUSSIANS'):
+            node = graph.nodes.new('GeometryNodeGroup')
+            node.node_tree = get_group(kind)
+            graph.links.new(previous, node.inputs['Geometry'])
+            previous = node.outputs['Geometry']
+        graph.links.new(previous, output.inputs['Geometry'])
+        obj.modifiers.new('Point conversion', 'NODES').node_group = graph
+        bpy.context.view_layer.update()
     assert obj.get(preview.ENABLED) and obj.display_type == 'BOUNDS'
     assert not obj.select_get()
     obj.select_set(True)
@@ -381,6 +423,7 @@ def main():
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--native-dir', type=Path)
     parser.add_argument('--ui', action='store_true')
+    parser.add_argument('--nodes', action='store_true')
     args = parser.parse_args(sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else [])
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
     try:

@@ -10,12 +10,12 @@ from . import shaders
 from ..bridge.runtime import native_module
 
 
-def attribute(cloud, name, width, field):
+def attribute(cloud, name, width, field, dtype=np.float32):
     attr = cloud.attributes.get(name)
     count = len(cloud.points)
     if attr is None or len(attr.data) != count:
         raise ValueError(f'Missing Gaussian attribute: {name}')
-    values = np.empty(count * width, dtype=np.float32)
+    values = np.empty(count * width, dtype=dtype)
     attr.data.foreach_get(field, values)
     values = values.reshape(count, width)
     if not np.isfinite(values).all():
@@ -44,6 +44,12 @@ def pack(cloud, data=None):
     data[:, 2] = attribute(cloud, 'rotation', 4, 'value')[:, [1, 2, 3, 0]]
     data[:, 3] = attribute(cloud, 'radiance:base', 4, 'color')
     data[:, 0, 3] = np.clip(data[:, 3, 3], 0.0, 1.0)
+    # Zero inherits the cloud's color space. Node-created radiance can opt into
+    # linear RGB per point, including when geometry joins different sources.
+    data[:, 3, 3] = (attribute(cloud, 'assetkit:color_space', 1, 'value', np.int32)[:, 0]
+                     if 'assetkit:color_space' in cloud.attributes else 0)
+    data[:, 1, 3] = (1 + attribute(cloud, 'assetkit:antialiased', 1, 'value', np.bool_)[:, 0].astype(np.float32)
+                     if 'assetkit:antialiased' in cloud.attributes else 0)
     if np.any(data[:, 1, :3] < 0):
         raise ValueError('Negative Gaussian scale')
     for i in range((degree + 1) ** 2 - 1):
@@ -54,7 +60,10 @@ def pack(cloud, data=None):
 def dimensions(count, width=2048):
     limit = gpu.capabilities.max_texture_size_get()
     width = min(width, limit, max(1, count))
-    height = max(1, math.ceil(count / width))
+    if count > width * limit:
+        needed = (count + limit - 1) // limit
+        width = min(limit, 1 << (needed - 1).bit_length())
+    height = max(1, (count + width - 1) // width)
     if height > limit:
         raise ValueError('Gaussian preview exceeds the GPU texture limit')
     return width, height

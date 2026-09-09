@@ -12,22 +12,57 @@ _signature = None
 _revision = 0
 _error = ''
 _enabled = set()
+_cloud_views = {}
+
+
+class _PointCloudView:
+    # GeometrySet owns the temporary PointCloud exposed by Blender's Python API.
+    __slots__ = ('geometry', 'data')
+
+    def __init__(self, geometry, data):
+        self.geometry, self.data = geometry, data
+
+    def __getattr__(self, name):
+        return getattr(self.data, name)
+
+
+def pointcloud(obj, cache=None):
+    if obj is None or obj.type not in {'MESH', 'POINTCLOUD', 'CURVE', 'CURVES', 'FONT', 'SURFACE', 'VOLUME'}:
+        return None
+    if not obj.is_evaluated and not obj.modifiers:
+        return obj.data if obj.type == 'POINTCLOUD' else None
+    if not obj.is_evaluated:
+        obj = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    key = (obj.as_pointer(), _revision)
+    if cache is not None and key in cache:
+        return cache[key]
+    geometry = obj.evaluated_geometry()
+    data = geometry.pointcloud
+    result = _PointCloudView(geometry, data) if data is not None else None
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def is_splat_cloud(cloud):
+    return (cloud is not None and 'radiance:base' in cloud.attributes
+            and 'scale' in cloud.attributes and 'rotation' in cloud.attributes)
 
 
 def is_splat(obj):
-    return (obj is not None and obj.type == 'POINTCLOUD'
-            and 'radiance:base' in obj.data.attributes
-            and 'scale' in obj.data.attributes and 'rotation' in obj.data.attributes)
+    return is_splat_cloud(pointcloud(obj))
 
 
 def is_native(obj):
-    return getattr(obj.data, 'type', '') == 'GAUSSIAN_SPLAT'
+    return getattr(pointcloud(obj), 'type', '') == 'GAUSSIAN_SPLAT'
 
 
-def clear():
+def clear(geometry=True):
     global _renderer, _signature
     _renderer = None
     _signature = None
+    if geometry:
+        _cloud_views.clear()
 
 
 def redraw():
@@ -39,7 +74,7 @@ def redraw():
 
 def enable(obj, enabled=True):
     global _error
-    if not is_splat(obj) or is_native(obj):
+    if enabled and (not is_splat(obj) or is_native(obj)):
         return
     if obj.library is not None and obj.override_library is None:
         raise ValueError('Make a local object or library override to enable Gaussian preview')
@@ -91,28 +126,39 @@ def _draw():
         return
     try:
         entries, signature = [], []
+        for key in tuple(_cloud_views):
+            if key[1] != _revision:
+                del _cloud_views[key]
         graph = context.evaluated_depsgraph_get()
         for instance in graph.object_instances:
             obj = instance.object
             original = obj.original
             owner = instance.parent.original if instance.is_instance and instance.parent else original
-            if (not instance.show_self or not is_splat(obj) or is_native(obj)
-                    or not (original.get(ENABLED) or owner.get(ENABLED))):
+            if not instance.show_self or not (original.get(ENABLED) or owner.get(ENABLED)):
                 continue
             if not instance.is_instance and not original.visible_get(viewport=space):
                 continue
+            cloud = pointcloud(obj, _cloud_views)
+            if not is_splat_cloud(cloud) or getattr(cloud, 'type', '') == 'GAUSSIAN_SPLAT':
+                if not instance.is_instance and DISPLAY in original:
+                    previous = original[DISPLAY]
+                    if original.display_type != previous:
+                        original.display_type = previous
+                continue
+            if not instance.is_instance and DISPLAY in original and original.display_type != 'BOUNDS':
+                original.display_type = 'BOUNDS'
             matrix = instance.matrix_world.copy()
-            entries.append((obj.data, matrix))
-            signature.append((original.as_pointer(), obj.data.original.as_pointer(), len(obj.data.points)))
+            entries.append((cloud, matrix))
+            signature.append((original.as_pointer(), cloud.as_pointer(), len(cloud.points)))
         if not entries:
-            clear()
+            clear(geometry=False)
             return
         signature = (_revision, tuple(signature))
         if signature != _signature:
             from .renderer import Renderer
             addon = context.preferences.addons.get(__package__.rsplit('.', 1)[0])
             budget = getattr(addon.preferences, 'gaussian_preview_mib', 1024) if addon else 1024
-            clear()
+            clear(geometry=False)
             _renderer = Renderer(entries, budget * 1024 * 1024)
             _signature = signature
         else:
@@ -137,7 +183,7 @@ def _changed(_scene, graph):
         item = update.id
         if ((isinstance(item, bpy.types.PointCloud) and 'radiance:base' in item.attributes)
                 or (isinstance(item, bpy.types.Object) and update.is_updated_geometry
-                    and (item.get(ENABLED) or is_splat(item)))):
+                    and (item.get(ENABLED) or item.type == 'POINTCLOUD'))):
             _revision += 1
             break
 
@@ -181,7 +227,8 @@ class ASSETKIT_OT_gaussian_preview(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return (is_splat(context.object) and context.object.mode == 'OBJECT'
+        return ((is_splat(context.object) or context.object and DISPLAY in context.object)
+                and context.object.mode == 'OBJECT'
                 and not is_native(context.object))
 
     def execute(self, context):
@@ -206,7 +253,7 @@ class ASSETKIT_OT_edit_gaussian_points(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.object
-        return (is_splat(obj) and obj.mode == 'OBJECT' and obj.is_editable
+        return (is_splat(obj) and obj.type == 'POINTCLOUD' and obj.mode == 'OBJECT' and obj.is_editable
                 and obj.data.is_editable and bpy.ops.object.mode_set.poll())
 
     def execute(self, context):
@@ -265,7 +312,7 @@ class ASSETKIT_PT_gaussian_preview(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return is_splat(context.object)
+        return is_splat(context.object) or context.object and DISPLAY in context.object
 
     def draw(self, context):
         layout = self.layout

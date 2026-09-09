@@ -843,7 +843,20 @@ def _finish_import(
     existing_frame_range: tuple[float, float] | None,
     scene_had_timeline_content: bool,
     authored_bounds: tuple[Vector, Vector] | None = None,
+    global_scale: float = 1.0,
 ) -> None:
+    if global_scale != 1.0 and objects:
+        from ..viewport import placement_roots
+        roots = placement_roots(objects, root_objects)
+        wrapper = bpy.data.objects.new("AssetKit Import Transform", None)
+        collection.objects.link(wrapper)
+        wrapper.scale = (global_scale,) * 3
+        for root in roots:
+            root.parent = wrapper
+        objects.append(wrapper)
+        root_objects[:] = [wrapper]
+        if authored_bounds is not None:
+            authored_bounds = tuple(bound * global_scale for bound in authored_bounds)
     profile_detail = _profile_state.stats is not None
     phase_started_at = time.perf_counter() if profile_detail else 0.0
     bounds = _apply_import_placement(

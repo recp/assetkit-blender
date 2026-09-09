@@ -37,12 +37,16 @@ def sequence_path(path, frame, start, first, last, step, loop):
     return path[:match.start()] + str(number).zfill(len(match[0])) + path[match.end():]
 
 
-def fingerprint(path, scene_index):
+def fingerprint(path, scene_index, coordinate_conversion="TRANSFORM", coordinate_system="Z_UP"):
     path = os.path.realpath(os.path.abspath(path))
     info = os.stat(path)
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("Source path is not a file")
-    return (path, int(scene_index), info.st_mtime_ns, info.st_size)
+    key = (path, int(scene_index), info.st_mtime_ns, info.st_size)
+    # Keep default keys compatible with sources stored by earlier versions.
+    if (coordinate_conversion, coordinate_system) != ("TRANSFORM", "Z_UP"):
+        key += (coordinate_conversion, coordinate_system)
+    return key
 
 
 def _snapshot():
@@ -146,6 +150,8 @@ def load(key):
         objects = import_assetkit_file(
             key[0], collection=storage, preserve_hierarchy=True,
             load_options=make_load_options(scene_index=key[1], triangulate=False,
+                                           coordinate_conversion=key[4] if len(key) > 4 else "TRANSFORM",
+                                           coordinate_system=key[5] if len(key) > 4 else "Z_UP",
                                            texture_loading="IMMEDIATE", scene_bounds=False),
             set_viewport_shading=False, clean_viewport_overlays=False,
             _source_context=context,

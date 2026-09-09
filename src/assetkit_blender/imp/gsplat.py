@@ -61,6 +61,14 @@ def create_pointcloud(data):
         points["assetkit_gaussian_splat_antialiased"] = bool(data.gsplat_antialiased)
         points["assetkit_gaussian_splat_sh_degree"] = int(data.gsplat_sh_degree)
         points["assetkit_gaussian_splat_color_space"] = int(data.gsplat_color_space)
+        # ID properties are not propagated through Geometry Nodes. Store only
+        # non-default metadata as point attributes so joins and edits retain it.
+        if data.gsplat_color_space == 2:
+            attr = points.attributes.new("assetkit:color_space", "INT", "POINT")
+            attr.data.foreach_set("value", np.full(count, 2, dtype=np.int32))
+        if data.gsplat_antialiased:
+            attr = points.attributes.new("assetkit:antialiased", "BOOLEAN", "POINT")
+            attr.data.foreach_set("value", np.ones(count, dtype=np.bool_))
         points.update_tag()
         return points
     except Exception:

@@ -115,7 +115,7 @@ def update(node, frame, stats):
         if node.sequence:
             path = sequence_path(path, frame, node.start_frame, node.first_frame,
                                  node.last_frame, node.frame_step, node.loop)
-        request = (path, node.scene_index)
+        request = (path, node.scene_index, node.coordinate_conversion, node.coordinate_system)
         if request not in stats:
             try:
                 stats[request] = fingerprint(*request)
