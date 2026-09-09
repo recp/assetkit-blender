@@ -30,6 +30,17 @@ cloud on Blender versions without native Gaussian support. Studio lights and
 material assignments do not relight the GPU preview. A Blender build with the
 native Gaussian point-cloud type uses that type instead.
 
+## Selecting and separating points
+
+Select one cloud. In the same panel, **Edit Points** disables the custom preview and enters
+Blender's point-cloud Edit Mode. Use Blender's selection tools, then
+**Separate Selected** to move selected points into another cloud. Attributes
+stay with their points; the panel's operation also preserves Gaussian color
+space and antialiasing metadata, which Blender's separate operation alone does
+not copy. This does not generate a mesh or retrain the capture.
+**Finish Editing** returns to Object Mode. Select the clouds you want to view
+and use **Enable Preview** again. Hide an object to isolate the others.
+
 ## Data and performance
 
 Point attributes are uploaded on first use and refreshed after geometry changes.

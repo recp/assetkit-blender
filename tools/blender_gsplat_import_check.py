@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 import bpy
+import addon_utils
 import numpy as np
 
 
@@ -26,6 +27,57 @@ def main():
 
     from assetkit_blender.assetkit import native_load_meshes
     from assetkit_blender.importer import import_assetkit_file
+    from assetkit_blender import gsplat_preview as preview
+
+    assert addon_utils.enable("assetkit_blender", default_set=False) is not None
+
+    def check_editing(cloud):
+        obj = next(obj for obj in bpy.context.scene.objects if obj.data == cloud)
+        for selected in tuple(bpy.context.selected_objects):
+            selected.select_set(False)
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        selection = cloud.attributes.new(".selection", "BOOLEAN", "POINT")
+        selection.data.foreach_set("value", [False, True, False])
+        fields = {"FLOAT": (1, "value"), "FLOAT_VECTOR": (3, "vector"),
+                  "FLOAT_COLOR": (4, "color"), "QUATERNION": (4, "value")}
+
+        def attributes(data):
+            result = {}
+            for attr in data.attributes:
+                if attr.name.startswith("."):
+                    continue
+                width, field = fields[attr.data_type]
+                values = np.empty(len(data.points) * width, dtype=np.float32)
+                attr.data.foreach_get(field, values)
+                result[attr.name] = values.reshape(-1, width)
+            return result
+
+        original = attributes(cloud)
+        cloud["assetkit_gaussian_splat_antialiased"] = True
+        cloud["assetkit_gaussian_splat_color_space"] = 0
+        metadata = dict(cloud.items())
+        objects = set(bpy.data.objects)
+        display = obj.display_type
+        preview.enable(obj)
+        assert bpy.ops.assetkit.edit_gaussian_points() == {"FINISHED"}
+        assert obj.mode == "EDIT" and not obj.get(preview.ENABLED)
+        assert obj.display_type == display
+        assert bpy.ops.assetkit.separate_gaussian_points() == {"FINISHED"}
+        bpy.ops.object.mode_set(mode="OBJECT")
+        separated = list(set(bpy.data.objects) - objects)
+        assert len(separated) == 1 and separated[0].type == "POINTCLOUD"
+        for part, indices in ((obj, [0, 2]), (separated[0], [1])):
+            actual = attributes(part.data)
+            assert actual.keys() == original.keys()
+            for name, expected in original.items():
+                np.testing.assert_array_equal(actual[name], expected[indices])
+            assert dict(part.data.items()) == metadata, (part.name, dict(part.data.items()), metadata)
+            assert not part.get(preview.ENABLED)
+            preview.enable(part)
+            assert part.get(preview.ENABLED)
+            preview.enable(part, False)
+        print("Native point editing / separate / Gaussian attributes and metadata OK")
 
     def check(path):
         source = native_load_meshes(str(path))
@@ -78,6 +130,12 @@ def main():
         cloud = check(path)
         assert cloud["assetkit_gaussian_splat_sh_degree"] == 4
         assert "radiance:sh_23" in cloud.attributes
+        rows = [row, [value + 0.125 for value in row], [value - 0.125 for value in row]]
+        path = Path(directory) / "editable.ply"
+        path.write_text("ply\nformat ascii 1.0\nelement vertex 3\n"
+                        + "".join(f"property float {name}\n" for name in fields)
+                        + "end_header\n" + "".join(" ".join(map(str, values)) + "\n" for values in rows))
+        check_editing(check(path))
     if args.spz:
         check(args.spz)
     if args.lgsc:

@@ -181,7 +181,8 @@ class ASSETKIT_OT_gaussian_preview(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return is_splat(context.object) and not is_native(context.object)
+        return (is_splat(context.object) and context.object.mode == 'OBJECT'
+                and not is_native(context.object))
 
     def execute(self, context):
         active = bool(context.object.get(ENABLED)) and not _error
@@ -196,6 +197,66 @@ class ASSETKIT_OT_gaussian_preview(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ASSETKIT_OT_edit_gaussian_points(bpy.types.Operator):
+    bl_idname = 'assetkit.edit_gaussian_points'
+    bl_label = 'Edit Points'
+    bl_description = 'Disable the custom preview and edit the original points using Blender selection tools'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return (is_splat(obj) and obj.mode == 'OBJECT' and obj.is_editable
+                and obj.data.is_editable and bpy.ops.object.mode_set.poll())
+
+    def execute(self, context):
+        enabled = [obj for obj in context.selected_objects
+                   if is_splat(obj) and obj.get(ENABLED) and not is_native(obj)]
+        try:
+            for obj in enabled:
+                enable(obj, False)
+            if bpy.ops.object.mode_set(mode='EDIT') != {'FINISHED'}:
+                raise ValueError('Point editing is unavailable for this object')
+        except (RuntimeError, ValueError) as exc:
+            for obj in enabled:
+                enable(obj)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class ASSETKIT_OT_separate_gaussian_points(bpy.types.Operator):
+    bl_idname = 'assetkit.separate_gaussian_points'
+    bl_label = 'Separate Selected'
+    bl_description = 'Separate selected points with Blender, preserving Gaussian color space and antialiasing metadata'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if not is_splat(context.object) or context.object.mode != 'EDIT':
+            return False
+        if len(context.objects_in_mode) != 1:
+            cls.poll_message_set('Edit one cloud at a time to separate Gaussian points')
+            return False
+        return bpy.ops.pointcloud.separate.poll()
+
+    def execute(self, context):
+        cloud = context.object.data
+        metadata = {name: value for name, value in cloud.items()
+                    if name.startswith('assetkit_gaussian_splat_')}
+        before = {data.as_pointer() for data in bpy.data.pointclouds}
+        result = bpy.ops.pointcloud.separate()
+        if result == {'FINISHED'}:
+            # Blender copies point attributes, but not the PointCloud's ID properties.
+            for data in bpy.data.pointclouds:
+                if data.as_pointer() not in before:
+                    for name, value in metadata.items():
+                        data[name] = value
+            clear()
+            redraw()
+        return result
+
+
 class ASSETKIT_PT_gaussian_preview(bpy.types.Panel):
     bl_label = 'Gaussian Preview'
     bl_space_type = 'VIEW_3D'
@@ -208,6 +269,13 @@ class ASSETKIT_PT_gaussian_preview(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        if context.object.mode == 'EDIT':
+            layout.operator(ASSETKIT_OT_separate_gaussian_points.bl_idname)
+            layout.operator('object.mode_set', text='Finish Editing').mode = 'OBJECT'
+            if not is_native(context.object):
+                layout.label(text='Enable Preview again after editing')
+            return
+        layout.operator(ASSETKIT_OT_edit_gaussian_points.bl_idname)
         if is_native(context.object):
             layout.label(text='Native Gaussian point cloud')
             return
@@ -224,7 +292,8 @@ class ASSETKIT_PT_gaussian_preview(bpy.types.Panel):
         layout.label(text='Viewport only; not an F12 renderer')
 
 
-CLASSES = (ASSETKIT_OT_gaussian_preview, ASSETKIT_PT_gaussian_preview)
+CLASSES = (ASSETKIT_OT_gaussian_preview, ASSETKIT_OT_edit_gaussian_points,
+           ASSETKIT_OT_separate_gaussian_points, ASSETKIT_PT_gaussian_preview)
 HANDLERS = (('depsgraph_update_post', _changed), ('load_pre', _reset),
             ('undo_post', _resume), ('redo_post', _resume), ('load_post', _resume),
             ('save_pre', _restore), ('save_post', _resume))
