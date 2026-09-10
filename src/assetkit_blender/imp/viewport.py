@@ -8,6 +8,7 @@ from mathutils import Vector
 
 
 _DEFAULT_LINE_PREVIEW_COLOR = (0.08, 0.08, 0.08, 1.0)
+_NEUTRAL_MATERIAL_PREVIEW_INTENSITY = 1.0
 
 
 def select_imported_objects(objects: list[bpy.types.Object]) -> None:
@@ -124,19 +125,23 @@ def set_viewport_material_preview(clean_overlays: bool = False) -> None:
 
 
 def _set_material_preview_shading(shading: object) -> None:
-    was_material_preview = shading.type == "MATERIAL"
     shading.color_type = "MATERIAL"
     shading.type       = "MATERIAL"
-    if was_material_preview:
-        return
 
-    # Blender's default material-preview light follows the view. That is
-    # convenient while sculpting, but it can make orthogonal faces keep nearly
-    # identical lighting while orbiting an imported asset. Keep the studio
-    # light in world space so authored normals remain visually meaningful,
-    # without replacing a Material Preview setup the user already chose.
+    # AssetLook's fallback key is attached to its active camera. Match that
+    # deterministic preview policy by keeping Blender's studio light relative
+    # to the view as well. Apply this even when the viewport was already in
+    # Material Preview: saved startup files can otherwise retain world-space
+    # lighting and make the same imported material look unrelated from one
+    # camera angle to the next.
     if hasattr(shading, "use_studiolight_view_rotation"):
         shading.use_studiolight_view_rotation = False
+    if hasattr(shading, "studiolight_intensity"):
+        # Blender's 1.0 studio-light calibration keeps a camera-facing neutral
+        # rough Principled swatch within display-space rounding of its authored
+        # sRGB value. Keep this deterministic alongside the view-relative light;
+        # it changes only viewport presentation, never scene or export data.
+        shading.studiolight_intensity = _NEUTRAL_MATERIAL_PREVIEW_INTENSITY
     if hasattr(shading, "show_shadows"):
         shading.show_shadows = True
 

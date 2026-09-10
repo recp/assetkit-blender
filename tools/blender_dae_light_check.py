@@ -121,7 +121,12 @@ def assert_lights() -> None:
 
     for color, (exponent, attenuation) in EXPECTED.items():
         light = lights[color]
-        assert_close(light.energy, 1000.0, f"{color} preview energy")
+        assert_close(light.energy, 10.0, f"{color} preview energy")
+        assert_close(
+            light["assetkit_light_preview_intensity"],
+            10.0,
+            f"{color} stored preview energy",
+        )
         assert_close(
             light["assetkit_light_attenuation_falloff_exponent"],
             exponent,
@@ -137,7 +142,11 @@ def assert_lights() -> None:
 
     constant = lights[(1.0, 0.0, 0.0)]
     assert_close(math.degrees(constant.spot_size), 40.0, "COLLADA full cone angle")
-    assert_close(constant.spot_blend, 1.0, "zero inner cone maps to a fully soft Blender spot")
+    assert_close(
+        constant.spot_blend,
+        0.25,
+        "zero inner cone maps from the authored falloff exponent",
+    )
     assert_close(constant["assetkit_light_cone_falloff_exponent"], 3.0, "spot cone exponent")
     falloff = constant.node_tree.nodes.get("AssetKit Light Falloff") if constant.node_tree else None
     emission = next((node for node in constant.node_tree.nodes if node.type == "EMISSION"), None)

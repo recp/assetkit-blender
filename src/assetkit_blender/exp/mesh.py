@@ -554,6 +554,43 @@ def _light_payload(obj: bpy.types.Object) -> tuple | None:
         outer = float(light.spot_size) * 0.5
         inner = outer - outer * float(light.spot_blend)
         falloff = float(light.get("assetkit_light_cone_falloff_exponent", 1.0))
+        source_inner = light.get("assetkit_light_source_inner_cone_angle")
+        source_outer = light.get("assetkit_light_source_outer_cone_angle")
+        preview_size = light.get("assetkit_light_preview_spot_size")
+        preview_blend = light.get("assetkit_light_preview_spot_blend")
+        if all(
+            value is not None
+            for value in (source_inner, source_outer, preview_size, preview_blend)
+        ):
+            try:
+                source_inner_value = float(source_inner)
+                source_outer_value = float(source_outer)
+                preview_size_value = float(preview_size)
+                preview_blend_value = float(preview_blend)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if all(
+                    math.isfinite(value)
+                    for value in (
+                        source_inner_value,
+                        source_outer_value,
+                        preview_size_value,
+                        preview_blend_value,
+                    )
+                ) and math.isclose(
+                    float(light.spot_size),
+                    preview_size_value,
+                    rel_tol=1.0e-6,
+                    abs_tol=1.0e-6,
+                ) and math.isclose(
+                    float(light.spot_blend),
+                    preview_blend_value,
+                    rel_tol=1.0e-6,
+                    abs_tol=1.0e-6,
+                ):
+                    inner = source_inner_value
+                    outer = source_outer_value
 
     payload = (
         light_type,

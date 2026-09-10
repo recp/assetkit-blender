@@ -1018,7 +1018,9 @@ akb_extract_material(AkbSharedDoc *doc_owner,
       akb_material_input_color3(classic->emission, 0.0f, 0.0f, 0.0f, out->emissive_color);
       AKB_COPY_TEX("emissive", classic->emission, out->emissive_texture);
     }
-    out->roughness = akb_classic_roughness(classic->shininess);
+    out->roughness = surface->type == AK_MATERIAL_TYPE_LAMBERT
+                       ? 1.0f
+                       : akb_classic_roughness(classic->shininess);
     if (classic->ior > 0.0f)
       out->ior = classic->ior;
   }

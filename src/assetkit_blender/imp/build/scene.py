@@ -1499,8 +1499,12 @@ def _configure_light(light: bpy.types.Light, node: SceneNodeData) -> None:
         light.cutoff_distance = values[1]
     if light.type == "SPOT" and values[3] > 0.0:
         light.spot_size = values[3] * 2.0
-        if values[2] >= 0.0 and values[3] > values[2]:
+        if values[2] > 0.0 and values[3] >= values[2]:
             light.spot_blend = max(0.0, min(1.0, 1.0 - values[2] / values[3]))
+        else:
+            cone_falloff = float(values[4]) if len(values) > 4 else 1.0
+            if math.isfinite(cone_falloff):
+                light.spot_blend = 1.0 / (1.0 + max(0.0, cone_falloff))
     if len(values) < 10:
         return
 
@@ -1513,6 +1517,10 @@ def _configure_light(light: bpy.types.Light, node: SceneNodeData) -> None:
     light["assetkit_light_preview_intensity"] = float(values[0])
     if light.type == "SPOT":
         light["assetkit_light_cone_falloff_exponent"] = float(values[4])
+        light["assetkit_light_source_inner_cone_angle"] = float(values[2])
+        light["assetkit_light_source_outer_cone_angle"] = float(values[3])
+        light["assetkit_light_preview_spot_size"] = float(light.spot_size)
+        light["assetkit_light_preview_spot_blend"] = float(light.spot_blend)
     _configure_light_falloff(
         light,
         float(values[6]),

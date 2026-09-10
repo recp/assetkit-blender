@@ -180,6 +180,7 @@ class MeshPrimitiveData:
     alpha_mode: int = 0
     transparent_inverted: bool = False
     double_sided: bool = False
+    force_single_sided: bool = False
     has_sheen: bool = False
     skin_mesh_in_bind_pose: bool = False
     material_type: int = 0

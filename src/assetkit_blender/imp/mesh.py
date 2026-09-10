@@ -473,9 +473,18 @@ def _set_mesh_smooth(mesh: bpy.types.Mesh, smooth: bool) -> None:
     sharp = 0 if smooth else 1
     attr = _mesh_attribute_ensure(mesh, "sharp_face", "BOOLEAN", "FACE")
     if attr is not None:
+        values = _bool_array(sharp, count)
+        # RNA's bulk setter has less call overhead for the many small meshes
+        # commonly found in architectural DAE files.  The pointer fill wins
+        # for large contiguous face buffers, so retain it above that range.
+        if count < 1024:
+            try:
+                attr.data.foreach_set("value", values)
+                return
+            except Exception:
+                pass
         if _fill_bool_attribute_fast(attr, bool(sharp), count):
             return
-        values = _bool_array(sharp, count)
         try:
             attr.data.foreach_set("value", values)
             return
