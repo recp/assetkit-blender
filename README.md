@@ -1,6 +1,7 @@
-# AssetKit-Blender
+<img   alt="AssetKit for Blender: native import and export, Gaussian preview, and Geometry Nodes" src="assetkit-blender.png" />
 
-<img width="1280" height="640" alt="gh_social" src="https://github.com/user-attachments/assets/ae2b607a-259a-4832-b6d5-1b0afa7217c1" />
+<br>
+<br>
 
 Blender add-on for importing and exporting 3D assets through [AssetKit](https://github.com/recp/assetkit)
 
