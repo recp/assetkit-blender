@@ -18,7 +18,7 @@ def _manifest_version() -> tuple[int, ...] | None:
     return None
 
 
-__version_tuple__ = _manifest_version() or (0, 1, 0)
+__version_tuple__ = _manifest_version() or (0, 3, 0)
 __version__ = ".".join(str(part) for part in __version_tuple__)
 
 bl_info = {
