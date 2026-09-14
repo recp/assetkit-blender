@@ -85,8 +85,18 @@ def texture(data, width=2048):
     return result
 
 
-def depth_order(centers, direction):
-    depth = centers @ direction
+def depth_order(centers, camera, direction=None):
+    if direction is not None:
+        depth = centers @ direction
+    else:
+        # Squared camera distance gives the same order without a square root.
+        with np.errstate(over='ignore', under='ignore'):
+            delta = centers - camera
+            depth = -np.einsum('ij,ij->i', delta, delta)
+        zero = depth == 0
+        if not np.isfinite(depth).all() or (zero.any() and np.any(delta[zero] != 0)):
+            delta = centers.astype(np.float64) - np.asarray(camera, np.float64)
+            return np.argsort(-np.einsum('ij,ij->i', delta, delta), kind='stable')
     native = native_module()
     if native is not None and hasattr(native, 'sort_depth'):
         return np.frombuffer(native.sort_depth(depth), dtype=np.uint32)
@@ -171,10 +181,13 @@ class Renderer:
         if cached['signature'] == signature or not self.count:
             return cached
 
-        direction = np.asarray(view, dtype=np.float32)[2, :3]
-        sort_key = tuple(direction)
+        inverse_view = view.inverted()
+        orthographic = abs(projection[3][3]) > 0.5
+        camera_position = np.asarray(inverse_view.translation, dtype=np.float32)
+        direction = np.asarray(view, dtype=np.float32)[2, :3] if orthographic else None
+        sort_key = (orthographic, *tuple(direction if orthographic else camera_position))
         if cached['sort_key'] != sort_key:
-            order = depth_order(self.centers, direction)
+            order = depth_order(self.centers, camera_position, direction)
             indices = self.indices[order]
             # Blender's public texture upload API accepts float buffers only.
             # Split addresses instead of rounding indices above 2**24 to float.
@@ -186,8 +199,6 @@ class Renderer:
             cached['sort_key'] = sort_key
             self.sorts += 1
 
-        inverse_view = view.inverted()
-        orthographic = abs(projection[3][3]) > 0.5
         objects = np.zeros((len(self.metadata), 8, 4), np.float32)
         for i, (matrix, degree, colorspace, antialiased, _local, _start) in enumerate(self.metadata):
             inverse_model = matrix.inverted_safe()

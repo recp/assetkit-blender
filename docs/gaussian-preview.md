@@ -23,8 +23,11 @@ overlays do not draw a second layer of square markers over the splats.
 
 The preview draws oriented Gaussian ellipses with smooth opacity and
 view-dependent SH color, including SH degrees 0–4. sRGB radiance is decoded
-after SH evaluation, before blending. Captures marked antialiased use the
+after SH evaluation, before blending. For sRGB captures this is an approximation:
+the glTF Gaussian specification requires blending in the capture's color space.
+Linear-RGB captures do not need this conversion. Captures marked antialiased use the
 projected-area opacity correction. The original coefficients are unchanged.
+Ellipses are clipped at three standard deviations from their centers.
 
 This is a **Solid/Wireframe viewport preview**, not an EEVEE or Cycles F12
 renderer. Material Preview and Rendered shading still show the ordinary point
@@ -47,9 +50,11 @@ and use **Enable Preview** again. Hide an object to isolate the others.
 
 Point attributes are uploaded on first use and refreshed after geometry changes.
 Instances of the same cloud share the GPU attribute data. Object transforms
-update placement without uploading the attributes again. Camera rotation sorts
-splats globally back-to-front across visible clouds; camera translation only
-updates projection and shading. Unchanged views reuse both results.
+update placement without uploading the attributes again. Perspective views sort
+splats globally by distance from the camera across visible clouds. Camera movement
+updates that order; rotation in place only updates projection and shading.
+Orthographic views use depth along the viewing direction. Unchanged views reuse
+both results.
 
 Projection and SH run once per splat in a compute pass. Drawing uses instances of one
 shared quad; it does not create Blender mesh vertices or faces. Up to four

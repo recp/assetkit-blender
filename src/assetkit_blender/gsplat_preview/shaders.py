@@ -77,7 +77,7 @@ void main() {
   vec4 params = load_object(object_base + 6u);
   vec4 view_pos = model_view*vec4(center.xyz, 1.0);
   vec4 clip = projection*view_pos;
-  if (clip.w <= 0.0 || clip.z < -clip.w || clip.z > clip.w || center.w < 1.0/255.0) return;
+  if (clip.w <= 0.0 || clip.z < -clip.w || clip.z > clip.w || center.w <= 0.0) return;
 
   q *= inversesqrt(max(dot(q, q), 1e-20));
   float x = q.x, y = q.y, z = q.z, w = q.w;
@@ -109,7 +109,7 @@ void main() {
   float opacity = center.w;
   float aa = load_data(base + 1u).w;
   if (aa == 0.0 ? params.x != 0.0 : aa == 2.0) opacity *= sqrt(determinant/filtered);
-  if (opacity < 1.0/255.0) return;
+  if (opacity <= 0.0) return;
 
   float mean = 0.5*(a + c);
   float delta = length(vec2(0.5*(a - c), b));
@@ -117,7 +117,7 @@ void main() {
   float minor = max(filtered/major, 1e-8);
   vec2 direction = abs(b) > 1e-6 ? normalize(vec2(b, major - a))
                                 : (a >= c ? vec2(1, 0) : vec2(0, 1));
-  float extent = sqrt(2.0*log(255.0*min(opacity, 0.99)));
+  float extent = 3.0;
   vec2 u = direction*sqrt(major)*extent;
   vec2 v = vec2(-direction.y, direction.x)*sqrt(minor)*extent;
   vec2 ndc = clip.xy/clip.w;
@@ -134,7 +134,7 @@ void main() {
     color = mix(color/12.92, pow((color + 0.055)/1.055, vec3(2.4)),
                 greaterThan(color, vec3(0.04045)));
   }
-  store_result(output_base, vec4(ndc, clip.z/clip.w, min(opacity, 0.99)));
+  store_result(output_base, vec4(ndc, clip.z/clip.w, min(opacity, 1.0)));
   store_result(output_base + 1u, vec4(u*2.0/viewport, v*2.0/viewport));
   store_result(output_base + 2u, vec4(color, extent));
 }
@@ -164,8 +164,9 @@ void main() {
 
 FRAGMENT = r'''
 void main() {
-  float alpha = radiance.w*exp(-0.5*dot(offset, offset));
-  if (alpha < 1.0/255.0) discard;
+  float radius2 = dot(offset, offset);
+  if (radius2 > 9.0) discard;
+  float alpha = radiance.w*exp(-0.5*radius2);
   fragColor = vec4(radiance.xyz*alpha, alpha);
 }
 '''

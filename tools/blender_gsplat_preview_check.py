@@ -119,7 +119,8 @@ def check_math():
     for orthographic in (False, True):
         proj = projection(orthographic)
         output = read_projected(renderer, view, proj)
-        order = depth_order(renderer.centers, np.asarray(view, np.float32)[2, :3])
+        order = depth_order(renderer.centers, np.zeros(3, np.float32),
+                            np.asarray(view, np.float32)[2, :3] if orthographic else None)
         for slot, index in enumerate(order):
             world = np.asarray(model) @ np.append(positions[index], 1)
             clip = np.asarray(proj) @ world
@@ -144,10 +145,13 @@ def check_math():
 
     moved_view = Matrix.Translation((.2,.1,0))
     renderer.prepare(moved_view, projection(), (640,480))
-    assert renderer.sorts == 1, 'Camera translation must not repeat depth sorting'
+    assert renderer.sorts == 3, 'Perspective camera translation must update distance sorting'
+    rotated_view = Matrix.Rotation(.1, 4, 'Y') @ moved_view
+    renderer.prepare(rotated_view, projection(), (640,480))
+    assert renderer.sorts == 3, 'Camera rotation must reuse perspective distance sorting'
     renderer.update_transforms([(points, Matrix.Translation((0,0,-1)) @ model)])
     renderer.prepare(moved_view, projection(), (640,480))
-    assert renderer.uploads == 1 and renderer.sorts == 2
+    assert renderer.uploads == 1 and renderer.sorts == 4
     for key in range(6):
         renderer.prepare(view, projection(), (640,480), key)
     assert len(renderer.views) == 4
@@ -165,8 +169,13 @@ def check_math():
     depths = np.array([-1e20, 4, -0., 0., -1e-20, 4, -2, 1e-20], np.float32)
     centers = np.zeros((len(depths),3), np.float32)
     centers[:,2] = depths
-    np.testing.assert_array_equal(depth_order(centers, np.array([0,0,1], np.float32)),
+    np.testing.assert_array_equal(depth_order(centers, np.zeros(3, np.float32), np.array([0,0,1], np.float32)),
                                   np.argsort(depths, kind='stable'))
+    centers = np.array([[4,0,-2], [0,0,-3], [-4,0,-2]], np.float32)
+    np.testing.assert_array_equal(depth_order(centers, np.zeros(3, np.float32)), [0,2,1])
+    np.testing.assert_array_equal(depth_order(centers, np.array([4,0,0], np.float32)), [2,1,0])
+    for size in (1e-30, 1e30):
+        np.testing.assert_array_equal(depth_order(centers * size, np.zeros(3, np.float32)), [0,2,1])
     from assetkit_blender.bridge.runtime import native_module
     native = native_module()
     if hasattr(native, 'sort_depth'):
@@ -209,6 +218,12 @@ def check_pixels():
     assert 0 < first[31,34,3] < first[31,31,3]
     assert first[0,0,3] == 0, 'A splat must not have visible rectangular corners'
     assert not draw(a, view, proj, depth=0).any(), 'Opaque foreground depth must occlude splats'
+    faint = cloud('faint', [[0,0,-2]], red, opacity=[.001])
+    np.testing.assert_allclose(draw(Renderer([(faint,view)]),view,proj)[31,31,3], .001, atol=1e-6)
+    opaque = cloud('opaque', [[0,0,-2]], red, opacity=[1])
+    np.testing.assert_allclose(draw(Renderer([(opaque,view)]),view,proj)[31,31,3], 1, atol=1e-6)
+    projected = read_projected(Renderer([(faint,view)]), view, proj, (63,63))
+    np.testing.assert_allclose(projected[0,2,3], 3, atol=1e-6)
     linear = cloud('linear', [[0,0,-2]], np.full((1,1,3), (.25-.5)/c0), opacity=[.8])
     linear['assetkit_gaussian_splat_color_space'] = 2
     expected = .25
